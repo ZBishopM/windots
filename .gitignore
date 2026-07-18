@@ -1,0 +1,12 @@
+# Rust build output
+**/target/
+
+# ShadowPlay runtime (clips + rolling buffer are not config)
+ShadowPlay/
+*.mkv
+*.mp4
+*.pcm
+
+# OS cruft
+Thumbs.db
+desktop.ini

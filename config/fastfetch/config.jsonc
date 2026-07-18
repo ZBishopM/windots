@@ -1,0 +1,99 @@
+{
+  "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+  "logo": {
+    "type": "file",
+    "source": "C:\\Users\\obisp\\.config\\fastfetch\\duck.txt",
+    "color": {
+      "1": "yellow",
+      "2": "red",
+      "3": "white",
+      "4": "blue"
+    },
+    "padding": {
+      "top": 1,
+      "right": 3
+    }
+  },
+  "display": {
+    "separator": "  ",
+    "color": {
+      "keys": "yellow",
+      "title": "blue"
+    }
+  },
+  "modules": [
+    {
+      "type": "title",
+      "color": {
+        "user": "yellow",
+        "at": "white",
+        "host": "yellow"
+      }
+    },
+    "separator",
+    {
+      "type": "os",
+      "key": "  OS",
+      "keyColor": "yellow"
+    },
+    {
+      "type": "kernel",
+      "key": "  Kernel",
+      "keyColor": "yellow"
+    },
+    {
+      "type": "host",
+      "key": "  Host",
+      "keyColor": "yellow"
+    },
+    {
+      "type": "uptime",
+      "key": "  Uptime",
+      "keyColor": "yellow"
+    },
+    {
+      "type": "packages",
+      "key": "  Packages",
+      "keyColor": "yellow"
+    },
+    {
+      "type": "terminal",
+      "key": "  Terminal",
+      "keyColor": "yellow"
+    },
+    "break",
+    {
+      "type": "cpu",
+      "key": "  CPU",
+      "keyColor": "red"
+    },
+    {
+      "type": "gpu",
+      "key": "  GPU",
+      "keyColor": "red",
+      "detectionMethod": "opencl",
+      "format": "{2} ({7}) [{6}]"
+    },
+    {
+      "type": "memory",
+      "key": "  Memory",
+      "keyColor": "red"
+    },
+    {
+      "type": "disk",
+      "key": "  Disk",
+      "keyColor": "red"
+    },
+    {
+      "type": "display",
+      "key": "  Display",
+      "keyColor": "red"
+    },
+    "break",
+    {
+      "type": "colors",
+      "paddingLeft": 2,
+      "symbol": "circle"
+    }
+  ]
+}
