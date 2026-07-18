@@ -1,0 +1,10 @@
+# AltSnap.ini is UTF-16LE — treat as binary so git never rewrites its bytes.
+altsnap/AltSnap.ini binary
+
+# Windows script files stay CRLF wherever this is checked out.
+*.ps1  text eol=crlf
+*.ahk  text eol=crlf
+*.bat  text eol=crlf
+*.vbs  text eol=crlf
+*.lua  text eol=crlf
+*.yaml text eol=crlf
