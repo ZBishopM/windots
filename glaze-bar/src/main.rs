@@ -19,6 +19,21 @@ fn trim_ram() {
     }
 }
 
+// Debug log to %TEMP%\glaze-bar.log when GLAZEBAR_LOG is set.
+fn dlog(msg: &str) {
+    if std::env::var_os("GLAZEBAR_LOG").is_some() {
+        if let Ok(dir) = std::env::var("TEMP") {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(format!("{dir}\\glaze-bar.log"))
+            {
+                let _ = writeln!(f, "{msg}");
+            }
+        }
+    }
+}
+
 // ---- GlazeWM IPC types ----
 #[derive(Deserialize, Clone, Default)]
 struct Workspace {
@@ -89,6 +104,7 @@ struct Shared {
 fn net_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
     loop {
         let net = detect_net();
+        dlog(&format!("net = {net:?}"));
         shared.lock().unwrap().net = net;
         ctx.request_repaint();
         std::thread::sleep(Duration::from_secs(10));
@@ -206,24 +222,40 @@ fn weather_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
         if let Some(t) = fetch_weather() {
             shared.lock().unwrap().weather = t;
             ctx.request_repaint();
+            std::thread::sleep(Duration::from_secs(900)); // got it -> refresh in 15 min
+        } else {
+            // Failed (network not up yet at boot, transient API error): retry soon
+            // instead of leaving the slot blank for a full 15 minutes.
+            std::thread::sleep(Duration::from_secs(60));
         }
-        std::thread::sleep(Duration::from_secs(900)); // refresh every 15 min
     }
 }
 fn fetch_weather() -> Option<String> {
-    let geo: serde_json::Value = ureq::get("http://ip-api.com/json/")
-        .call()
-        .ok()?
-        .into_json()
-        .ok()?;
-    let lat = geo["lat"].as_f64()?;
-    let lon = geo["lon"].as_f64()?;
+    let geo: serde_json::Value = match ureq::get("http://ip-api.com/json/").call() {
+        Ok(r) => match r.into_json() {
+            Ok(j) => j,
+            Err(e) => { dlog(&format!("weather geo json err: {e}")); return None; }
+        },
+        Err(e) => { dlog(&format!("weather geo call err: {e}")); return None; }
+    };
+    let (Some(lat), Some(lon)) = (geo["lat"].as_f64(), geo["lon"].as_f64()) else {
+        dlog(&format!("weather no lat/lon: {geo}"));
+        return None;
+    };
     let url = format!(
         "https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m"
     );
-    let w: serde_json::Value = ureq::get(&url).call().ok()?.into_json().ok()?;
-    let t = w["current"]["temperature_2m"].as_f64()?;
-    Some(format!("{}°C", t.round() as i32))
+    let w: serde_json::Value = match ureq::get(&url).call() {
+        Ok(r) => match r.into_json() {
+            Ok(j) => j,
+            Err(e) => { dlog(&format!("weather meteo json err: {e}")); return None; }
+        },
+        Err(e) => { dlog(&format!("weather meteo call err: {e}")); return None; }
+    };
+    match w["current"]["temperature_2m"].as_f64() {
+        Some(t) => { let o = format!("{}°C", t.round() as i32); dlog(&format!("weather ok: {o}")); Some(o) }
+        None => { dlog(&format!("weather no temp: {w}")); None }
+    }
 }
 
 struct BarApp {
