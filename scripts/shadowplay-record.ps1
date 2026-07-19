@@ -42,6 +42,10 @@ function Ffmpeg-Args($mic) {
 }
 
 while ($true) {
+    # Start each capture from a clean buffer so a save never mixes fresh segments
+    # with stale ones left behind by a previous (possibly frozen) run.
+    Get-ChildItem "$buf\seg*.mkv" -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
+
     $mic = Get-Mic
 
     $pl = New-Object Diagnostics.ProcessStartInfo
@@ -56,7 +60,22 @@ while ($true) {
     # Pump loopback stdout -> ffmpeg stdin (binary).
     $pump = $lbProc.StandardOutput.BaseStream.CopyToAsync($ffProc.StandardInput.BaseStream)
 
-    $ffProc.WaitForExit()
+    # Watchdog: if ddagrab loses the desktop (UAC secure desktop, display/mode
+    # change, GPU reset), ffmpeg does NOT exit -- it keeps running but stops
+    # rotating segments, writing one file forever and freezing the buffer. The
+    # newest segment normally changes every ~5s, so if the same file stays newest
+    # for >16s, kill ffmpeg and let this loop start a fresh capture.
+    $lastSeg = ''; $lastRotate = Get-Date
+    while (-not $ffProc.HasExited) {
+        Start-Sleep -Seconds 4
+        $newest = Get-ChildItem "$buf\seg*.mkv" -EA SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1
+        $name = if ($newest) { $newest.Name } else { '' }
+        if ($name -ne $lastSeg) { $lastSeg = $name; $lastRotate = Get-Date }
+        elseif (((Get-Date) - $lastRotate).TotalSeconds -gt 16) {
+            try { $ffProc.Kill() } catch {}
+            break
+        }
+    }
     try { $lbProc.Kill() } catch {}
     try { $ffProc.StandardInput.Close() } catch {}
     Start-Sleep -Seconds 3
