@@ -5,11 +5,22 @@
 # re-detects on each restart. Uses .NET processes so the binary loopback->ffmpeg
 # pipe and the accented dshow device names ("Micrófono ...") are handled cleanly.
 
-$ff  = 'C:\Users\obisp\scoop\shims\ffmpeg.exe'
+# Use the REAL ffmpeg, not the scoop shim: the shim launches ffmpeg as a child,
+# so killing the shim (what $ffProc.Kill() does) orphans the real encoder. The
+# watchdog must be able to actually stop it, or orphaned ffmpeg instances pile up
+# and collide on the same segment files (choppy audio, buffer never fills).
+$ff  = 'C:\Users\obisp\scoop\apps\ffmpeg\current\bin\ffmpeg.exe'
 $lb  = 'C:\Users\obisp\dev\glaze-bar\target\release\sysaudio-loopback.exe'
 $buf = 'C:\Users\obisp\ShadowPlay\buffer'
 $prefer = @('Blue Snowball', 'HyperX')          # priority order
 $exclude = 'Oculus|NVIDIA|Steam|CABLE|VoiceMeeter|Mezcla|Stereo Mix'  # not real mics
+
+# Mic OFF by default. A dshow mic can't share a clock with ddagrab, so mixing it
+# in real time drags the video into heavy frame dup/drop and drifts the audio
+# ~500ms -> choppy A/V. Video + system-audio (loopback) alone is smooth. Set
+# $useMic = $true only if you accept the choppiness (needs a post-sync rework
+# to do properly).
+$useMic = $false
 
 function Get-Mic {
     $out = & $ff -hide_banner -list_devices true -f dshow -i dummy 2>&1 | Out-String
@@ -46,7 +57,7 @@ while ($true) {
     # with stale ones left behind by a previous (possibly frozen) run.
     Get-ChildItem "$buf\seg*.mkv" -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
 
-    $mic = Get-Mic
+    $mic = if ($useMic) { Get-Mic } else { $null }
 
     $pl = New-Object Diagnostics.ProcessStartInfo
     $pl.FileName = $lb; $pl.UseShellExecute = $false; $pl.RedirectStandardOutput = $true; $pl.CreateNoWindow = $true
