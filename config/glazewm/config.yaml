@@ -123,16 +123,28 @@ window_behavior:
       # Whether to show fullscreen windows as always on top.
       shown_on_top: false
 
+# Workspaces 1-5 live on the primary monitor (idx 0, 1920 wide), 6-9 on the
+# secondary (idx 1, 2560 wide). bind_to_monitor makes each spawn deterministic
+# instead of following the focused monitor. Adjust indices to your layout.
 workspaces:
   - name: '1'
+    bind_to_monitor: 0
   - name: '2'
+    bind_to_monitor: 0
   - name: '3'
+    bind_to_monitor: 0
   - name: '4'
+    bind_to_monitor: 0
   - name: '5'
+    bind_to_monitor: 0
   - name: '6'
+    bind_to_monitor: 1
   - name: '7'
+    bind_to_monitor: 1
   - name: '8'
+    bind_to_monitor: 1
   - name: '9'
+    bind_to_monitor: 1
 
 window_rules:
   - commands: ['ignore']

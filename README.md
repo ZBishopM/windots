@@ -75,9 +75,11 @@ la pantalla y ningún hook lo intercepta); cycle-focus en `SUPER+Shift+Space` po
 
 ## Pasos manuales
 
-- **Command Palette en Win+Space**: instala **PowerToys**, activa *Command Palette*, y
-  pon su atajo en `Win+Space` con *low-level hotkey* activado (así suprime el cambio de
-  idioma). Alternativa: cualquier launcher.
+- **Command Palette en Win+Space**: instala **PowerToys**, activa *Command Palette*.
+  Windows dispara el cambio de idioma en `Win+Space` aunque el *low-level hotkey* esté
+  activo, así que: pon el atajo de CmdPal en **`Win+Ctrl+Space`**, y el `wezterm-hotkey.ahk`
+  reenvía `Win+Space` → `Win+Ctrl+Space` (bloqueando el cambio de idioma). Alternativa:
+  cualquier launcher.
 - **Layout de monitores**: las posiciones están **hardcodeadas a 1920 (principal) + 2560
   (secundario)**. Ajusta a tus pantallas:
   - `~/.glzr/glazewm/config.yaml` → `startup_commands`: los `--x`/`--width` de las 2 barras.

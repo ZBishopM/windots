@@ -12,6 +12,16 @@
 }
 
 ; ------------------------------------------------------------
+; Win+Space -> Command Palette (CmdPal), NOT the OS language switch.
+; Windows fires its input-language switcher on Win+Space even with a
+; low-level hook, so AHK claims the combo (suppressing the switch) and
+; forwards to CmdPal, which must be set to listen on Win+Ctrl+Space.
+; ------------------------------------------------------------
+#Space:: {
+    Send '#^{Space}'
+}
+
+; ------------------------------------------------------------
 ; ShadowPlay: Alt+F10 saves the last ~30s from the rolling buffer.
 ; ------------------------------------------------------------
 !F10:: {
