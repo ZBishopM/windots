@@ -13,7 +13,7 @@ Requiere **Windows 11** y **PowerShell 7** (`pwsh`). Un paso pide admin (UAC) pa
 desactivar servicios; lo demás corre como usuario normal.
 
 ```powershell
-git clone <tu-repo> $HOME\dotfiles
+git clone https://github.com/ZBishopM/windots $HOME\dotfiles
 cd $HOME\dotfiles
 pwsh -ExecutionPolicy Bypass -File .\install.ps1
 ```
