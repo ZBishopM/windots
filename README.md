@@ -43,6 +43,7 @@ Cierra sesión y vuelve a entrar (o reinicia) para que arranque todo.
 | **ShadowPlay** | Buffer rodante de 30 s (ffmpeg AV1 + audio) | `~/.config/shadowplay-*` |
 | **shadowplay-notify** | Toast animado al guardar un clip (Rust) | binario en `~/dev/glaze-bar` |
 | **sysaudio-loopback** | Captura audio del sistema (WASAPI, Rust) | binario en `~/dev/glaze-bar` |
+| **rice-supervisor** | Watchdog: revive cualquier componente que muera (<60s) | `~/.config/rice-supervisor.ps1` |
 
 Los **3 binarios Rust** viven en un solo proyecto cargo: `glaze-bar`, `shadowplay-notify`,
 `sysaudio-loopback`.
