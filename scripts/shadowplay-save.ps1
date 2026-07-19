@@ -21,6 +21,14 @@ $dest = Join-Path $out "replay_$ts.mp4"
 & $ff -hide_banner -loglevel error -f concat -safe 0 -i $listFile -c copy -y $dest 2>$null
 
 if (Test-Path $dest) {
-    Start-Process 'C:\Users\obisp\dev\glaze-bar\target\release\shadowplay-notify.exe' -ArgumentList "`"$dest`""
+    # Show the toast on the monitor under the cursor. With cursor_jump following
+    # monitor focus, that's the monitor the user is looking at, so the toast
+    # follows across workspaces instead of always landing on the primary.
+    # All monitors are 100% scale -> virtual-desktop pixels map 1:1.
+    Add-Type -AssemblyName System.Windows.Forms
+    $wa = ([System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position)).WorkingArea
+    $nx = $wa.Right - 420 - 10   # toast width 420 + 10px right margin
+    $ny = $wa.Top + 50
+    Start-Process 'C:\Users\obisp\dev\glaze-bar\target\release\shadowplay-notify.exe' -ArgumentList "`"$dest`"", $nx, $ny
     Write-Output $dest
 }

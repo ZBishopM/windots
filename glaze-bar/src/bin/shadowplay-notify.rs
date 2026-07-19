@@ -141,7 +141,12 @@ impl eframe::App for Notify {
 }
 
 fn main() -> eframe::Result<()> {
+    // Args: 1 = clip path, 2 = x, 3 = y (top-left of the toast, virtual-desktop
+    // pixels). x/y let the caller place it on the focused monitor; without them
+    // it falls back to the primary monitor's top-right (all monitors are 100%).
     let path = std::env::args().nth(1).unwrap_or_default();
+    let x = std::env::args().nth(2).and_then(|s| s.parse::<f32>().ok()).unwrap_or(1490.0);
+    let y = std::env::args().nth(3).and_then(|s| s.parse::<f32>().ok()).unwrap_or(50.0);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_decorations(false)
@@ -150,7 +155,7 @@ fn main() -> eframe::Result<()> {
             .with_resizable(false)
             .with_transparent(true)
             .with_inner_size([420.0, 130.0])
-            .with_position([1490.0, 50.0])
+            .with_position([x, y])
             .with_title("shadowplay-notify"),
         ..Default::default()
     };
