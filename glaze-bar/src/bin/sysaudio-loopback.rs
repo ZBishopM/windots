@@ -48,8 +48,6 @@ unsafe fn run() -> Result<()> {
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::with_capacity(1 << 16, stdout.lock());
 
-    let start = std::time::Instant::now();
-    let mut out_frames: u64 = 0; // stereo frames written at OUT_RATE
     let ratio = OUT_RATE / in_rate; // out samples per in sample
     let mut resamp_pos = 0.0f64; // fractional read position for linear resample
     let mut prev_l = 0.0f32;
@@ -86,13 +84,11 @@ unsafe fn run() -> Result<()> {
                 // Linear resample from in_rate -> OUT_RATE.
                 if (ratio - 1.0).abs() < 1e-6 {
                     write_frame(&mut out, l, r)?;
-                    out_frames += 1;
                 } else {
                     // emit output samples until resamp_pos passes this input frame
                     while resamp_pos < 1.0 {
                         let t = resamp_pos as f32;
                         write_frame(&mut out, prev_l + (l - prev_l) * t, prev_r + (r - prev_r) * t)?;
-                        out_frames += 1;
                         resamp_pos += 1.0 / ratio;
                     }
                     resamp_pos -= 1.0;
@@ -103,15 +99,14 @@ unsafe fn run() -> Result<()> {
             capture.ReleaseBuffer(frames)?;
         }
 
-        // Real-time silence padding to keep the stream continuous.
-        let expected = (start.elapsed().as_secs_f64() * OUT_RATE) as u64;
-        if out_frames < expected {
-            let pad = (expected - out_frames).min(OUT_RATE as u64); // cap at 1s
-            for _ in 0..pad {
-                write_frame(&mut out, 0.0, 0.0)?;
-            }
-            out_frames += pad;
-        }
+        // NO wallclock silence-padding. It used to pad zeros to catch up to the
+        // wallclock, but when ffmpeg reads this pipe in bursts (it's busy with
+        // the video), our write() blocks, wallclock races ahead, and on unblock
+        // we injected silence *between* real samples -> ~30% silence, choppy
+        // audio. WASAPI loopback already delivers continuous packets (including
+        // SILENT-flagged ones, written as zeros above) while any session is
+        // active, so the stream stays continuous on its own. ffmpeg keeps A/V in
+        // sync via aresample=async on its side.
         out.flush().ok();
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
