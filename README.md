@@ -114,6 +114,10 @@ Tras editar un binario Rust: `cd ~/dev/glaze-bar; cargo build --release` y reini
   pesa ~100 MB.
 - `sysaudio-loopback` captura el **default render endpoint** (lo que suene), sin drivers
   de terceros ni cambiar tu routing.
+- **MPO desactivado** (`OverlayTestMode=5`): los overlays de hardware para video (MPO)
+  saltan la composición de DWM, así que Desktop Duplication (ddagrab) **no los ve** y el
+  ShadowPlay graba un **frame congelado** cuando reproduces video acelerado. El `install.ps1`
+  lo apaga (paso admin); **requiere reboot**. Revertir: `reg delete "HKLM\SOFTWARE\Microsoft\Windows\Dwm" /v OverlayTestMode /f`.
 
 ## Estructura del repo
 

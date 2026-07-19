@@ -104,13 +104,18 @@ Ok 'Alt+Shift language switch disabled (use Win+Space for lang / Command Palette
 [Environment]::SetEnvironmentVariable('DOTNET_CLI_TELEMETRY_OPTOUT', '1', 'User')
 Ok 'telemetry optout'
 
-# ---------------------------------------------------------------- 7. optional services (admin)
-Say '7/7  Disable unused services (optional, needs admin)'
+# ---------------------------------------------------------------- 7. system tweaks (admin)
+Say '7/7  Disable unused services + MPO (optional, needs admin)'
 $svc = 'DiagTrack', 'SysMain', 'DPS', 'Spooler'
-$disableCmd = ($svc | ForEach-Object { "Set-Service $_ -StartupType Disabled -EA SilentlyContinue; Stop-Service $_ -Force -EA SilentlyContinue" }) -join '; '
+$adminCmd = ($svc | ForEach-Object { "Set-Service $_ -StartupType Disabled -EA SilentlyContinue; Stop-Service $_ -Force -EA SilentlyContinue" }) -join '; '
+# Disable Multi-Plane Overlay: hardware video overlays (MPO) bypass DWM
+# composition, so Desktop Duplication (ddagrab) can't see them and ShadowPlay
+# captures a FROZEN frame whenever a hardware-accelerated video plays. Forcing
+# DWM to composite everything fixes it. Takes effect after a reboot.
+$adminCmd += '; reg add "HKLM\SOFTWARE\Microsoft\Windows\Dwm" /v OverlayTestMode /t REG_DWORD /d 5 /f'
 try {
-    Start-Process pwsh -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile', '-Command', $disableCmd
-    Ok 'services disabled (DiagTrack, SysMain, DPS, Spooler)'
+    Start-Process pwsh -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile', '-Command', $adminCmd
+    Ok 'services disabled + MPO off (reboot to apply MPO)'
 } catch { Ok 'skipped (no elevation) - see README to do it manually' }
 
 Write-Host ''
