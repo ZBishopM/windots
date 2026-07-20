@@ -32,9 +32,9 @@ while ($true) {
     if (-not (AliveCmd '*glazewm-dwindle*')) {
         Start-Process pwsh -ArgumentList '-NoProfile','-WindowStyle','Hidden','-File',"$cfg\glazewm-dwindle.ps1" -WindowStyle Hidden
     }
-    # ShadowPlay rolling recorder (only launch if none -> never duplicates)
-    if (-not (AliveCmd '*shadowplay-record.ps1*')) {
-        Start-Process wscript.exe -ArgumentList "`"$cfg\shadowplay-record.vbs`""
+    # ShadowPlay WGC recorder (only launch if none -> never duplicates)
+    if (-not (Alive 'shadowplay-wgc')) {
+        Start-Process wscript.exe -ArgumentList "`"$cfg\shadowplay-wgc.vbs`""
     }
     # glaze-bar: one per monitor. If both died, relaunch both with their offsets.
     if ((AliveCount 'glaze-bar') -eq 0 -and (Test-Path $bar)) {

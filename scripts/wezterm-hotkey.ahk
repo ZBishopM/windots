@@ -15,7 +15,7 @@
 ; Win+Space -> Command Palette (CmdPal), NOT the OS language switch.
 ; Windows fires its input-language switcher on Win+Space even with a
 ; low-level hook, so AHK claims the combo (suppressing the switch) and
-; forwards to CmdPal, which must be set to listen on Win+Ctrl+Space.
+; forwards to CmdPal, which listens on Win+Ctrl+Space.
 ; ------------------------------------------------------------
 #Space:: {
     Send '#^{Space}'
@@ -26,5 +26,5 @@
 ; ------------------------------------------------------------
 !F10:: {
     ; Save runs the concat then pops the custom Rust notification itself.
-    Run('pwsh -NoProfile -WindowStyle Hidden -File "C:\Users\obisp\.config\shadowplay-save.ps1"', , 'Hide')
+    Run('pwsh -NoProfile -WindowStyle Hidden -File "C:\Users\obisp\.config\shadowplay-wgc-save.ps1"', , 'Hide')
 }

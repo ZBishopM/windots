@@ -22,7 +22,6 @@ use windows_capture::{
 
 const SEG_SECS: u64 = 5;
 const RING: usize = 8;
-const LOOPBACK: &str = r"C:\Users\obisp\dev\glaze-bar\target\release\sysaudio-loopback.exe";
 
 type Err = Box<dyn std::error::Error + Send + Sync>;
 
@@ -117,8 +116,13 @@ impl GraphicsCaptureApiHandler for Rec {
 fn spawn_audio(audio: Arc<Mutex<Vec<u8>>>) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    // Sibling binary next to this exe (both built into target/release).
+    let lb = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|p| p.join("sysaudio-loopback.exe")))
+        .unwrap_or_else(|| "sysaudio-loopback.exe".into());
     std::thread::spawn(move || {
-        let Ok(mut child) = std::process::Command::new(LOOPBACK)
+        let Ok(mut child) = std::process::Command::new(lb)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .creation_flags(CREATE_NO_WINDOW)
