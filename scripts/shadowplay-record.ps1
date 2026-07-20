@@ -45,7 +45,7 @@ function Ffmpeg-Args($mic) {
     } else {
         '-map','0:v:0','-map','1:a:0' | ForEach-Object { $a.Add($_) }
     }
-    '-c:v','av1_nvenc','-preset','p6','-tune','hq','-rc','vbr','-cq','19','-b:v','0','-g','300',
+    '-c:v','av1_nvenc','-preset','p4','-tune','hq','-rc','vbr','-cq','19','-b:v','0','-g','300',
     '-c:a','aac','-b:a','160k',
     '-f','segment','-segment_format','matroska','-segment_time','5','-segment_wrap','8','-reset_timestamps','1',
     '-y',"$buf\seg%02d.mkv" | ForEach-Object { $a.Add($_) }
