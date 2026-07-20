@@ -96,6 +96,10 @@ impl GraphicsCaptureApiHandler for Rec {
             self.enc.take().unwrap().finish()?;
             self.idx = (self.idx + 1) % RING;
             self.enc = Some(make_encoder(&self.dir, self.idx, self.w, self.h)?);
+            // Drop audio buffered during finish()/make_encoder (the same window
+            // where no video frames were captured) so A/V stay aligned instead of
+            // audio drifting ahead by the rotation gap each segment.
+            self.audio.lock().unwrap().clear();
             self.seg_start = Instant::now();
         }
         Ok(())
