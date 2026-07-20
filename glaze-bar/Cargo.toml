@@ -12,6 +12,9 @@ chrono = "0.4"
 sysinfo = "0.32"
 ureq = { version = "2", features = ["json"] }
 windows = { version = "0.58", features = ["Win32_Media_Audio", "Win32_System_Com", "Win32_Foundation", "Win32_Media_KernelStreaming"] }
+# cava (terminal audio visualizer) only:
+rustfft = "6"
+crossterm = "0.28"
 
 [profile.release]
 opt-level = "z"

@@ -25,3 +25,7 @@ function admin {
         sudo pwsh -NoExit -Command ($args -join ' ')
     }
 }
+
+# cava: terminal audio spectrum visualizer (system audio -> FFT bars, 165fps).
+# Quit with q / Esc / Ctrl+C.
+function cava { & "$HOME\dev\glaze-bar\target\release\cava.exe" @args }
