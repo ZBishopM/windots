@@ -21,17 +21,8 @@ fn trim_ram() {
     }
 }
 
-const IN_DUR: f32 = 0.32; // materialize
 const HOLD: f32 = 5.0; // visible
-const OUT_DUR: f32 = 0.40; // disintegrate
-
-fn ease_out_cubic(t: f32) -> f32 {
-    let u = 1.0 - t;
-    1.0 - u * u * u
-}
-fn ease_in_cubic(t: f32) -> f32 {
-    t * t * t
-}
+const OUT_DUR: f32 = 0.45; // fade out
 
 struct Notify {
     path: String,
@@ -76,18 +67,17 @@ impl eframe::App for Notify {
             }
         }
 
-        // Animation curve: alpha 0..1 and a slide/drift offset.
+        // Appear instantly at full opacity; fade out cleanly (cubic ease-out,
+        // no slide or drift).
         let (alpha, off_x, off_y) = if let Some(c) = self.closing_at {
             let p = (c.elapsed().as_secs_f32() / OUT_DUR).clamp(0.0, 1.0);
-            let e = ease_in_cubic(p);
             if p >= 1.0 {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
-            (1.0 - e, e * 26.0, -e * 16.0) // fade out, drift right + up
+            let a = 1.0 - p;
+            (a * a * a, 0.0, 0.0) // fade out
         } else {
-            let p = (t / IN_DUR).clamp(0.0, 1.0);
-            let e = ease_out_cubic(p);
-            ((e * 0.15 + e * e * 0.85), (1.0 - e) * 44.0, 0.0) // faint->solid, slide from right
+            (1.0, 0.0, 0.0) // visible immediately
         };
 
         // Apply the animation alpha to a colour.
