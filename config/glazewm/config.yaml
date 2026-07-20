@@ -69,7 +69,7 @@ window_effects:
     # Remove the title bar from the window's frame. Note that this can
     # cause rendering issues for some applications.
     hide_title_bar:
-      enabled: false
+      enabled: true
 
     # Change the corner style of the window's frame.
     # ** Exclusive to Windows 11 due to API limitations.
@@ -91,7 +91,7 @@ window_effects:
       enabled: true
       color: '#a1a1a1'
     hide_title_bar:
-      enabled: false
+      enabled: true
     corner_style:
       enabled: false
       style: 'square'
@@ -125,7 +125,7 @@ window_behavior:
 
 # Workspaces 1-5 live on the primary monitor (idx 0, 1920 wide), 6-9 on the
 # secondary (idx 1, 2560 wide). bind_to_monitor makes each spawn deterministic
-# instead of following the focused monitor. Adjust indices to your layout.
+# instead of following the focused monitor.
 workspaces:
   - name: '1'
     bind_to_monitor: 0
