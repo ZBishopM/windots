@@ -2,6 +2,11 @@
 // audio from the sibling sysaudio-loopback.exe (WASAPI loopback, s16le 48 kHz
 // stereo), runs a windowed FFT, and draws log-frequency bars with a vertical
 // truecolor gradient. Targets 165 fps. Quit: q / Esc / Ctrl+C.
+//
+// Motion is smoothed in three cheap O(bars) passes so it flows instead of
+// flickering: a temporal EMA on the spectrum (kills frame jitter), monstercat
+// spatial spreading (neighbours move together -> smooth hills, not chaos), and a
+// per-bar spring-damper that gives a natural rise + bounce and settles softly.
 
 use crossterm::{
     cursor::{Hide, Show},
@@ -19,14 +24,16 @@ const FFT_SIZE: usize = 2048;
 const MIN_FREQ: f32 = 30.0;
 const MAX_FREQ: f32 = 16000.0;
 const TARGET_FPS: u64 = 165;
-const GRAVITY: f32 = 0.86; // fraction a bar keeps each frame while falling
 const BAR_W: usize = 2;
 const GAP: usize = 1;
 
-#[link(name = "winmm")]
-extern "system" {
-    fn timeBeginPeriod(uperiod: u32) -> u32;
-}
+// Smoothing / motion.
+const TEMPORAL: f32 = 0.35; // weight kept from the previous spectrum (EMA)
+const MONSTERCAT: f32 = 1.6; // spatial spread: a peak bleeds into neighbours / this^dist
+const SPREAD: i32 = 4; // neighbour radius for the spatial pass
+const SPRING_K: f32 = 210.0; // stiffness (snappiness)
+const SPRING_D: f32 = 13.0; // damping (lower = more bounce)
+const AGC_TARGET: f32 = 0.78; // normalize the loudest bar here (leaves room for overshoot)
 
 fn main() {
     // Windows sleep granularity is ~15ms by default -> would cap us near 64 fps.
@@ -41,7 +48,6 @@ fn main() {
     let mut stdout = std::io::stdout();
     let _ = terminal::enable_raw_mode();
     let _ = execute!(stdout, EnterAlternateScreen, Hide);
-    // Restore the terminal even on panic (panic=abort still runs the hook).
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let mut so = std::io::stdout();
@@ -58,13 +64,19 @@ fn main() {
     let blocks = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
     let frame_time = Duration::from_micros(1_000_000 / TARGET_FPS);
-    let mut bars: Vec<f32> = Vec::new();
+    // Per-bar state (resized when the terminal width changes).
+    let mut spec: Vec<f32> = Vec::new(); // temporally-smoothed spectrum
+    let mut sm: Vec<f32> = Vec::new(); // spatially-smoothed target
+    let mut pos: Vec<f32> = Vec::new(); // rendered bar height (spring position)
+    let mut vel: Vec<f32> = Vec::new(); // spring velocity
     let mut agc = 1.0f32;
+    let mut last = Instant::now();
 
     'main: loop {
         let t0 = Instant::now();
+        let dt = (t0 - last).as_secs_f32().clamp(0.0001, 0.02);
+        last = t0;
 
-        // Quit keys.
         while event::poll(Duration::ZERO).unwrap_or(false) {
             if let Ok(Event::Key(k)) = event::read() {
                 let quit = matches!(k.code, KeyCode::Char('q') | KeyCode::Esc)
@@ -83,8 +95,11 @@ fn main() {
         }
         let unit = BAR_W + GAP;
         let nbars = ((cols + GAP) / unit).max(1);
-        if bars.len() != nbars {
-            bars = vec![0.0; nbars];
+        if spec.len() != nbars {
+            spec = vec![0.0; nbars];
+            sm = vec![0.0; nbars];
+            pos = vec![0.0; nbars];
+            vel = vec![0.0; nbars];
         }
 
         // FFT of the latest window.
@@ -95,7 +110,7 @@ fn main() {
         fft.process(&mut buf);
         let mags: Vec<f32> = buf[..FFT_SIZE / 2].iter().map(|c| c.norm()).collect();
 
-        // Log-frequency bins -> bar targets, with fast-attack / gravity-release.
+        // Per-bar raw magnitude (peak in a log-frequency band), sqrt-compressed.
         let mut frame_peak = 0.0f32;
         for b in 0..nbars {
             let f_lo = MIN_FREQ * (MAX_FREQ / MIN_FREQ).powf(b as f32 / nbars as f32);
@@ -108,21 +123,51 @@ fn main() {
             for m in &mags[bin_lo..bin_hi] {
                 v = v.max(*m);
             }
-            let target = v.sqrt() * agc; // sqrt compresses the dynamic range
-            frame_peak = frame_peak.max(target);
-            if target > bars[b] {
-                bars[b] = target;
-            } else {
-                bars[b] *= GRAVITY;
+            let raw = v.sqrt();
+            frame_peak = frame_peak.max(raw * agc);
+            // Temporal EMA: blend into the running spectrum to kill flicker.
+            spec[b] = spec[b] * TEMPORAL + raw * agc * (1.0 - TEMPORAL);
+        }
+
+        // Auto-gain: normalize the loudest bar toward AGC_TARGET. Fast when
+        // clipping, slow when quiet; untouched on silence (no runaway).
+        if frame_peak > 0.001 {
+            let want = AGC_TARGET / frame_peak * agc;
+            agc += (want - agc) * if want < agc { 0.12 } else { 0.02 };
+            agc = agc.clamp(0.001, 100_000.0);
+        }
+
+        // Spatial monstercat: each bar bleeds into its neighbours with distance
+        // falloff, so peaks become smooth hills instead of lone spikes.
+        for b in 0..nbars {
+            sm[b] = spec[b];
+        }
+        for b in 0..nbars {
+            let base = spec[b];
+            for k in 1..=SPREAD {
+                let f = base / MONSTERCAT.powi(k);
+                let lo = b as i32 - k;
+                let hi = b as i32 + k;
+                if lo >= 0 && f > sm[lo as usize] {
+                    sm[lo as usize] = f;
+                }
+                if (hi as usize) < nbars && f > sm[hi as usize] {
+                    sm[hi as usize] = f;
+                }
             }
         }
 
-        // Auto-gain: normalize the tallest bar toward ~0.9. Attack fast when
-        // clipping, release slowly when quiet; never touch it on silence.
-        if frame_peak > 0.001 {
-            let want = 0.9 / frame_peak * agc;
-            agc += (want - agc) * if want < agc { 0.30 } else { 0.02 };
-            agc = agc.clamp(0.001, 100_000.0);
+        // Spring-damper toward the target: smooth rise, gentle bounce, soft fall.
+        for b in 0..nbars {
+            let accel = (sm[b] - pos[b]) * SPRING_K - vel[b] * SPRING_D;
+            vel[b] += accel * dt;
+            pos[b] += vel[b] * dt;
+            if pos[b] < 0.0 {
+                pos[b] = 0.0;
+                if vel[b] < 0.0 {
+                    vel[b] = 0.0;
+                }
+            }
         }
 
         // Render one string, write once.
@@ -134,7 +179,7 @@ fn main() {
             let (cr, cg, cb) = grad(frac);
             frame.push_str(&format!("\x1b[38;2;{cr};{cg};{cb}m"));
             for b in 0..nbars {
-                let h = (bars[b].min(1.0) * rows as f32 * 8.0) as i32;
+                let h = (pos[b].min(1.0) * rows as f32 * 8.0) as i32;
                 let level = (h - (from_bottom as i32) * 8).clamp(0, 8) as usize;
                 let ch = blocks[level];
                 for _ in 0..BAR_W {
@@ -154,9 +199,9 @@ fn main() {
         let _ = stdout.write_all(frame.as_bytes());
         let _ = stdout.flush();
 
-        let dt = t0.elapsed();
-        if dt < frame_time {
-            std::thread::sleep(frame_time - dt);
+        let elapsed = t0.elapsed();
+        if elapsed < frame_time {
+            std::thread::sleep(frame_time - elapsed);
         }
     }
 
@@ -207,4 +252,9 @@ fn spawn_audio(ring: Arc<Mutex<Vec<f32>>>) {
             }
         }
     });
+}
+
+#[link(name = "winmm")]
+extern "system" {
+    fn timeBeginPeriod(uperiod: u32) -> u32;
 }
