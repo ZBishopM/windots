@@ -63,6 +63,17 @@ cargo build --release
 Pop-Location
 Ok "built -> $proj\target\release\"
 
+# WGC recorder (separate cargo project; windows-capture pulls a newer windows crate).
+$wgc = "$home_\dev\shadowplay-wgc"
+New-Item -ItemType Directory -Force $wgc | Out-Null
+Copy-Item "$repo\shadowplay-wgc\*" $wgc -Recurse -Force
+Push-Location $wgc
+cargo build --release
+Pop-Location
+# The recorder spawns a sibling sysaudio-loopback.exe -> copy glaze-bar's build next to it.
+Copy-Item "$proj\target\release\sysaudio-loopback.exe" "$wgc\target\release\sysaudio-loopback.exe" -Force
+Ok "built WGC recorder -> $wgc\target\release\"
+
 # ---------------------------------------------------------------- 3. configs
 Say '3/7  Deploy configs'
 Deploy "$repo\wezterm\.wezterm.lua"                       "$home_\.wezterm.lua"
@@ -70,7 +81,7 @@ Deploy "$repo\config\fastfetch\config.jsonc"              "$home_\.config\fastfe
 Deploy "$repo\config\fastfetch\duck.txt"                  "$home_\.config\fastfetch\duck.txt"
 Deploy "$repo\config\glazewm\config.yaml"                 "$home_\.glzr\glazewm\config.yaml"
 Deploy "$repo\powershell\Microsoft.PowerShell_profile.ps1" "$home_\Documents\PowerShell\Microsoft.PowerShell_profile.ps1"
-foreach ($f in 'glazewm-dwindle.ps1', 'wezterm-hotkey.ahk', 'shadowplay-record.ps1', 'shadowplay-record.vbs', 'shadowplay-save.ps1', 'rice-supervisor.ps1', 'rice-supervisor.vbs') {
+foreach ($f in 'glazewm-dwindle.ps1', 'wezterm-hotkey.ahk', 'shadowplay-record.ps1', 'shadowplay-record.vbs', 'shadowplay-save.ps1', 'shadowplay-wgc-save.ps1', 'shadowplay-wgc.vbs', 'rice-supervisor.ps1', 'rice-supervisor.vbs') {
     Deploy "$repo\scripts\$f" "$home_\.config\$f"
 }
 # AltSnap.ini is UTF-16 and has no paths -> copy raw, into scoop persist.
@@ -84,7 +95,7 @@ if (Test-Path (Split-Path $asPersist)) {
 
 # ---------------------------------------------------------------- 4. folders
 Say '4/7  ShadowPlay folders'
-New-Item -ItemType Directory -Force "$home_\ShadowPlay\buffer", "$home_\ShadowPlay\clips" | Out-Null
+New-Item -ItemType Directory -Force "$home_\ShadowPlay\buffer", "$home_\ShadowPlay\wgc-buffer", "$home_\ShadowPlay\clips" | Out-Null
 
 # ---------------------------------------------------------------- 5. autostart
 Say '5/7  Autostart'
@@ -92,7 +103,7 @@ $scoopApps = "$home_\scoop\apps"
 Shortcut 'GlazeWM'         "$scoopApps\glazewm\current\GlazeWM.exe"
 Shortcut 'AltSnap'         "$scoopApps\altsnap\current\AltSnap.exe"
 Shortcut 'wezterm-hotkey'  "$scoopApps\autohotkey\current\v2\AutoHotkey64.exe" "`"$home_\.config\wezterm-hotkey.ahk`""
-Shortcut 'ShadowPlay'      'wscript.exe' "`"$home_\.config\shadowplay-record.vbs`""
+Shortcut 'ShadowPlay'      'wscript.exe' "`"$home_\.config\shadowplay-wgc.vbs`""  # WGC recorder (ddagrab shadowplay-record.vbs kept for the v1.0 fallback)
 # Supervisor: relaunches any of the above that dies (crash, kill, GlazeWM restart).
 Shortcut 'RiceSupervisor'  'wscript.exe' "`"$home_\.config\rice-supervisor.vbs`""
 

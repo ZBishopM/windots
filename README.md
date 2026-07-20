@@ -40,7 +40,8 @@ Cierra sesión y vuelve a entrar (o reinicia) para que arranque todo.
 | **dwindle** | Layout fibonacci vía IPC de GlazeWM | `~/.config/glazewm-dwindle.ps1` |
 | **glaze-bar** | Barra de estado nativa (Rust/egui), 1 por monitor | `~/dev/glaze-bar` |
 | **AltSnap** | Mover/redimensionar con SUPER+arrastrar | `~/scoop/.../AltSnap.ini` |
-| **ShadowPlay** | Buffer rodante de 30 s (ffmpeg AV1 + audio) | `~/.config/shadowplay-*` |
+| **ShadowPlay (WGC)** | Buffer rodante de 30 s vía Windows.Graphics.Capture (HEVC hardware, ~38% menos GPU que ddagrab) + audio del sistema | `~/dev/shadowplay-wgc`, `~/.config/shadowplay-wgc-*` |
+| **ShadowPlay (ddagrab)** | Grabador anterior (ffmpeg AV1 + loopback). Fallback del tag v1.0 | `~/.config/shadowplay-record.*` |
 | **shadowplay-notify** | Toast animado al guardar un clip (Rust) | binario en `~/dev/glaze-bar` |
 | **sysaudio-loopback** | Captura audio del sistema (WASAPI, Rust) | binario en `~/dev/glaze-bar` |
 | **rice-supervisor** | Watchdog: revive cualquier componente que muera (<60s) | `~/.config/rice-supervisor.ps1` |
