@@ -1,10 +1,19 @@
 // WASAPI loopback capture of the default render endpoint (whatever the system
 // plays, incl. a USB headset) -> raw s16le stereo @ 48000 Hz on stdout, so the
 // ShadowPlay ffmpeg can mux it with the video. Native, no third-party driver,
-// no routing change. Pads silence in real time so audio stays A/V-synced even
-// when nothing is playing.
+// no routing change.
+//
+// Keeps the audio stream CONTINUOUS in two ways so ffmpeg's muxer never starves
+// (which would freeze the whole recording):
+//   1. When the endpoint is idle (nothing playing), WASAPI loopback delivers no
+//      packets at all -> we emit wallclock-paced silence. This runs ONLY when no
+//      real packets are pending, so it never injects silence between real samples
+//      (that made audio choppy in an earlier version).
+//   2. If the endpoint is invalidated (the default device changes, e.g. a video
+//      switches audio output), we reopen it instead of dying.
 
 use std::io::Write;
+use std::time::{Duration, Instant};
 use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Media::Audio::*;
@@ -13,12 +22,22 @@ use windows::Win32::System::Com::*;
 const OUT_RATE: f64 = 48000.0;
 
 fn main() -> Result<()> {
-    unsafe { run() }
+    unsafe {
+        CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
+        let stdout = std::io::stdout();
+        let mut out = std::io::BufWriter::with_capacity(1 << 16, stdout.lock());
+        // Reopen on any capture error (device invalidated / format change) so the
+        // pipe to ffmpeg never permanently closes.
+        loop {
+            if let Err(e) = capture(&mut out) {
+                eprintln!("loopback: {e:?}; reopening endpoint");
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        }
+    }
 }
 
-unsafe fn run() -> Result<()> {
-    CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
-
+unsafe fn capture<W: Write>(out: &mut W) -> Result<()> {
     let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
     let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
     let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
@@ -45,21 +64,21 @@ unsafe fn run() -> Result<()> {
     let capture: IAudioCaptureClient = client.GetService()?;
     client.Start()?;
 
-    let stdout = std::io::stdout();
-    let mut out = std::io::BufWriter::with_capacity(1 << 16, stdout.lock());
-
     let ratio = OUT_RATE / in_rate; // out samples per in sample
     let mut resamp_pos = 0.0f64; // fractional read position for linear resample
     let mut prev_l = 0.0f32;
     let mut prev_r = 0.0f32;
+    let mut last_emit = Instant::now(); // wallclock ref for idle silence pacing
 
     loop {
+        let mut got_real = false;
         // Drain all currently available packets.
         loop {
             let avail = capture.GetNextPacketSize()?;
             if avail == 0 {
                 break;
             }
+            got_real = true;
             let mut data: *mut u8 = std::ptr::null_mut();
             let mut frames: u32 = 0;
             let mut flags: u32 = 0;
@@ -83,12 +102,11 @@ unsafe fn run() -> Result<()> {
                 }
                 // Linear resample from in_rate -> OUT_RATE.
                 if (ratio - 1.0).abs() < 1e-6 {
-                    write_frame(&mut out, l, r)?;
+                    write_frame(out, l, r)?;
                 } else {
-                    // emit output samples until resamp_pos passes this input frame
                     while resamp_pos < 1.0 {
                         let t = resamp_pos as f32;
-                        write_frame(&mut out, prev_l + (l - prev_l) * t, prev_r + (r - prev_r) * t)?;
+                        write_frame(out, prev_l + (l - prev_l) * t, prev_r + (r - prev_r) * t)?;
                         resamp_pos += 1.0 / ratio;
                     }
                     resamp_pos -= 1.0;
@@ -99,16 +117,25 @@ unsafe fn run() -> Result<()> {
             capture.ReleaseBuffer(frames)?;
         }
 
-        // NO wallclock silence-padding. It used to pad zeros to catch up to the
-        // wallclock, but when ffmpeg reads this pipe in bursts (it's busy with
-        // the video), our write() blocks, wallclock races ahead, and on unblock
-        // we injected silence *between* real samples -> ~30% silence, choppy
-        // audio. WASAPI loopback already delivers continuous packets (including
-        // SILENT-flagged ones, written as zeros above) while any session is
-        // active, so the stream stays continuous on its own. ffmpeg keeps A/V in
-        // sync via aresample=async on its side.
+        if got_real {
+            // Real audio flowed this pass -> reset the silence clock so we never
+            // inject silence between real samples (the old choppy-audio bug).
+            last_emit = Instant::now();
+        } else {
+            // Endpoint idle: no loopback packets at all. Emit wallclock-paced
+            // silence so ffmpeg's audio timeline keeps advancing and its muxer
+            // doesn't stall (which froze the whole recording).
+            let elapsed = last_emit.elapsed().as_secs_f64().min(0.5); // cap bursts
+            let need = (elapsed * OUT_RATE) as usize;
+            if need > 0 {
+                for _ in 0..need {
+                    write_frame(out, 0.0, 0.0)?;
+                }
+                last_emit = Instant::now();
+            }
+        }
         out.flush().ok();
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
