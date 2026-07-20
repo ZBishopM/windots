@@ -143,7 +143,11 @@ unsafe fn capture<W: Write>(out: &mut W) -> Result<()> {
                 frames_out += 1;
             }
         }
-        out.flush().ok();
+        // If the reader (cava / ffmpeg) is gone, the pipe write fails -> exit
+        // instead of busy-looping forever as an orphan (that was the CPU leak).
+        if out.flush().is_err() {
+            std::process::exit(0);
+        }
         std::thread::sleep(Duration::from_millis(5));
     }
 }

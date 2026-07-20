@@ -43,13 +43,22 @@ fn main() {
     }
 
     let ring = Arc::new(Mutex::new(vec![0f32; FFT_SIZE]));
-    spawn_audio(ring.clone());
+    // Keep the loopback child handle so we can kill it on exit. Otherwise it
+    // orphans and busy-loops forever (that was the multi-loopback CPU leak).
+    let child: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(None));
+    if let Some((out, c)) = spawn_loopback() {
+        *child.lock().unwrap() = Some(c);
+        let ring2 = ring.clone();
+        std::thread::spawn(move || read_loop(ring2, out));
+    }
 
     let mut stdout = std::io::stdout();
     let _ = terminal::enable_raw_mode();
     let _ = execute!(stdout, EnterAlternateScreen, Hide);
     let prev = std::panic::take_hook();
+    let child_hook = child.clone();
     std::panic::set_hook(Box::new(move |info| {
+        kill_child(&child_hook);
         let mut so = std::io::stdout();
         let _ = execute!(so, Show, LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
@@ -229,6 +238,15 @@ fn main() {
 
     let _ = execute!(stdout, Show, LeaveAlternateScreen);
     let _ = terminal::disable_raw_mode();
+    kill_child(&child);
+}
+
+fn kill_child(child: &Arc<Mutex<Option<std::process::Child>>>) {
+    if let Ok(mut c) = child.lock() {
+        if let Some(c) = c.as_mut() {
+            let _ = c.kill();
+        }
+    }
 }
 
 // Vertical sunset gradient bottom->top: green -> brown -> orange -> red.
@@ -251,43 +269,43 @@ fn grad(t: f32) -> (u8, u8, u8) {
     (lerp(a.1, b.1), lerp(a.2, b.2), lerp(a.3, b.3))
 }
 
-fn spawn_audio(ring: Arc<Mutex<Vec<f32>>>) {
+fn spawn_loopback() -> Option<(std::process::ChildStdout, std::process::Child)> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let lb = std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(|p| p.join("sysaudio-loopback.exe")))
         .unwrap_or_else(|| "sysaudio-loopback.exe".into());
-    std::thread::spawn(move || {
-        let Ok(mut child) = std::process::Command::new(lb)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-        else {
-            return;
-        };
-        let Some(mut out) = child.stdout.take() else { return };
-        let mut buf = [0u8; 8192];
-        loop {
-            match out.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    let frames = n / 4;
-                    let mut r = ring.lock().unwrap();
-                    for i in 0..frames {
-                        let l = i16::from_le_bytes([buf[i * 4], buf[i * 4 + 1]]) as f32 / 32768.0;
-                        let rr = i16::from_le_bytes([buf[i * 4 + 2], buf[i * 4 + 3]]) as f32 / 32768.0;
-                        r.push((l + rr) * 0.5);
-                    }
-                    let len = r.len();
-                    if len > FFT_SIZE {
-                        r.drain(0..len - FFT_SIZE);
-                    }
+    let mut child = std::process::Command::new(lb)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .ok()?;
+    let out = child.stdout.take()?;
+    Some((out, child))
+}
+
+fn read_loop(ring: Arc<Mutex<Vec<f32>>>, mut out: std::process::ChildStdout) {
+    let mut buf = [0u8; 8192];
+    loop {
+        match out.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let frames = n / 4;
+                let mut r = ring.lock().unwrap();
+                for i in 0..frames {
+                    let l = i16::from_le_bytes([buf[i * 4], buf[i * 4 + 1]]) as f32 / 32768.0;
+                    let rr = i16::from_le_bytes([buf[i * 4 + 2], buf[i * 4 + 3]]) as f32 / 32768.0;
+                    r.push((l + rr) * 0.5);
+                }
+                let len = r.len();
+                if len > FFT_SIZE {
+                    r.drain(0..len - FFT_SIZE);
                 }
             }
         }
-    });
+    }
 }
 
 #[link(name = "winmm")]
