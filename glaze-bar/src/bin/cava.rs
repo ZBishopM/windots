@@ -71,7 +71,7 @@ fn main() {
     let mut vel: Vec<f32> = Vec::new(); // spring velocity
     let mut agc = 1.0f32;
     let mut last = Instant::now();
-    let mut show_fps = true;
+    let mut show_fps = false; // toggle with 'f'
     let mut fps = 0.0f32;
     let mut fps_frames = 0u32;
     let mut fps_t = Instant::now();

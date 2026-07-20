@@ -22,4 +22,13 @@ config.animation_fps = 165
 config.front_end = 'WebGpu'
 config.webgpu_power_preference = 'HighPerformance'
 
+-- Clean window: drop the native Windows title bar + min/max/close buttons (the
+-- tiling WM moves/sizes windows), keeping only a resize border. And hide
+-- WezTerm's own tab bar when there's a single tab, so there's no second header
+-- stacked on the first. A thinner tab bar when it does show.
+config.window_decorations = 'RESIZE'
+config.hide_tab_bar_if_only_one_tab = true
+config.use_fancy_tab_bar = false
+config.window_padding = { left = 6, right = 6, top = 4, bottom = 2 }
+
 return config
