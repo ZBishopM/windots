@@ -4,7 +4,7 @@ use eframe::egui;
 use serde::Deserialize;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // ---- Release physical RAM while idle (pages -> standby, fault back on demand) ----
 #[cfg(windows)]
@@ -95,46 +95,29 @@ struct Shared {
     mode: String,
     cpu: f32,
     mem: f32,
-    weather: String,
-    net: String,
+    gpu: String, // "44° 11%" (temp + utilization, from nvidia-smi)
+    net: String, // throughput "↓1.2M ↑0.3M"
 }
 
-// Network: Wi-Fi SSID if connected, else "ETH" (wired). Runs netsh with no
-// console flash.
-fn net_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
-    loop {
-        let net = detect_net();
-        dlog(&format!("net = {net:?}"));
-        shared.lock().unwrap().net = net;
-        ctx.request_repaint();
-        std::thread::sleep(Duration::from_secs(10));
-    }
-}
-fn detect_net() -> String {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        if let Ok(out) = std::process::Command::new("netsh")
-            .args(["wlan", "show", "interfaces"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-        {
-            let s = String::from_utf8_lossy(&out.stdout);
-            for line in s.lines() {
-                let l = line.trim();
-                if l.starts_with("SSID") && !l.starts_with("BSSID") {
-                    if let Some(idx) = l.find(':') {
-                        let ssid = l[idx + 1..].trim();
-                        if !ssid.is_empty() {
-                            return ssid.to_string();
-                        }
-                    }
-                }
-            }
+// Fire-and-forget IPC command (e.g. clicking a workspace pill to focus it).
+fn ipc_command(cmd: String) {
+    std::thread::spawn(move || {
+        if let Ok((mut sock, _)) = tungstenite::connect("ws://localhost:6123") {
+            let _ = sock.send(tungstenite::Message::Text(cmd.into()));
+            let _ = sock.read(); // wait for the ack so it's processed
+            let _ = sock.close(None);
         }
+    });
+}
+
+fn human_rate(bytes_per_sec: f64) -> String {
+    if bytes_per_sec >= 1_000_000.0 {
+        format!("{:.1}M", bytes_per_sec / 1_000_000.0)
+    } else if bytes_per_sec >= 1_000.0 {
+        format!("{:.0}K", bytes_per_sec / 1_000.0)
+    } else {
+        format!("{:.0}B", bytes_per_sec)
     }
-    "ETH".to_string()
 }
 
 // Send a query, return the first text response (no subscriptions => next text
@@ -195,6 +178,8 @@ fn ipc_thread(shared: Arc<Mutex<Shared>>, my_x: i32, ctx: egui::Context) {
 
 fn sys_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
     let mut sys = sysinfo::System::new();
+    let mut nets = sysinfo::Networks::new_with_refreshed_list();
+    let mut last = Instant::now();
     loop {
         sys.refresh_cpu_usage();
         std::thread::sleep(Duration::from_millis(500));
@@ -207,54 +192,95 @@ fn sys_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
         } else {
             0.0
         };
+
+        // Network throughput: bytes since the last refresh / elapsed time.
+        nets.refresh();
+        let now = Instant::now();
+        let secs = now.duration_since(last).as_secs_f64().max(0.001);
+        last = now;
+        let (mut rx, mut tx) = (0u64, 0u64);
+        for (_iface, data) in &nets {
+            rx += data.received();
+            tx += data.transmitted();
+        }
+        let net = format!(
+            "↓{} ↑{}",
+            human_rate(rx as f64 / secs),
+            human_rate(tx as f64 / secs)
+        );
+
         {
             let mut s = shared.lock().unwrap();
             s.cpu = cpu;
             s.mem = mem;
+            s.net = net;
         }
         ctx.request_repaint();
         std::thread::sleep(Duration::from_millis(1500));
     }
 }
 
-fn weather_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
+// GPU temperature + utilization via nvidia-smi (no admin needed).
+fn gpu_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
     loop {
-        if let Some(t) = fetch_weather() {
-            shared.lock().unwrap().weather = t;
+        if let Some(g) = fetch_gpu() {
+            shared.lock().unwrap().gpu = g;
             ctx.request_repaint();
-            std::thread::sleep(Duration::from_secs(900)); // got it -> refresh in 15 min
-        } else {
-            // Failed (network not up yet at boot, transient API error): retry soon
-            // instead of leaving the slot blank for a full 15 minutes.
-            std::thread::sleep(Duration::from_secs(60));
         }
+        std::thread::sleep(Duration::from_secs(3));
     }
 }
-fn fetch_weather() -> Option<String> {
-    let geo: serde_json::Value = match ureq::get("http://ip-api.com/json/").call() {
-        Ok(r) => match r.into_json() {
-            Ok(j) => j,
-            Err(e) => { dlog(&format!("weather geo json err: {e}")); return None; }
-        },
-        Err(e) => { dlog(&format!("weather geo call err: {e}")); return None; }
-    };
-    let (Some(lat), Some(lon)) = (geo["lat"].as_f64(), geo["lon"].as_f64()) else {
-        dlog(&format!("weather no lat/lon: {geo}"));
-        return None;
-    };
-    let url = format!(
-        "https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m"
-    );
-    let w: serde_json::Value = match ureq::get(&url).call() {
-        Ok(r) => match r.into_json() {
-            Ok(j) => j,
-            Err(e) => { dlog(&format!("weather meteo json err: {e}")); return None; }
-        },
-        Err(e) => { dlog(&format!("weather meteo call err: {e}")); return None; }
-    };
-    match w["current"]["temperature_2m"].as_f64() {
-        Some(t) => { let o = format!("{}°C", t.round() as i32); dlog(&format!("weather ok: {o}")); Some(o) }
-        None => { dlog(&format!("weather no temp: {w}")); None }
+fn fetch_gpu() -> Option<String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let out = std::process::Command::new("nvidia-smi")
+            .args([
+                "--query-gpu=temperature.gpu,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .ok()?;
+        let s = String::from_utf8_lossy(&out.stdout);
+        let line = s.lines().next()?;
+        let mut parts = line.split(',').map(|x| x.trim());
+        let temp = parts.next()?;
+        let util = parts.next()?;
+        let g = format!("{temp}° {util}%");
+        dlog(&format!("gpu = {g}"));
+        return Some(g);
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+// Load JetBrainsMono Nerd Font (already installed for the terminal) as the
+// primary font so glyphs like the ↓↑ arrows render; egui's bundled fonts stay
+// as fallback. No-op if the font isn't found (arrows would then show as tofu).
+fn load_font(ctx: &egui::Context) {
+    let mut candidates = vec![
+        "C:\\Windows\\Fonts\\JetBrainsMonoNerdFont-Regular.ttf".to_string(),
+    ];
+    if let Ok(d) = std::env::var("LOCALAPPDATA") {
+        candidates.insert(
+            0,
+            format!("{d}\\Microsoft\\Windows\\Fonts\\JetBrainsMonoNerdFont-Regular.ttf"),
+        );
+    }
+    for path in candidates {
+        if let Ok(bytes) = std::fs::read(&path) {
+            let mut fonts = egui::FontDefinitions::default();
+            fonts
+                .font_data
+                .insert("jbm".to_owned(), egui::FontData::from_owned(bytes));
+            for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                fonts.families.entry(fam).or_default().insert(0, "jbm".to_owned());
+            }
+            ctx.set_fonts(fonts);
+            return;
+        }
     }
 }
 
@@ -284,7 +310,7 @@ impl eframe::App for BarApp {
                 let full = ui.max_rect();
 
                 ui.horizontal_centered(|ui| {
-                    // ---- left: workspaces ----
+                    // ---- left: workspaces (clickable -> focus that workspace) ----
                     for ws in &s.workspaces {
                         let label = ws
                             .display_name
@@ -298,13 +324,19 @@ impl eframe::App for BarApp {
                         } else {
                             (egui::Color32::TRANSPARENT, egui::Color32::from_rgb(120, 120, 135))
                         };
-                        egui::Frame::none()
+                        let resp = egui::Frame::none()
                             .fill(bg)
                             .rounding(5.0)
                             .inner_margin(egui::Margin::symmetric(9.0, 2.0))
                             .show(ui, |ui| {
                                 ui.colored_label(fg, label);
-                            });
+                            })
+                            .response
+                            .interact(egui::Sense::click())
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if resp.clicked() {
+                            ipc_command(format!("command focus --workspace {}", ws.name));
+                        }
                         ui.add_space(5.0);
                     }
 
@@ -312,8 +344,8 @@ impl eframe::App for BarApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(4.0);
                         let dim = egui::Color32::from_rgb(180, 180, 195);
-                        if !s.weather.is_empty() {
-                            ui.colored_label(egui::Color32::from_rgb(255, 205, 120), &s.weather);
+                        if !s.gpu.is_empty() {
+                            ui.colored_label(egui::Color32::from_rgb(255, 205, 120), format!("GPU {}", s.gpu));
                             ui.add_space(12.0);
                         }
                         let cpu_col = if s.cpu > 85.0 {
@@ -326,7 +358,7 @@ impl eframe::App for BarApp {
                         ui.colored_label(dim, format!("RAM {:>2.0}%", s.mem));
                         ui.add_space(12.0);
                         if !s.net.is_empty() {
-                            ui.colored_label(egui::Color32::from_rgb(130, 200, 150), format!("NET {}", s.net));
+                            ui.colored_label(egui::Color32::from_rgb(130, 200, 150), &s.net);
                             ui.add_space(12.0);
                         }
                         let dir = if s.tiling == "vertical" { "|" } else { "—" };
@@ -397,6 +429,7 @@ fn main() -> eframe::Result<()> {
         "glaze-bar",
         options,
         Box::new(move |cc| {
+            load_font(&cc.egui_ctx);
             let ctx = cc.egui_ctx.clone();
             let s1 = shared.clone();
             std::thread::spawn(move || ipc_thread(s1, x as i32, ctx.clone()));
@@ -405,10 +438,7 @@ fn main() -> eframe::Result<()> {
             std::thread::spawn(move || sys_thread(s2, ctx2));
             let s3 = shared.clone();
             let ctx3 = cc.egui_ctx.clone();
-            std::thread::spawn(move || weather_thread(s3, ctx3));
-            let s4 = shared.clone();
-            let ctx4 = cc.egui_ctx.clone();
-            std::thread::spawn(move || net_thread(s4, ctx4));
+            std::thread::spawn(move || gpu_thread(s3, ctx3));
             Ok(Box::new(BarApp {
                 shared,
                 width,
