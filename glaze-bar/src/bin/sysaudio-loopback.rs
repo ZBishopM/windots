@@ -68,7 +68,18 @@ unsafe fn capture<W: Write>(out: &mut W) -> Result<()> {
     let mut resamp_pos = 0.0f64; // fractional read position for linear resample
     let mut prev_l = 0.0f32;
     let mut prev_r = 0.0f32;
-    let mut last_emit = Instant::now(); // wallclock ref for idle silence pacing
+
+    // Keep output at wallclock real-time: count every frame written and, only
+    // when GENUINELY idle, top up with silence to the wallclock-expected count.
+    // The idle threshold is the key: WASAPI hands us audio in ~10ms packets, so a
+    // single empty poll is NORMAL during active playback -- filling silence then
+    // (as an earlier version did) injects micro-gaps between real samples and
+    // stretches the audio (distortion + drift). We only fill after a sustained
+    // gap with zero packets, which only happens when nothing is playing.
+    let start = Instant::now();
+    let mut frames_out: u64 = 0;
+    let mut last_packet = Instant::now();
+    const IDLE_SECS: f64 = 0.15;
 
     loop {
         let mut got_real = false;
@@ -103,10 +114,12 @@ unsafe fn capture<W: Write>(out: &mut W) -> Result<()> {
                 // Linear resample from in_rate -> OUT_RATE.
                 if (ratio - 1.0).abs() < 1e-6 {
                     write_frame(out, l, r)?;
+                    frames_out += 1;
                 } else {
                     while resamp_pos < 1.0 {
                         let t = resamp_pos as f32;
                         write_frame(out, prev_l + (l - prev_l) * t, prev_r + (r - prev_r) * t)?;
+                        frames_out += 1;
                         resamp_pos += 1.0 / ratio;
                     }
                     resamp_pos -= 1.0;
@@ -117,21 +130,17 @@ unsafe fn capture<W: Write>(out: &mut W) -> Result<()> {
             capture.ReleaseBuffer(frames)?;
         }
 
+        let now = Instant::now();
         if got_real {
-            // Real audio flowed this pass -> reset the silence clock so we never
-            // inject silence between real samples (the old choppy-audio bug).
-            last_emit = Instant::now();
-        } else {
-            // Endpoint idle: no loopback packets at all. Emit wallclock-paced
-            // silence so ffmpeg's audio timeline keeps advancing and its muxer
-            // doesn't stall (which froze the whole recording).
-            let elapsed = last_emit.elapsed().as_secs_f64().min(0.5); // cap bursts
-            let need = (elapsed * OUT_RATE) as usize;
-            if need > 0 {
-                for _ in 0..need {
-                    write_frame(out, 0.0, 0.0)?;
-                }
-                last_emit = Instant::now();
+            last_packet = now;
+        } else if now.duration_since(last_packet).as_secs_f64() > IDLE_SECS {
+            // Genuinely idle (no packets for >150ms): top up silence to wallclock
+            // so ffmpeg's audio timeline keeps advancing (otherwise its muxer
+            // starves and the whole recording freezes).
+            let expected = (now.duration_since(start).as_secs_f64() * OUT_RATE) as u64;
+            while frames_out < expected {
+                write_frame(out, 0.0, 0.0)?;
+                frames_out += 1;
             }
         }
         out.flush().ok();
