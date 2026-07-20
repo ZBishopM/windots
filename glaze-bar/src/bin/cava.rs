@@ -71,11 +71,24 @@ fn main() {
     let mut vel: Vec<f32> = Vec::new(); // spring velocity
     let mut agc = 1.0f32;
     let mut last = Instant::now();
+    let mut show_fps = true;
+    let mut fps = 0.0f32;
+    let mut fps_frames = 0u32;
+    let mut fps_t = Instant::now();
 
     'main: loop {
         let t0 = Instant::now();
         let dt = (t0 - last).as_secs_f32().clamp(0.0001, 0.02);
         last = t0;
+
+        // Measured loop rate (updated twice a second).
+        fps_frames += 1;
+        let fe = fps_t.elapsed().as_secs_f32();
+        if fe >= 0.5 {
+            fps = fps_frames as f32 / fe;
+            fps_frames = 0;
+            fps_t = Instant::now();
+        }
 
         while event::poll(Duration::ZERO).unwrap_or(false) {
             if let Ok(Event::Key(k)) = event::read() {
@@ -83,6 +96,9 @@ fn main() {
                     || (k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL));
                 if quit {
                     break 'main;
+                }
+                if k.code == KeyCode::Char('f') {
+                    show_fps = !show_fps;
                 }
             }
         }
@@ -196,6 +212,12 @@ fn main() {
                 frame.push_str("\r\n");
             }
         }
+        // FPS readout, top-right (toggle with 'f').
+        if show_fps {
+            let label = format!(" {fps:.0} fps ");
+            let col = cols.saturating_sub(label.len()).max(1);
+            frame.push_str(&format!("\x1b[1;{col}H\x1b[97m{label}\x1b[0m"));
+        }
         let _ = stdout.write_all(frame.as_bytes());
         let _ = stdout.flush();
 
@@ -209,10 +231,24 @@ fn main() {
     let _ = terminal::disable_raw_mode();
 }
 
-// Vertical gradient: deep blue at the bottom -> bright cyan near the top.
+// Vertical sunset gradient bottom->top: green -> brown -> orange -> red.
 fn grad(t: f32) -> (u8, u8, u8) {
-    let lerp = |a: f32, b: f32| (a + (b - a) * t) as u8;
-    (lerp(40.0, 150.0), lerp(90.0, 230.0), lerp(200.0, 255.0))
+    const STOPS: [(f32, f32, f32, f32); 4] = [
+        (0.00, 70.0, 135.0, 45.0),  // green
+        (0.42, 150.0, 90.0, 38.0),  // brown
+        (0.72, 235.0, 130.0, 30.0), // orange
+        (1.00, 215.0, 45.0, 32.0),  // red
+    ];
+    let t = t.clamp(0.0, 1.0);
+    let mut i = 0;
+    while i + 1 < STOPS.len() && t > STOPS[i + 1].0 {
+        i += 1;
+    }
+    let a = STOPS[i];
+    let b = STOPS[(i + 1).min(STOPS.len() - 1)];
+    let f = ((t - a.0) / (b.0 - a.0).max(1e-6)).clamp(0.0, 1.0);
+    let lerp = |x: f32, y: f32| (x + (y - x) * f) as u8;
+    (lerp(a.1, b.1), lerp(a.2, b.2), lerp(a.3, b.3))
 }
 
 fn spawn_audio(ring: Arc<Mutex<Vec<f32>>>) {
