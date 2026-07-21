@@ -26,6 +26,11 @@ config.webgpu_power_preference = 'HighPerformance'
 -- tiling WM moves/sizes windows), keeping only a resize border. And hide
 -- WezTerm's own tab bar when there's a single tab, so there's no second header
 -- stacked on the first. A thinner tab bar when it does show.
+-- Clear FASTFETCH_SHOWN for every new pane so the profile always shows fastfetch
+-- in a top-level WezTerm shell, even if wezterm-gui was launched from a process
+-- that already had it set. Nested shells still inherit it and stay quiet.
+config.set_environment_variables = { FASTFETCH_SHOWN = '' }
+
 config.window_decorations = 'RESIZE'
 config.hide_tab_bar_if_only_one_tab = true
 config.use_fancy_tab_bar = false
