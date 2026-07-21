@@ -81,7 +81,7 @@ Deploy "$repo\config\fastfetch\config.jsonc"              "$home_\.config\fastfe
 Deploy "$repo\config\fastfetch\duck.txt"                  "$home_\.config\fastfetch\duck.txt"
 Deploy "$repo\config\glazewm\config.yaml"                 "$home_\.glzr\glazewm\config.yaml"
 Deploy "$repo\powershell\Microsoft.PowerShell_profile.ps1" "$home_\Documents\PowerShell\Microsoft.PowerShell_profile.ps1"
-foreach ($f in 'glazewm-dwindle.ps1', 'wezterm-hotkey.ahk', 'shadowplay-record.ps1', 'shadowplay-record.vbs', 'shadowplay-save.ps1', 'shadowplay-wgc-save.ps1', 'shadowplay-wgc.vbs', 'rice-supervisor.ps1', 'rice-supervisor.vbs') {
+foreach ($f in 'glazewm-dwindle.ps1', 'wezterm-hotkey.ahk', 'shadowplay-record.ps1', 'shadowplay-record.vbs', 'shadowplay-save.ps1', 'shadowplay-wgc-save.ps1', 'shadowplay-wgc.vbs', 'rice-supervisor.ps1', 'rice-supervisor.vbs', 'rice-autostart.ps1', 'rice-autostart.vbs') {
     Deploy "$repo\scripts\$f" "$home_\.config\$f"
 }
 # AltSnap.ini is UTF-16 and has no paths -> copy raw, into scoop persist.
@@ -106,6 +106,9 @@ Shortcut 'wezterm-hotkey'  "$scoopApps\autohotkey\current\v2\AutoHotkey64.exe" "
 Shortcut 'ShadowPlay'      'wscript.exe' "`"$home_\.config\shadowplay-wgc.vbs`""  # WGC recorder (ddagrab shadowplay-record.vbs kept for the v1.0 fallback)
 # Supervisor: relaunches any of the above that dies (crash, kill, GlazeWM restart).
 Shortcut 'RiceSupervisor'  'wscript.exe' "`"$home_\.config\rice-supervisor.vbs`""
+# Autostart: opens the working app/workspace layout once at login. App paths + the
+# Chrome profile + Claude AUMID inside are machine-specific; edit for your setup.
+Shortcut 'RiceAutostart'   'wscript.exe' "`"$home_\.config\rice-autostart.vbs`""
 
 # ---------------------------------------------------------------- 6. registry / env
 Say '6/7  Registry + env tweaks'

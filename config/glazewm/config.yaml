@@ -185,6 +185,20 @@ window_rules:
     match:
       - window_process: { equals: 'League of Legends' }
 
+  # Autostart homes: each app lives in its workspace (case-insensitive).
+  - commands: ['move --workspace 1']
+    match:
+      - window_process: { regex: '(?i)^(claude|zed)$' }
+  - commands: ['move --workspace 3']
+    match:
+      - window_process: { regex: '(?i)^firefox$' }
+  - commands: ['move --workspace 4']
+    match:
+      - window_process: { regex: '(?i)^vesktop$' }
+  - commands: ['move --workspace 6']
+    match:
+      - window_process: { regex: '(?i)^chrome$' }
+
 binding_modes:
   # When enabled, the focused window can be resized via arrow keys or HJKL.
   - name: 'resize'
