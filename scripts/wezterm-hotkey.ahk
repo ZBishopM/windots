@@ -8,13 +8,7 @@
 ; ------------------------------------------------------------
 
 #Enter:: {
-    ; Open a new window in the ALREADY-RUNNING WezTerm (shares its GPU context +
-    ; config, so it appears without re-initializing WebGpu and uses far less RAM
-    ; than a separate process). Fall back to a fresh GUI process if none is up.
-    if ProcessExist("wezterm-gui.exe")
-        Run('"C:\Program Files\WezTerm\wezterm.exe" cli spawn --new-window', , "Hide")
-    else
-        Run('"C:\Program Files\WezTerm\wezterm-gui.exe" start')
+    Run('"C:\Program Files\WezTerm\wezterm-gui.exe" start')
 }
 
 ; ------------------------------------------------------------
