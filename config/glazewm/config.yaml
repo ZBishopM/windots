@@ -176,12 +176,14 @@ window_rules:
       - window_process: { equals: 'POWERPNT' }
         window_class: { not_regex: 'PPTFrameClass' }
 
-  # League of Legends -> workspace 5, fullscreen (never tiled/squished). Covers
-  # the client (LeagueClientUx) and the in-game process (League of Legends).
+  # League client -> ws5, floating (it bugs out when tiled/fullscreen).
+  - commands: ['move --workspace 5', 'set-floating --centered']
+    match:
+      - window_process: { equals: 'LeagueClientUx' }
+  # League in-game (practice tool / match) -> ws5, fullscreen.
   - commands: ['move --workspace 5', 'toggle-fullscreen']
     match:
       - window_process: { equals: 'League of Legends' }
-      - window_process: { equals: 'LeagueClientUx' }
 
 binding_modes:
   # When enabled, the focused window can be resized via arrow keys or HJKL.
