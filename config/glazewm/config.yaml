@@ -180,8 +180,10 @@ window_rules:
   - commands: ['move --workspace 5', 'set-floating --centered']
     match:
       - window_process: { equals: 'LeagueClientUx' }
-  # League in-game (practice tool / match) -> ws5, fullscreen.
-  - commands: ['move --workspace 5', 'toggle-fullscreen']
+  # League in-game: fully ignore it so the game owns the whole screen (set it to
+  # Borderless in-game). WM tiling/fullscreen offsets the window off 0,0 and adds
+  # a border, which breaks mouse edge-panning and left it minimized.
+  - commands: ['ignore']
     match:
       - window_process: { equals: 'League of Legends' }
 
