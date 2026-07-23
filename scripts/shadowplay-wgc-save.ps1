@@ -1,4 +1,7 @@
 # Stitch the last ~30s of the WGC rolling buffer into a replay clip.
+# Video segments (segNN.mp4) are video-only; each has a parallel raw-PCM audio
+# file (segNN.pcm, s16le 48k stereo) captured in lockstep. We concat the video,
+# concat the matching PCM, and mux them into the final clip.
 $buf = 'C:\Users\obisp\ShadowPlay\wgc-buffer'
 $out = 'C:\Users\obisp\ShadowPlay\clips'
 $ff  = 'C:\Users\obisp\scoop\apps\ffmpeg\current\bin\ffmpeg.exe'
@@ -15,9 +18,31 @@ $listFile = Join-Path $buf '_concat.txt'
 ($last | ForEach-Object { "file '" + ($_.FullName -replace "'", "''") + "'" }) |
     Set-Content -Path $listFile -Encoding ascii
 
+# Concat the matching PCM files (same time order) into one raw stream.
+$pcmOut = Join-Path $buf '_audio.pcm'
+$haveAudio = $true
+$fs = [System.IO.File]::Create($pcmOut)
+foreach ($v in $last) {
+    $p = Join-Path $buf ($v.BaseName + '.pcm')
+    if (Test-Path $p) {
+        $bytes = [System.IO.File]::ReadAllBytes($p)
+        $fs.Write($bytes, 0, $bytes.Length)
+    } else {
+        $haveAudio = $false
+    }
+}
+$fs.Close()
+
 $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
 $dest = Join-Path $out "replay_$ts.mp4"
-& $ff -hide_banner -loglevel error -f concat -safe 0 -i $listFile -c copy -y $dest 2>$null
+if ($haveAudio -and (Get-Item $pcmOut).Length -gt 0) {
+    & $ff -hide_banner -loglevel error -f concat -safe 0 -i $listFile `
+        -f s16le -ar 48000 -ac 2 -i $pcmOut `
+        -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -b:a 160k -shortest -y $dest 2>$null
+} else {
+    & $ff -hide_banner -loglevel error -f concat -safe 0 -i $listFile -c copy -y $dest 2>$null
+}
+Remove-Item $pcmOut -ErrorAction SilentlyContinue
 
 if (Test-Path $dest) {
     # Toast on the FOCUSED monitor (per GlazeWM IPC), fall back to primary top-right.
@@ -44,6 +69,6 @@ if (Test-Path $dest) {
             }
         }
     } catch {}
-    Start-Process 'C:\Users\obisp\dev\glaze-bar\target\release\shadowplay-notify.exe' -ArgumentList "`"$dest`"", $nx, $ny
+    Start-Process 'C:\Users\obisp\dev\target\release\shadowplay-notify.exe' -ArgumentList "`"$dest`"", $nx, $ny
     Write-Output $dest
 }

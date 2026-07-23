@@ -4,8 +4,8 @@ general:
   # Example: The below command launches Zebar.
   startup_commands:
     - 'shell-exec pwsh -NoProfile -WindowStyle Hidden -File C:/Users/obisp/.config/glazewm-dwindle.ps1'
-    - 'shell-exec C:/Users/obisp/dev/glaze-bar/target/release/glaze-bar.exe --x 0 --width 1920'
-    - 'shell-exec C:/Users/obisp/dev/glaze-bar/target/release/glaze-bar.exe --x 1920 --width 2560'
+    - 'shell-exec C:/Users/obisp/dev/target/release/glaze-bar.exe --x 0 --width 1920'
+    - 'shell-exec C:/Users/obisp/dev/target/release/glaze-bar.exe --x 1920 --width 2560'
 
   # Commands to run just before the WM is shutdown.
   # Example: The below command kills Zebar.

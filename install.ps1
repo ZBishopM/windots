@@ -54,25 +54,21 @@ if (-not (Get-Command cargo -EA SilentlyContinue)) {
 }
 
 # ---------------------------------------------------------------- 2. Rust tools
-Say '2/7  Build Rust tools (glaze-bar, notify, loopback)'
-$proj = "$home_\dev\glaze-bar"
-New-Item -ItemType Directory -Force $proj | Out-Null
-Copy-Item "$repo\glaze-bar\*" $proj -Recurse -Force
-Push-Location $proj
+# One cargo workspace (dev/Cargo.toml) builds every bin -- glaze-bar, cava,
+# sysaudio-loopback, shadowplay-notify, shadowplay-wgc -- into a single
+# dev/target/release/. The recorder and cava find their sibling
+# sysaudio-loopback.exe there automatically, so there is no copy step.
+Say '2/7  Build Rust tools (cargo workspace)'
+$dev = "$home_\dev"
+New-Item -ItemType Directory -Force "$dev\glaze-bar", "$dev\shadowplay-wgc" | Out-Null
+Copy-Item "$repo\glaze-bar\*"      "$dev\glaze-bar"      -Recurse -Force
+Copy-Item "$repo\shadowplay-wgc\*" "$dev\shadowplay-wgc" -Recurse -Force
+Copy-Item "$repo\Cargo.toml"       "$dev\Cargo.toml"     -Force   # workspace root
+Copy-Item "$repo\Cargo.lock"       "$dev\Cargo.lock"     -Force
+Push-Location $dev
 cargo build --release
 Pop-Location
-Ok "built -> $proj\target\release\"
-
-# WGC recorder (separate cargo project; windows-capture pulls a newer windows crate).
-$wgc = "$home_\dev\shadowplay-wgc"
-New-Item -ItemType Directory -Force $wgc | Out-Null
-Copy-Item "$repo\shadowplay-wgc\*" $wgc -Recurse -Force
-Push-Location $wgc
-cargo build --release
-Pop-Location
-# The recorder spawns a sibling sysaudio-loopback.exe -> copy glaze-bar's build next to it.
-Copy-Item "$proj\target\release\sysaudio-loopback.exe" "$wgc\target\release\sysaudio-loopback.exe" -Force
-Ok "built WGC recorder -> $wgc\target\release\"
+Ok "built workspace -> $dev\target\release\"
 
 # ---------------------------------------------------------------- 3. configs
 Say '3/7  Deploy configs'

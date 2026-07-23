@@ -58,5 +58,5 @@ function admin {
 
 # cava: terminal audio spectrum visualizer (system audio -> FFT bars, 165fps).
 # Quit with q / Esc / Ctrl+C.
-function cava { & "$HOME\dev\glaze-bar\target\release\cava.exe" @args }
+function cava { & "$HOME\dev\target\release\cava.exe" @args }
 

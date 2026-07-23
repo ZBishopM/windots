@@ -1,0 +1,22 @@
+# Cargo workspace for the rice's Rust tools. `cargo build --release` here compiles
+# every member into ONE dev/target/release/, so the recorder and cava find their
+# sibling sysaudio-loopback.exe automatically (no copy step) and all bins share one
+# Cargo.lock. flutter/ and projects/ are unrelated -> excluded so cargo never tries
+# to attach them to this workspace.
+[workspace]
+resolver = "2"
+members = ["glaze-bar", "shadowplay-wgc"]
+exclude = ["flutter", "projects"]
+
+# Profiles must live at the workspace root (a member's [profile.*] is ignored).
+# opt-level "z" keeps the egui notify small and is proven fine for cava's real-time
+# FFT; the recorder keeps opt-level 3. lto/strip/panic are shared by both.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.release.package.shadowplay-wgc]
+opt-level = 3

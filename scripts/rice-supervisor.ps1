@@ -9,7 +9,7 @@ if (-not $mutex.WaitOne(0)) { exit }   # another supervisor already running
 $cfg    = 'C:\Users\obisp\.config'
 $scoop  = 'C:\Users\obisp\scoop\apps'
 $ahk    = "$scoop\autohotkey\current\v2\AutoHotkey64.exe"
-$bar    = 'C:\Users\obisp\dev\glaze-bar\target\release\glaze-bar.exe'
+$bar    = 'C:\Users\obisp\dev\target\release\glaze-bar.exe'
 
 # Give things a moment at login so we don't race the normal autostart.
 Start-Sleep -Seconds 20

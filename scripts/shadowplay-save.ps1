@@ -51,6 +51,6 @@ if (Test-Path $dest) {
             }
         }
     } catch {}
-    Start-Process 'C:\Users\obisp\dev\glaze-bar\target\release\shadowplay-notify.exe' -ArgumentList "`"$dest`"", $nx, $ny
+    Start-Process 'C:\Users\obisp\dev\target\release\shadowplay-notify.exe' -ArgumentList "`"$dest`"", $nx, $ny
     Write-Output $dest
 }

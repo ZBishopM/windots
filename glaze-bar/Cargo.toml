@@ -16,9 +16,4 @@ windows = { version = "0.58", features = ["Win32_Media_Audio", "Win32_System_Com
 rustfft = "6"
 crossterm = "0.28"
 
-[profile.release]
-opt-level = "z"
-lto = true
-codegen-units = 1
-strip = true
-panic = "abort"
+# Release profile lives at the workspace root (dev/Cargo.toml).

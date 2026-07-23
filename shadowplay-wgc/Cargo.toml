@@ -5,8 +5,7 @@ edition = "2021"
 
 [dependencies]
 windows-capture = "2"
+# CoInitializeEx(MTA) on the finisher/maker worker threads (WinRT calls need COM).
+windows = { version = "0.62", features = ["Win32_System_Com"] }
 
-[profile.release]
-opt-level = 3
-lto = true
-strip = true
+# Release profile lives at the workspace root (dev/Cargo.toml).

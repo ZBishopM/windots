@@ -22,7 +22,7 @@ El `install.ps1`:
 
 1. Instala dependencias con **scoop** (`fastfetch glazewm altsnap autohotkey ffmpeg`) +
    **wezterm** y **rust** con winget.
-2. Copia el proyecto Rust a `~/dev/glaze-bar` y lo **compila** (`cargo build --release`).
+2. Copia los crates Rust a `~/dev` y compila el **workspace** (`cargo build --release`) → binarios en `~/dev/target/release/`.
 3. Despliega los configs a su sitio, **reescribiendo la ruta del home** a la tuya.
 4. Crea las carpetas de ShadowPlay, los accesos de **autostart**, y aplica los tweaks
    de registro/env.
@@ -42,13 +42,14 @@ Cierra sesión y vuelve a entrar (o reinicia) para que arranque todo.
 | **AltSnap** | Mover/redimensionar con SUPER+arrastrar | `~/scoop/.../AltSnap.ini` |
 | **ShadowPlay (WGC)** | Buffer rodante de 30 s vía Windows.Graphics.Capture (HEVC hardware, ~38% menos GPU que ddagrab) + audio del sistema | `~/dev/shadowplay-wgc`, `~/.config/shadowplay-wgc-*` |
 | **ShadowPlay (ddagrab)** | Grabador anterior (ffmpeg AV1 + loopback). Fallback del tag v1.0 | `~/.config/shadowplay-record.*` |
-| **shadowplay-notify** | Toast animado al guardar un clip (Rust) | binario en `~/dev/glaze-bar` |
-| **sysaudio-loopback** | Captura audio del sistema (WASAPI, Rust) | binario en `~/dev/glaze-bar` |
+| **shadowplay-notify** | Toast animado al guardar un clip (Rust) | binario en `~/dev/target/release/` |
+| **sysaudio-loopback** | Captura audio del sistema (WASAPI, Rust) | binario en `~/dev/target/release/` |
 | **rice-supervisor** | Watchdog: revive cualquier componente que muera (<60s) | `~/.config/rice-supervisor.ps1` |
-| **cava** | Visualizador de espectro de audio en terminal (FFT, 165fps) | binario en `~/dev/glaze-bar`, comando `cava` |
+| **cava** | Visualizador de espectro de audio en terminal (FFT, 165fps) | binario en `~/dev/target/release/`, comando `cava` |
 
-Los **3 binarios Rust** viven en un solo proyecto cargo: `glaze-bar`, `shadowplay-notify`,
-`sysaudio-loopback`.
+Los binarios Rust viven en un **workspace cargo** (`~/dev/Cargo.toml`, 2 crates): `glaze-bar`
+(barra + `cava` + `sysaudio-loopback` + `shadowplay-notify`) y `shadowplay-wgc` (el grabador).
+Compilan juntos a `~/dev/target/release/`.
 
 ---
 
@@ -104,7 +105,7 @@ la pantalla y ningún hook lo intercepta); cycle-focus en `SUPER+Shift+Space` po
 | Duración del replay | `shadowplay-save.ps1` → `Select-Object -Last 6` (6 × 5 s = 30 s) |
 | Módulos de la barra | `glaze-bar/src/main.rs`, luego `cargo build --release` |
 
-Tras editar un binario Rust: `cd ~/dev/glaze-bar; cargo build --release` y reinicia GlazeWM
+Tras editar un binario Rust: `cd ~/dev; cargo build --release` y reinicia GlazeWM
 (`Alt+Shift+E`) o el proceso.
 
 ---

@@ -10,7 +10,7 @@
 # watchdog must be able to actually stop it, or orphaned ffmpeg instances pile up
 # and collide on the same segment files (choppy audio, buffer never fills).
 $ff  = 'C:\Users\obisp\scoop\apps\ffmpeg\current\bin\ffmpeg.exe'
-$lb  = 'C:\Users\obisp\dev\glaze-bar\target\release\sysaudio-loopback.exe'
+$lb  = 'C:\Users\obisp\dev\target\release\sysaudio-loopback.exe'
 $buf = 'C:\Users\obisp\ShadowPlay\buffer'
 $prefer = @('Blue Snowball', 'HyperX')          # priority order
 $exclude = 'Oculus|NVIDIA|Steam|CABLE|VoiceMeeter|Mezcla|Stereo Mix'  # not real mics

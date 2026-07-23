@@ -21,6 +21,38 @@ fn trim_ram() {
     }
 }
 
+#[cfg(windows)]
+#[link(name = "user32")]
+extern "system" {
+    fn FindWindowW(class_name: *const u16, window_name: *const u16) -> isize;
+    fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
+    fn SetWindowLongPtrW(hwnd: isize, index: i32, new_long: isize) -> isize;
+    fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
+}
+
+// Turn the toast into a true non-activating tool overlay. Without WS_EX_NOACTIVATE
+// a topmost window popping over an exclusive/borderless-fullscreen game yanks it
+// out of fullscreen (minimizes it). This keeps foreground on the game.
+#[cfg(windows)]
+fn harden_overlay() {
+    const GWL_EXSTYLE: i32 = -20;
+    const WS_EX_NOACTIVATE: isize = 0x0800_0000;
+    const WS_EX_TOOLWINDOW: isize = 0x0000_0080;
+    const HWND_TOPMOST: isize = -1;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    let title: Vec<u16> = "shadowplay-notify\0".encode_utf16().collect();
+    unsafe {
+        let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+        if hwnd != 0 {
+            let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW);
+            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+}
+
 const HOLD: f32 = 5.0; // visible
 const OUT_DUR: f32 = 0.45; // fade out
 
@@ -49,6 +81,13 @@ impl eframe::App for Notify {
     }
 
     fn update(&mut self, ctx: &egui::Context, _f: &mut eframe::Frame) {
+        // Re-assert the non-activating overlay styles for the first few frames (the
+        // window/title may not exist on frame 0).
+        #[cfg(windows)]
+        if self.frame < 3 {
+            harden_overlay();
+        }
+
         let now = Instant::now();
         let t = self.start.elapsed().as_secs_f32();
 
@@ -67,17 +106,16 @@ impl eframe::App for Notify {
             }
         }
 
-        // Appear instantly at full opacity; fade out cleanly (cubic ease-out,
-        // no slide or drift).
-        let (alpha, off_x, off_y) = if let Some(c) = self.closing_at {
+        // Appear instantly at full opacity; fade out cleanly (cubic ease-out).
+        let alpha = if let Some(c) = self.closing_at {
             let p = (c.elapsed().as_secs_f32() / OUT_DUR).clamp(0.0, 1.0);
             if p >= 1.0 {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             let a = 1.0 - p;
-            (a * a * a, 0.0, 0.0) // fade out
+            a * a * a // cubic fade out
         } else {
-            (1.0, 0.0, 0.0) // visible immediately
+            1.0 // visible immediately
         };
 
         // Apply the animation alpha to a colour.
@@ -98,8 +136,8 @@ impl eframe::App for Notify {
                     .rounding(11.0)
                     .inner_margin(egui::Margin::symmetric(16.0, 12.0))
                     .outer_margin(egui::Margin {
-                        left: 18.0 + off_x,
-                        top: 16.0 + off_y,
+                        left: 18.0,
+                        top: 16.0,
                         right: 6.0,
                         bottom: 6.0,
                     })
@@ -144,6 +182,7 @@ fn main() -> eframe::Result<()> {
             .with_taskbar(false)
             .with_resizable(false)
             .with_transparent(true)
+            .with_active(false) // don't steal focus from the game/app when it pops
             .with_inner_size([420.0, 130.0])
             .with_position([x, y])
             .with_title("shadowplay-notify"),
