@@ -1,104 +1,105 @@
 # Keeps the rice's always-on processes alive. Every 30s it checks each component
 # and relaunches any that died (crash, manual kill, GlazeWM restart killing its
 # child dwindle, etc.) so a dead piece self-heals within a minute instead of
-# staying dead until the next login. Single-instance; trims its own RAM.
+# staying dead until the next login.
+#
+# Components are a data table, not hand-written control flow: adding one is a
+# single row. The previous version inlined six components with four different
+# liveness idioms and five Start-Process shapes in a 44-line loop body, guarded
+# nothing but two of them with Test-Path, and logged nothing at all -- so when it
+# died, it died silently.
 
-# Single instance, robust: if a previous supervisor was killed while holding the
-# mutex, WaitOne throws AbandonedMutexException. Unhandled, that terminated this
-# script instantly -- the watchdog would be silently dead until the next login
-# (which is exactly what happened after a few Stop-Process restarts). Catching it
-# is correct: the mutex IS acquired, the exception only reports the prior abandon.
+$ErrorActionPreference = 'Continue'
+. "$env:USERPROFILE\.config\lib\rice-paths.ps1"
+. "$env:USERPROFILE\.config\lib\rice-ipc.ps1"
+. "$env:USERPROFILE\.config\lib\rice-proc.ps1"
+
+# Single instance. The catch matters: if a previous supervisor was killed while
+# holding this mutex, WaitOne throws AbandonedMutexException, and unhandled that
+# terminated the script instantly -- leaving the whole rice unsupervised until
+# the next login. The mutex IS acquired; the exception only reports the abandon.
 $mutex = New-Object System.Threading.Mutex($false, 'Global\rice-supervisor')
-try { if (-not $mutex.WaitOne(0)) { exit } }   # another supervisor already running
+try { if (-not $mutex.WaitOne(0)) { exit } }
 catch [System.Threading.AbandonedMutexException] { }
-
-$cfg    = 'C:\Users\obisp\.config'
-$scoop  = 'C:\Users\obisp\scoop\apps'
-$ahk    = "$scoop\autohotkey\current\v2\AutoHotkey64.exe"
-$bar    = 'C:\Users\obisp\dev\target\release\glaze-bar.exe'
-$wsslide = 'C:\Users\obisp\dev\target\release\ws-slide.exe'
-
-# Give things a moment at login so we don't race the normal autostart.
-Start-Sleep -Seconds 20
 
 Add-Type -Namespace W -Name K -MemberDefinition @'
 [System.Runtime.InteropServices.DllImport("psapi.dll")] public static extern bool EmptyWorkingSet(System.IntPtr h);
 [System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern System.IntPtr GetCurrentProcess();
 '@ -EA SilentlyContinue
 
-function Alive($name)      { [bool](Get-Process $name -EA SilentlyContinue) }
-function AliveCount($name) { (Get-Process $name -EA SilentlyContinue | Measure-Object).Count }
-function AliveCmd($match)  { [bool](Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'" -EA SilentlyContinue | Where-Object { $_.CommandLine -like $match }) }
+# Wait for GlazeWM to answer rather than sleeping a fixed guess, so the first
+# tick can't land in the middle of the login layout and judge a warming-up WM.
+Write-RiceLog 'supervisor starting'
+[void](Wait-GlazeIpcReady -TimeoutSec 90)
 
-# GlazeWM can wedge: the process stays alive but its IPC (and keybinds) stop
-# responding, which a plain process check misses. Probe the IPC to tell healthy
-# from hung.
-# IMPORTANT: connect to 127.0.0.1, NOT 'localhost'. 'localhost' resolves ::1
-# (IPv6) first, which GlazeWM's IPC doesn't listen on, so the connect eats the
-# full ~2.1s IPv6 timeout before falling back to IPv4 -- that overshot the old
-# 2000ms wait, so the probe returned false on a perfectly healthy WM and the
-# supervisor killed + restarted GlazeWM every ~60s (which re-ran dwindle and
-# flashed a Windows Terminal window). 127.0.0.1 connects in ~5ms.
-function GlazeHealthy {
-    if (-not (Alive 'GlazeWM')) { return $false }
-    try {
-        $t = New-Object System.Net.WebSockets.ClientWebSocket
-        $k = [System.Threading.CancellationToken]::None
-        if (-not $t.ConnectAsync([Uri]'ws://127.0.0.1:6123', $k).Wait(4000)) { $t.Dispose(); return $false }
-        $mm = [Text.Encoding]::UTF8.GetBytes('query windows')
-        [void]$t.SendAsync((New-Object System.ArraySegment[byte] (, $mm)), 'Text', $true, $k).Wait(2000)
-        $ok = $t.ReceiveAsync((New-Object System.ArraySegment[byte] (, (New-Object byte[] 2048))), $k).Wait(2000)
-        $t.Dispose()
-        return [bool]$ok
-    } catch { return $false }
+$Components = @(
+    # GlazeWM can wedge: the process stays alive but its IPC (and keybinds) stop
+    # responding, which a plain process check misses -- hence the Health probe.
+    @{ Name    = 'glazewm'
+       Check   = 'Process'; Match = 'GlazeWM'
+       Health  = { Test-GlazeIpcAlive }
+       Grace   = 90     # don't judge it while it is still coming up
+       Fails   = 3      # ~90s of consecutive failures before intervening
+       Path    = { "$($Rice.ScoopApps)\glazewm\current\GlazeWM.exe" } }
+
+    @{ Name = 'altsnap'; Check = 'Process'; Match = 'AltSnap'
+       Path = { "$($Rice.ScoopApps)\altsnap\current\AltSnap.exe" } }
+
+    @{ Name = 'wezterm-hotkey'; Check = 'Process'; Match = 'AutoHotkey64'
+       Path = { "$($Rice.ScoopApps)\autohotkey\current\v2\AutoHotkey64.exe" }
+       Args = { @("$($Rice.Config)\wezterm-hotkey.ahk") } }
+
+    # PowerToys Command Palette: the Win+Ctrl+Space launcher. It sometimes fails
+    # to come up at login even though PowerToys itself started.
+    @{ Name = 'cmdpal'; Check = 'Process'; Match = 'Microsoft.CmdPal.UI'
+       Path = { 'shell:AppsFolder\Microsoft.CommandPalette_8wekyb3d8bbwe!App' }
+       MaxRestarts = 5 }
+
+    # dwindle: fibonacci layout (a child of GlazeWM, so it dies on a GlazeWM
+    # restart). Checked by its own mutex rather than a WMI command-line match.
+    @{ Name = 'dwindle'; Check = 'Mutex'; Match = 'Global\glazewm-dwindle-ps'
+       Path = { 'pwsh' }
+       Args = { @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+                  '-File', "$($Rice.Config)\glazewm-dwindle.ps1") } }
+
+    # WGC rolling recorder (single-instance via its own mutex).
+    @{ Name = 'shadowplay-wgc'; Check = 'Process'; Match = 'shadowplay-wgc'
+       Path = { Get-RiceExe 'shadowplay-wgc.exe' } }
+
+    # ws-slide owns Super+1..9 for the workspace-slide animation, and GlazeWM no
+    # longer binds those keys -- if this dies, workspace switching dies with it.
+    @{ Name = 'ws-slide'; Check = 'Process'; Match = 'ws-slide'
+       Path = { Get-RiceExe 'ws-slide.exe' } }
+)
+
+# One bar per monitor, each with its own single-instance mutex keyed by --x.
+# The old check was `count -lt 2 -> launch both`, which on a single-monitor
+# machine (or with the second display asleep) never reached 2 and therefore
+# spawned two processes every 30s forever.
+foreach ($m in $Rice.Monitors) {
+    $mon = $m
+    $Components += @{
+        Name        = "glaze-bar@$($mon.X)"
+        Check       = 'Mutex'; Match = "Global\glaze-bar-$($mon.X)"
+        Path        = { Get-RiceExe 'glaze-bar.exe' }
+        Args        = { @('--x', $mon.X, '--width', $mon.Width) }.GetNewClosure()
+        MaxRestarts = 10
+    }
 }
 
-$glzFails = 0
+$state = @{}
+$tick = 0
 while ($true) {
-    # Restart GlazeWM if it's gone (now) or hung (IPC dead for ~3 checks, to avoid
-    # nuking it on a transient hiccup -- a real wedge stays dead, a hiccup recovers).
-    if (-not (Alive 'GlazeWM')) {
-        Start-Process "$scoop\glazewm\current\GlazeWM.exe"; $glzFails = 0
+    $snap = Get-RiceProcessSnapshot     # one enumeration for the whole tick
+    foreach ($c in $Components) {
+        try { Step-RiceComponent $c $snap $state }
+        catch { Write-RiceLog "step failed: $_" $c.Name }
     }
-    elseif (GlazeHealthy) { $glzFails = 0 }
-    else {
-        $glzFails++
-        if ($glzFails -ge 3) {
-            Get-Process glazewm -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
-            Start-Sleep -Milliseconds 600
-            Start-Process "$scoop\glazewm\current\GlazeWM.exe"; $glzFails = 0
-        }
+    # Trim on a wallclock cadence, not every tick: every trimmed page has to soft
+    # fault back in afterwards.
+    if (($tick % 20) -eq 0) {
+        try { [W.K]::EmptyWorkingSet([W.K]::GetCurrentProcess()) | Out-Null } catch { }
     }
-    if (-not (Alive 'AltSnap'))      { Start-Process "$scoop\altsnap\current\AltSnap.exe" }
-    if (-not (Alive 'AutoHotkey64')) { Start-Process $ahk -ArgumentList "`"$cfg\wezterm-hotkey.ahk`"" }
-
-    # PowerToys Command Palette host (the win+ctrl+space launcher). It sometimes
-    # fails to come up at login (PowerToys starts but the CmdPal app doesn't),
-    # which leaves the hotkey dead. Relaunch the app if its host process is gone;
-    # it self-hides once another window takes focus, so a boot relaunch is invisible.
-    if (-not (Alive 'Microsoft.CmdPal.UI')) {
-        Start-Process 'shell:AppsFolder\Microsoft.CommandPalette_8wekyb3d8bbwe!App' -EA SilentlyContinue
-    }
-
-    # dwindle: fibonacci layout (child of GlazeWM, dies on GlazeWM restart)
-    if (-not (AliveCmd '*glazewm-dwindle*')) {
-        Start-Process pwsh -ArgumentList '-NoProfile','-WindowStyle','Hidden','-File',"$cfg\glazewm-dwindle.ps1" -WindowStyle Hidden
-    }
-    # ShadowPlay WGC recorder (only launch if none -> never duplicates)
-    if (-not (Alive 'shadowplay-wgc')) {
-        Start-Process wscript.exe -ArgumentList "`"$cfg\shadowplay-wgc.vbs`""
-    }
-    # glaze-bar: one per monitor. Each bar is single-instance (named mutex per --x),
-    # so launching both whenever fewer than two run respawns only the missing one.
-    if ((AliveCount 'glaze-bar') -lt 2 -and (Test-Path $bar)) {
-        Start-Process $bar -ArgumentList '--x','0','--width','1920'
-        Start-Process $bar -ArgumentList '--x','1920','--width','2560'
-    }
-    # ws-slide owns Super+1..9 for the workspace-slide animation. If it dies, those
-    # hotkeys go dead (GlazeWM no longer binds them), so keep it up. Single-instance
-    # via a named mutex, so a duplicate launch is a harmless no-op.
-    if (-not (Alive 'ws-slide') -and (Test-Path $wsslide)) { Start-Process $wsslide }
-
-    try { [W.K]::EmptyWorkingSet([W.K]::GetCurrentProcess()) | Out-Null } catch {}
+    $tick++
     Start-Sleep -Seconds 30
 }

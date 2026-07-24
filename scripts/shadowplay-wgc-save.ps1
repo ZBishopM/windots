@@ -3,9 +3,12 @@
 # lockstep: segNN.pcm (system audio) and segNN.mic.pcm (microphone), s16le 48k
 # stereo. We concat the video + each audio ring; if the mic ring exists we mix
 # system + mic into one track, otherwise system audio only.
-$buf = 'C:\Users\obisp\ShadowPlay\wgc-buffer'
-$out = 'C:\Users\obisp\ShadowPlay\clips'
-$ff  = 'C:\Users\obisp\scoop\apps\ffmpeg\current\bin\ffmpeg.exe'
+. "$env:USERPROFILE\.config\lib\rice-paths.ps1"
+. "$env:USERPROFILE\.config\lib\rice-ipc.ps1"
+
+$buf = $Rice.WgcBuffer
+$out = $Rice.Clips
+$ff  = $Rice.Ffmpeg
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 # Only one save at a time: Alt+F10 and the bar's save button are independent
@@ -70,42 +73,30 @@ else {
 if (-not (Test-Path $dest)) {
     # ffmpeg failed (its stderr is discarded above). Say so instead of leaving
     # Alt+F10 looking like a dead key.
-    Start-Process 'C:\Users\obisp\dev\target\release\shadowplay-notify.exe' `
+    Start-Process $Rice.Notify `
         -ArgumentList '--title "Replay falló" --body "ffmpeg no produjo el clip" --icon warn --accent "#d08770" --hold 6'
 }
 
 if (Test-Path $dest) {
     # Toast on the FOCUSED monitor (per GlazeWM IPC), fall back to primary top-right.
+    # 420 = the toast's 400px width plus its 10px outer margin, doubled.
     $nx = 1490; $ny = 50
-    try {
-        $sock = New-Object System.Net.WebSockets.ClientWebSocket
-        $ct = [System.Threading.CancellationToken]::None
-        $connected = $sock.ConnectAsync([Uri]'ws://127.0.0.1:6123', $ct).Wait(4000)
-        if ($connected) {
-            $q = [Text.Encoding]::UTF8.GetBytes('query monitors')
-            [void]$sock.SendAsync((New-Object System.ArraySegment[byte] (, $q)), 'Text', $true, $ct).Wait(3000)
-            $rbuf = New-Object byte[] 131072
-            $rseg = New-Object System.ArraySegment[byte] (, $rbuf)
-            $sb = New-Object Text.StringBuilder
-            do {
-                $r = $sock.ReceiveAsync($rseg, $ct); [void]$r.Wait(3000)
-                [void]$sb.Append([Text.Encoding]::UTF8.GetString($rbuf, 0, $r.Result.Count))
-            } while (-not $r.Result.EndOfMessage)
-            $sock.Dispose()
-            $mon = ($sb.ToString() | ConvertFrom-Json).data.monitors | Where-Object { $_.hasFocus } | Select-Object -First 1
-            if ($mon) {
-                $nx = [int]($mon.x + $mon.width - 420 - 10)
-                $ny = [int]($mon.y + 50)
-            }
-        }
-    } catch {}
+    $mon = Get-GlazeFocusedMonitor
+    if ($mon) {
+        $nx = [int]($mon.x + $mon.width - 420 - 10)
+        $ny = [int]($mon.y + 50)
+    }
     $fname = Split-Path $dest -Leaf
     # feed the in-bar dynamic island (shows when the bar is visible)
+    # Write-then-rename: the bar polls this file, so a truncate-then-write could
+    # be observed half-written.
+    $isl = "$($Rice.Island).tmp"
     @{icon = 'replay'; title = 'Replay guardado'; body = $fname; accent = '#a9b56a' } |
-        ConvertTo-Json -Compress | Set-Content "$env:USERPROFILE\.config\island.json" -Encoding utf8
+        ConvertTo-Json -Compress | Set-Content $isl -Encoding utf8
+    [System.IO.File]::Move($isl, $Rice.Island, $true)
     # and the standalone toast (visible over fullscreen games, where the bar is hidden)
     $nargs = "--title `"Replay guardado`" --body `"$fname`" --icon replay --accent `"#a9b56a`" --open `"$dest`" --x $nx --y $ny"
-    Start-Process 'C:\Users\obisp\dev\target\release\shadowplay-notify.exe' -ArgumentList $nargs
+    Start-Process $Rice.Notify -ArgumentList $nargs
     Write-Output $dest
 }
 
