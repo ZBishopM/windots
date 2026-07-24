@@ -23,10 +23,55 @@ function Alive($name)      { [bool](Get-Process $name -EA SilentlyContinue) }
 function AliveCount($name) { (Get-Process $name -EA SilentlyContinue | Measure-Object).Count }
 function AliveCmd($match)  { [bool](Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'" -EA SilentlyContinue | Where-Object { $_.CommandLine -like $match }) }
 
+# GlazeWM can wedge: the process stays alive but its IPC (and keybinds) stop
+# responding, which a plain process check misses. Probe the IPC to tell healthy
+# from hung.
+# IMPORTANT: connect to 127.0.0.1, NOT 'localhost'. 'localhost' resolves ::1
+# (IPv6) first, which GlazeWM's IPC doesn't listen on, so the connect eats the
+# full ~2.1s IPv6 timeout before falling back to IPv4 -- that overshot the old
+# 2000ms wait, so the probe returned false on a perfectly healthy WM and the
+# supervisor killed + restarted GlazeWM every ~60s (which re-ran dwindle and
+# flashed a Windows Terminal window). 127.0.0.1 connects in ~5ms.
+function GlazeHealthy {
+    if (-not (Alive 'GlazeWM')) { return $false }
+    try {
+        $t = New-Object System.Net.WebSockets.ClientWebSocket
+        $k = [System.Threading.CancellationToken]::None
+        if (-not $t.ConnectAsync([Uri]'ws://127.0.0.1:6123', $k).Wait(4000)) { $t.Dispose(); return $false }
+        $mm = [Text.Encoding]::UTF8.GetBytes('query windows')
+        [void]$t.SendAsync((New-Object System.ArraySegment[byte] (, $mm)), 'Text', $true, $k).Wait(2000)
+        $ok = $t.ReceiveAsync((New-Object System.ArraySegment[byte] (, (New-Object byte[] 2048))), $k).Wait(2000)
+        $t.Dispose()
+        return [bool]$ok
+    } catch { return $false }
+}
+
+$glzFails = 0
 while ($true) {
-    if (-not (Alive 'GlazeWM'))      { Start-Process "$scoop\glazewm\current\GlazeWM.exe" }
+    # Restart GlazeWM if it's gone (now) or hung (IPC dead for ~3 checks, to avoid
+    # nuking it on a transient hiccup -- a real wedge stays dead, a hiccup recovers).
+    if (-not (Alive 'GlazeWM')) {
+        Start-Process "$scoop\glazewm\current\GlazeWM.exe"; $glzFails = 0
+    }
+    elseif (GlazeHealthy) { $glzFails = 0 }
+    else {
+        $glzFails++
+        if ($glzFails -ge 3) {
+            Get-Process glazewm -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+            Start-Sleep -Milliseconds 600
+            Start-Process "$scoop\glazewm\current\GlazeWM.exe"; $glzFails = 0
+        }
+    }
     if (-not (Alive 'AltSnap'))      { Start-Process "$scoop\altsnap\current\AltSnap.exe" }
     if (-not (Alive 'AutoHotkey64')) { Start-Process $ahk -ArgumentList "`"$cfg\wezterm-hotkey.ahk`"" }
+
+    # PowerToys Command Palette host (the win+ctrl+space launcher). It sometimes
+    # fails to come up at login (PowerToys starts but the CmdPal app doesn't),
+    # which leaves the hotkey dead. Relaunch the app if its host process is gone;
+    # it self-hides once another window takes focus, so a boot relaunch is invisible.
+    if (-not (Alive 'Microsoft.CmdPal.UI')) {
+        Start-Process 'shell:AppsFolder\Microsoft.CommandPalette_8wekyb3d8bbwe!App' -EA SilentlyContinue
+    }
 
     # dwindle: fibonacci layout (child of GlazeWM, dies on GlazeWM restart)
     if (-not (AliveCmd '*glazewm-dwindle*')) {
@@ -36,8 +81,9 @@ while ($true) {
     if (-not (Alive 'shadowplay-wgc')) {
         Start-Process wscript.exe -ArgumentList "`"$cfg\shadowplay-wgc.vbs`""
     }
-    # glaze-bar: one per monitor. If both died, relaunch both with their offsets.
-    if ((AliveCount 'glaze-bar') -eq 0 -and (Test-Path $bar)) {
+    # glaze-bar: one per monitor. Each bar is single-instance (named mutex per --x),
+    # so launching both whenever fewer than two run respawns only the missing one.
+    if ((AliveCount 'glaze-bar') -lt 2 -and (Test-Path $bar)) {
         Start-Process $bar -ArgumentList '--x','0','--width','1920'
         Start-Process $bar -ArgumentList '--x','1920','--width','2560'
     }

@@ -163,8 +163,11 @@ window_rules:
       # Ignore rules for various 3rd-party apps.
       - window_process: { equals: 'PowerToys' }
         window_class: { regex: 'HwndWrapper\[PowerToys\.PowerAccent.*?\]' }
-      - window_title: { equals: 'Command Palette' }
-        window_class: { equals: 'WinUIDesktopWin32WindowClass' }
+      # PowerToys Command Palette (CmdPal) launcher popup. Match by PROCESS, not
+      # window title: the title is localized ('Paleta de comandos' on es-ES Windows),
+      # so matching the English 'Command Palette' never fired -> GlazeWM tiled the
+      # popup and its resize stole focus from the search box (the "no autofocus" bug).
+      - window_process: { equals: 'Microsoft.CmdPal.UI' }
       - window_process: { equals: 'PowerToys' }
         window_title: { regex: '.*? - Peek' }
       - window_process: { equals: 'Lively' }
