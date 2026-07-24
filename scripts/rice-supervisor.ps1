@@ -10,6 +10,7 @@ $cfg    = 'C:\Users\obisp\.config'
 $scoop  = 'C:\Users\obisp\scoop\apps'
 $ahk    = "$scoop\autohotkey\current\v2\AutoHotkey64.exe"
 $bar    = 'C:\Users\obisp\dev\target\release\glaze-bar.exe'
+$wsslide = 'C:\Users\obisp\dev\target\release\ws-slide.exe'
 
 # Give things a moment at login so we don't race the normal autostart.
 Start-Sleep -Seconds 20
@@ -87,6 +88,10 @@ while ($true) {
         Start-Process $bar -ArgumentList '--x','0','--width','1920'
         Start-Process $bar -ArgumentList '--x','1920','--width','2560'
     }
+    # ws-slide owns Super+1..9 for the workspace-slide animation. If it dies, those
+    # hotkeys go dead (GlazeWM no longer binds them), so keep it up. Single-instance
+    # via a named mutex, so a duplicate launch is a harmless no-op.
+    if (-not (Alive 'ws-slide') -and (Test-Path $wsslide)) { Start-Process $wsslide }
 
     try { [W.K]::EmptyWorkingSet([W.K]::GetCurrentProcess()) | Out-Null } catch {}
     Start-Sleep -Seconds 30

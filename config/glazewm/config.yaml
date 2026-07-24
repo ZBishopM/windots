@@ -6,6 +6,8 @@ general:
     - 'shell-exec pwsh -NoProfile -WindowStyle Hidden -File C:/Users/obisp/.config/glazewm-dwindle.ps1'
     - 'shell-exec C:/Users/obisp/dev/target/release/glaze-bar.exe --x 0 --width 1920'
     - 'shell-exec C:/Users/obisp/dev/target/release/glaze-bar.exe --x 1920 --width 2560'
+    # Owns Super+1..9 to play the workspace-slide animation (single-instance).
+    - 'shell-exec C:/Users/obisp/dev/target/release/ws-slide.exe'
 
   # Commands to run just before the WM is shutdown.
   # Example: The below command kills Zebar.
@@ -300,25 +302,12 @@ keybindings:
   - commands: ['focus --recent-workspace']
     bindings: ['lwin+d']
 
-  # Change focus to a workspace defined in `workspaces` config.
-  - commands: ['focus --workspace 1']
-    bindings: ['lwin+1']
-  - commands: ['focus --workspace 2']
-    bindings: ['lwin+2']
-  - commands: ['focus --workspace 3']
-    bindings: ['lwin+3']
-  - commands: ['focus --workspace 4']
-    bindings: ['lwin+4']
-  - commands: ['focus --workspace 5']
-    bindings: ['lwin+5']
-  - commands: ['focus --workspace 6']
-    bindings: ['lwin+6']
-  - commands: ['focus --workspace 7']
-    bindings: ['lwin+7']
-  - commands: ['focus --workspace 8']
-    bindings: ['lwin+8']
-  - commands: ['focus --workspace 9']
-    bindings: ['lwin+9']
+  # Change focus to a workspace: Super+1..9 are intentionally NOT bound here.
+  # The ws-slide tool owns those hotkeys so it can play the slide animation --
+  # it covers the current desktop, then sends `focus --workspace N` over IPC.
+  # Binding them here too would let GlazeWM's keyboard hook consume the key
+  # before ws-slide's global hotkey fired, so there'd be no animation.
+  # (If ws-slide isn't running, Super+1..9 do nothing; the supervisor keeps it up.)
 
   # Move the focused window's parent workspace to a monitor in a given
   # direction.
