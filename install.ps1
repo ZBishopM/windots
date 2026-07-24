@@ -9,6 +9,11 @@
 #>
 
 $ErrorActionPreference = 'Stop'
+# Without this, a *native* command that exits non-zero (cargo, scoop, winget) does
+# NOT trip $ErrorActionPreference in PowerShell 7 -- the install would sail past a
+# failed `cargo build`, report success, and then wire up Startup shortcuts pointing
+# at .exe files that were never produced.
+$PSNativeCommandUseErrorActionPreference = $true
 $repo = $PSScriptRoot
 $home_ = $env:USERPROFILE
 $homeFwd = $home_ -replace '\\', '/'
@@ -42,36 +47,35 @@ if (-not (Get-Command scoop -EA SilentlyContinue)) {
     Invoke-RestMethod get.scoop.sh | Invoke-Expression
 }
 scoop bucket add main 2>$null; scoop bucket add extras 2>$null
-foreach ($p in 'fastfetch', 'glazewm', 'altsnap', 'autohotkey', 'ffmpeg', 'nu') {
-    if (-not (scoop list $p 6>$null | Select-String $p)) { scoop install $p } else { Ok "have $p" }
+# nerd-fonts: the bar, the toasts and WezTerm all render Nerd Font glyphs and all
+# three fail *silently* to tofu boxes when the font is missing.
+scoop bucket add nerd-fonts 2>$null
+# btop + vesktop are launched by rice-autostart's layout; JetBrainsMono-NF is the
+# font every UI component hardcodes.
+foreach ($p in 'fastfetch', 'glazewm', 'altsnap', 'autohotkey', 'ffmpeg', 'nu', 'btop', 'vesktop', 'JetBrainsMono-NF') {
+    # Match the package name exactly: `scoop list nu | Select-String nu` matches any
+    # installed package containing "nu", which silently skipped nushell.
+    if (scoop list $p 6>$null | Where-Object Name -eq $p) { Ok "have $p" } else { scoop install $p }
 }
 if (-not (Get-Command wezterm -EA SilentlyContinue) -and -not (Test-Path "$env:ProgramFiles\WezTerm\wezterm.exe")) {
     winget install --id wez.wezterm --silent --accept-source-agreements --accept-package-agreements
+}
+# PowerToys: the Command Palette (CmdPal) is the Win+Ctrl+Space launcher that
+# wezterm-hotkey.ahk forwards Win+Space to, and rice-supervisor keeps its host
+# process alive. Without it that keybind does nothing.
+if (-not (Test-Path "$env:LOCALAPPDATA\PowerToys\PowerToys.exe")) {
+    winget install --id Microsoft.PowerToys --silent --accept-source-agreements --accept-package-agreements
 }
 if (-not (Get-Command cargo -EA SilentlyContinue)) {
     winget install --id Rustlang.Rustup --silent --accept-source-agreements --accept-package-agreements
     $env:Path += ";$home_\.cargo\bin"
 }
 
-# ---------------------------------------------------------------- 2. Rust tools
-# One cargo workspace (dev/Cargo.toml) builds every bin -- glaze-bar, cava,
-# sysaudio-loopback, shadowplay-notify, shadowplay-wgc -- into a single
-# dev/target/release/. The recorder and cava find their sibling
-# sysaudio-loopback.exe there automatically, so there is no copy step.
-Say '2/7  Build Rust tools (cargo workspace)'
-$dev = "$home_\dev"
-New-Item -ItemType Directory -Force "$dev\glaze-bar", "$dev\shadowplay-wgc" | Out-Null
-Copy-Item "$repo\glaze-bar\*"      "$dev\glaze-bar"      -Recurse -Force
-Copy-Item "$repo\shadowplay-wgc\*" "$dev\shadowplay-wgc" -Recurse -Force
-Copy-Item "$repo\Cargo.toml"       "$dev\Cargo.toml"     -Force   # workspace root
-Copy-Item "$repo\Cargo.lock"       "$dev\Cargo.lock"     -Force
-Push-Location $dev
-cargo build --release
-Pop-Location
-Ok "built workspace -> $dev\target\release\"
-
-# ---------------------------------------------------------------- 3. configs
-Say '3/7  Deploy configs'
+# ---------------------------------------------------------------- 2. configs
+# Configs are deployed BEFORE the Rust build on purpose: the build is the step
+# most likely to fail on a fresh machine (missing/misresolved toolchain), and a
+# failure there used to abort the installer before a single config was written.
+Say '2/7  Deploy configs'
 Deploy "$repo\wezterm\.wezterm.lua"                       "$home_\.wezterm.lua"
 Deploy "$repo\config\fastfetch\config.jsonc"              "$home_\.config\fastfetch\config.jsonc"
 Deploy "$repo\config\fastfetch\duck.txt"                  "$home_\.config\fastfetch\duck.txt"
@@ -80,9 +84,25 @@ Deploy "$repo\powershell\Microsoft.PowerShell_profile.ps1" "$home_\Documents\Pow
 # Nushell: the fast interactive shell (pwsh still runs the infra scripts). Config
 # carries fastfetch + the rice tool wrappers (cava/mic/notify-test).
 Deploy "$repo\nushell\config.nu"                          "$home_\AppData\Roaming\nushell\config.nu"
-foreach ($f in 'glazewm-dwindle.ps1', 'wezterm-hotkey.ahk', 'shadowplay-record.ps1', 'shadowplay-record.vbs', 'shadowplay-save.ps1', 'shadowplay-wgc-save.ps1', 'shadowplay-wgc.vbs', 'rice-supervisor.ps1', 'rice-supervisor.vbs', 'rice-autostart.ps1', 'rice-autostart.vbs') {
+foreach ($f in 'glazewm-dwindle.ps1', 'glazewm-animcheck.ps1', 'wezterm-hotkey.ahk', 'shadowplay-record.ps1', 'shadowplay-record.vbs', 'shadowplay-wgc-save.ps1', 'shadowplay-wgc.vbs', 'rice-supervisor.ps1', 'rice-supervisor.vbs', 'rice-autostart.ps1', 'rice-autostart.vbs') {
     Deploy "$repo\scripts\$f" "$home_\.config\$f"
 }
+
+# ---------------------------------------------------------------- 3. Rust tools
+# One cargo workspace (dev/Cargo.toml) builds every bin -- glaze-bar, cava,
+# sysaudio-loopback, shadowplay-notify, micswitch, ws-slide, shadowplay-wgc --
+# into a single dev/target/release/. The recorder and cava find their sibling
+# sysaudio-loopback.exe there automatically, so there is no copy step.
+Say '3/7  Build Rust tools (cargo workspace)'
+$dev = "$home_\dev"
+New-Item -ItemType Directory -Force "$dev\glaze-bar", "$dev\shadowplay-wgc" | Out-Null
+Copy-Item "$repo\glaze-bar\*"      "$dev\glaze-bar"      -Recurse -Force
+Copy-Item "$repo\shadowplay-wgc\*" "$dev\shadowplay-wgc" -Recurse -Force
+Copy-Item "$repo\Cargo.toml"       "$dev\Cargo.toml"     -Force   # workspace root
+Copy-Item "$repo\Cargo.lock"       "$dev\Cargo.lock"     -Force
+Push-Location $dev
+try { cargo build --release } finally { Pop-Location }
+Ok "built workspace -> $dev\target\release\"
 # AltSnap.ini is UTF-16 and has no paths -> copy raw, into scoop persist.
 $asPersist = "$home_\scoop\persist\altsnap"
 if (Test-Path (Split-Path $asPersist)) {

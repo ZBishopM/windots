@@ -680,7 +680,14 @@ impl eframe::App for BarApp {
 
         let s = self.shared.lock().unwrap();
         // Translucent bar (live-adjustable) so the desktop / a borderless game shows through.
-        let bar_bg = egui::Color32::from_rgba_unmultiplied(26, 22, 19, (self.bar_opacity * 255.0) as u8);
+        // Derived from BAR_BG rather than re-typing its channels, so the palette
+        // stays the single source of truth for the bar's colour.
+        let bar_bg = egui::Color32::from_rgba_unmultiplied(
+            BAR_BG.r(),
+            BAR_BG.g(),
+            BAR_BG.b(),
+            (self.bar_opacity * 255.0) as u8,
+        );
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(bar_bg).inner_margin(egui::Margin::symmetric(10.0, 5.0)))
             .show(ctx, |ui| {

@@ -102,7 +102,7 @@ la pantalla y ningún hook lo intercepta); cycle-focus en `SUPER+Shift+Space` po
 | Menos RAM al grabar | `shadowplay-record.ps1` → `-preset p6` → `p4`, o `-cq 19` → `23` |
 | Balancear juego/mic | `shadowplay-record.ps1` → `amix ... normalize=0` → pesos |
 | Micrófono preferido | `shadowplay-record.ps1` → `$prefer = @('Blue Snowball','HyperX')` |
-| Duración del replay | `shadowplay-save.ps1` → `Select-Object -Last 6` (6 × 5 s = 30 s) |
+| Duración del replay | `shadowplay-wgc-save.ps1` → `Select-Object -Last 6` (6 × 5 s = 30 s) |
 | Módulos de la barra | `glaze-bar/src/main.rs`, luego `cargo build --release` |
 
 Tras editar un binario Rust: `cd ~/dev; cargo build --release` y reinicia GlazeWM
