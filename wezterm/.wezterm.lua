@@ -1,10 +1,23 @@
 local wezterm = require 'wezterm'
 local config = wezterm.config_builder()
 
--- Default shell: PowerShell 7+ (runs the fastfetch profile)
--- -NoLogo hides the "PowerShell 7.6.3" banner and the
--- "Loading personal and system profiles took ...ms" line at startup.
-config.default_prog = { 'pwsh.exe', '-NoLogo' }
+-- Default shell: nushell (~67ms to a prompt vs pwsh's ~350ms). Its config carries
+-- the same fastfetch banner, the rice's warm theme, completions and the
+-- toolchain badges.
+--
+-- PowerShell is NOT going away: every infra script (rice-supervisor,
+-- glazewm-dwindle, shadowplay-wgc-save, install.ps1) is still .ps1 and is
+-- invoked as `pwsh -File ...` directly, so none of them care what the
+-- interactive shell is. To get a pwsh prompt, just run `pwsh`.
+config.default_prog = { 'nu.exe' }
+
+-- Launch menu: pick a shell from the tab-bar '+' dropdown (right-click it).
+config.launch_menu = {
+  { label = 'nushell', args = { 'nu.exe' } },
+  { label = 'PowerShell', args = { 'pwsh.exe', '-NoLogo' } },
+  { label = 'PowerShell (no profile)', args = { 'pwsh.exe', '-NoLogo', '-NoProfile' } },
+  { label = 'cmd', args = { 'cmd.exe' } },
+}
 
 -- Font
 config.font = wezterm.font 'JetBrainsMono Nerd Font'

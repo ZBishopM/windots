@@ -37,6 +37,8 @@ Cierra sesión y vuelve a entrar (o reinicia) para que arranque todo.
 |---|---|---|
 | **WezTerm + fastfetch** | Terminal con pato ASCII + specs al abrir | `~/.wezterm.lua`, `~/.config/fastfetch/` |
 | **GlazeWM** | Tiling window manager (binds SUPER) | `~/.glzr/glazewm/config.yaml` |
+| **nushell** | Shell interactivo por defecto (~67 ms a prompt vs ~350 ms de pwsh). Mismo fastfetch, tema cálido del rice, completado difuso con menús, y badges de contexto (node/pnpm · python · rust · rama git · ssh) calculados sólo al cambiar de directorio | `~/AppData/Roaming/nushell/config.nu` |
+| **PowerShell 7** | Sigue ejecutando toda la infraestructura (`.ps1`), invocada como `pwsh -File`. Para un prompt de pwsh: escribe `pwsh`, o elígelo en el menú de lanzamiento de WezTerm | `~/Documents/PowerShell/…profile.ps1` |
 | **dwindle** | Layout fibonacci vía IPC de GlazeWM | `~/.config/glazewm-dwindle.ps1` |
 | **glaze-bar** | Barra de estado nativa (Rust/egui), 1 por monitor | `~/dev/glaze-bar` |
 | **AltSnap** | Mover/redimensionar con SUPER+arrastrar | `~/scoop/.../AltSnap.ini` |
@@ -141,7 +143,8 @@ dotfiles/
 ├─ wezterm/.wezterm.lua
 ├─ config/fastfetch/        # config.jsonc + duck.txt
 ├─ config/glazewm/config.yaml
-├─ powershell/…profile.ps1
+├─ powershell/…profile.ps1  # perfil de pwsh (infra)
+├─ nushell/config.nu        # shell interactivo por defecto
 ├─ scripts/                 # dwindle, wezterm-hotkey, shadowplay-*, supervisor
 │  └─ lib/                  # rice-paths · rice-ipc · rice-proc (dot-sourced)
 ├─ altsnap/AltSnap.ini
