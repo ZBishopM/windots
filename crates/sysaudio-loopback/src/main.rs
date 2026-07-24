@@ -169,8 +169,12 @@ unsafe fn capture<W: Write>(out: &mut W, mic: bool) -> Result<()> {
                 }
             }
         }
-        // If the reader (cava / ffmpeg) is gone, the pipe write fails -> exit
-        // instead of busy-looping forever as an orphan (that was the CPU leak).
+        // Flushing every tick looks like it defeats the BufWriter, and it does --
+        // deliberately. cava consumes this stream for a realtime visualiser, and
+        // letting a 64 KB buffer fill at 192 KB/s would add ~340ms of lag. 200
+        // flushes/s is cheap; the per-frame writes were the expensive part.
+        // It doubles as the liveness check: once the reader (cava / ffmpeg) is
+        // gone the write fails and we exit instead of running on as an orphan.
         if out.flush().is_err() {
             std::process::exit(0);
         }
@@ -189,9 +193,14 @@ unsafe fn endpoint_id(dev: &IMMDevice) -> Option<String> {
 
 #[inline]
 fn write_frame<W: Write>(out: &mut W, l: f32, r: f32) -> Result<()> {
+    // One 4-byte write per frame, not two 2-byte ones: at 48 kHz stereo that
+    // halves the call count on the hottest path in the project (96k -> 48k per
+    // second, per instance, and three instances run permanently).
     let li = (l.clamp(-1.0, 1.0) * 32767.0) as i16;
     let ri = (r.clamp(-1.0, 1.0) * 32767.0) as i16;
-    out.write_all(&li.to_le_bytes()).ok();
-    out.write_all(&ri.to_le_bytes()).ok();
+    let mut buf = [0u8; 4];
+    buf[0..2].copy_from_slice(&li.to_le_bytes());
+    buf[2..4].copy_from_slice(&ri.to_le_bytes());
+    out.write_all(&buf).ok();
     Ok(())
 }

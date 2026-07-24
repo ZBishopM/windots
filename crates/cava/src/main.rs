@@ -15,6 +15,7 @@ use crossterm::{
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use rustfft::{num_complex::Complex, FftPlanner};
+use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -77,6 +78,7 @@ fn main() {
     let mut spec: Vec<f32> = Vec::new(); // temporally-smoothed spectrum
     let mut sm: Vec<f32> = Vec::new(); // spatially-smoothed target
     let mut pos: Vec<f32> = Vec::new(); // rendered bar height (spring position)
+    let mut frame = String::new(); // reused every frame (see the render section)
     let mut vel: Vec<f32> = Vec::new(); // spring velocity
     let mut agc = 1.0f32;
     let mut last = Instant::now();
@@ -195,14 +197,16 @@ fn main() {
             }
         }
 
-        // Render one string, write once.
-        let mut frame = String::with_capacity(cols * rows * 4 + 32);
+        // Render one string, write once. `frame` is reused across frames and the
+        // escape sequences are written in place: a `format!` per row per frame was
+        // ~8,250 heap allocations a second at 165 fps, all for fixed-shape text.
+        frame.clear();
         frame.push_str("\x1b[H");
         for tr in 0..rows {
             let from_bottom = rows - 1 - tr;
             let frac = from_bottom as f32 / (rows as f32 - 1.0).max(1.0);
             let (cr, cg, cb) = grad(frac);
-            frame.push_str(&format!("\x1b[38;2;{cr};{cg};{cb}m"));
+            let _ = write!(frame, "\x1b[38;2;{cr};{cg};{cb}m");
             for b in 0..nbars {
                 let h = (pos[b].min(1.0) * rows as f32 * 8.0) as i32;
                 let level = (h - (from_bottom as i32) * 8).clamp(0, 8) as usize;
@@ -223,9 +227,9 @@ fn main() {
         }
         // FPS readout, top-right (toggle with 'f').
         if show_fps {
-            let label = format!(" {fps:.0} fps ");
-            let col = cols.saturating_sub(label.len()).max(1);
-            frame.push_str(&format!("\x1b[1;{col}H\x1b[97m{label}\x1b[0m"));
+            let width = format!("{fps:.0}").len() + 6; // " NNN fps "
+            let col = cols.saturating_sub(width).max(1);
+            let _ = write!(frame, "\x1b[1;{col}H\x1b[97m {fps:.0} fps \x1b[0m");
         }
         let _ = stdout.write_all(frame.as_bytes());
         let _ = stdout.flush();

@@ -87,6 +87,11 @@ Deploy "$repo\nushell\config.nu"                          "$home_\AppData\Roamin
 foreach ($f in 'glazewm-dwindle.ps1', 'glazewm-animcheck.ps1', 'wezterm-hotkey.ahk', 'shadowplay-record.ps1', 'shadowplay-record.vbs', 'shadowplay-wgc-save.ps1', 'shadowplay-wgc.vbs', 'rice-supervisor.ps1', 'rice-supervisor.vbs', 'rice-autostart.ps1', 'rice-autostart.vbs') {
     Deploy "$repo\scripts\$f" "$home_\.config\$f"
 }
+# Shared library dot-sourced by the scripts above (paths, GlazeWM IPC, process
+# helpers). Every one of them fails at its first line without these.
+foreach ($f in Get-ChildItem "$repo\scripts\lib\*.ps1") {
+    Deploy $f.FullName "$home_\.config\lib\$($f.Name)"
+}
 
 # ---------------------------------------------------------------- 3. Rust tools
 # One cargo workspace (dev/Cargo.toml) builds every bin -- glaze-bar, cava,

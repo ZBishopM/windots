@@ -106,9 +106,17 @@ unsafe fn set_clickthrough(hwnd: isize, on: bool) {
     SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new);
 }
 
+// Environment flags are read once, not per call / per frame: dlog ran an
+// env::var_os on every invocation and the icon-test check ran one every frame.
+fn env_flag(name: &'static str, cell: &'static std::sync::OnceLock<bool>) -> bool {
+    *cell.get_or_init(|| std::env::var_os(name).is_some())
+}
+static LOG_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static ICONTEST_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
 // Debug log to %TEMP%\glaze-bar.log when GLAZEBAR_LOG is set.
 fn dlog(msg: &str) {
-    if std::env::var_os("GLAZEBAR_LOG").is_some() {
+    if env_flag("GLAZEBAR_LOG", &LOG_ON) {
         if let Ok(dir) = std::env::var("TEMP") {
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
@@ -463,20 +471,29 @@ fn sys_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
 }
 
 // GPU temperature + utilization via nvidia-smi (no admin needed).
+//
+// Every sample is a process spawn, so the interval is 10s rather than 3s: that
+// is 8,640 spawns a day instead of 28,800, for a reading whose useful resolution
+// is nowhere near 3 seconds. Repaint only when the string actually changed --
+// the bar was being woken up 20 times a minute to redraw identical text.
 fn gpu_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
     loop {
         if let Some(g) = fetch_gpu() {
-            shared.lock().unwrap().gpu = g;
-            ctx.request_repaint();
+            let mut s = shared.lock().unwrap();
+            if s.gpu != g {
+                s.gpu = g;
+                drop(s);
+                ctx.request_repaint();
+            }
         }
-        std::thread::sleep(Duration::from_secs(3));
+        std::thread::sleep(Duration::from_secs(10));
     }
 }
 fn fetch_gpu() -> Option<String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const CREATE_NO_WINDOW: u32 = win::CREATE_NO_WINDOW;
         let out = std::process::Command::new("nvidia-smi")
             .args([
                 "--query-gpu=temperature.gpu,utilization.gpu",
@@ -541,7 +558,7 @@ impl eframe::App for BarApp {
 
         // Icon-centring rig: draw the icons in chips at fixed, known centres (no text
         // nearby) so their real ink centre can be measured against a known point.
-        if std::env::var_os("GLAZEBAR_ICONTEST").is_some() {
+        if env_flag("GLAZEBAR_ICONTEST", &ICONTEST_ON) {
             // Render each glyph 10x large (white on black, no chip) at known centres
             // so the ink centroid can be measured with 10x sub-pixel precision.
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1000.0, 300.0)));
