@@ -1,7 +1,11 @@
-// WASAPI loopback capture of the default render endpoint (whatever the system
-// plays, incl. a USB headset) -> raw s16le stereo @ 48000 Hz on stdout, so the
-// ShadowPlay ffmpeg can mux it with the video. Native, no third-party driver,
-// no routing change.
+// WASAPI capture -> raw s16le stereo @ 48000 Hz on stdout, so the ShadowPlay save
+// step can mux it with the video. Native, no third-party driver, no routing change.
+//
+// Two modes share the same resample/downmix/silence-fill path:
+//   (default)  loopback of the default RENDER endpoint = whatever the system plays.
+//   --mic      the default CAPTURE endpoint = your microphone.
+// Either mode follows the ACTIVE default device: switch the mic (or the output) in
+// Windows and it reopens on the new one within ~2s, no restart needed.
 //
 // Keeps the audio stream CONTINUOUS in two ways so ffmpeg's muxer never starves
 // (which would freeze the whole recording):
@@ -15,31 +19,39 @@
 use std::io::Write;
 use std::time::{Duration, Instant};
 use windows::core::*;
-use windows::Win32::Foundation::*;
 use windows::Win32::Media::Audio::*;
 use windows::Win32::System::Com::*;
 
 const OUT_RATE: f64 = 48000.0;
 
 fn main() -> Result<()> {
+    let mic = std::env::args().any(|a| a == "--mic");
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
         let stdout = std::io::stdout();
         let mut out = std::io::BufWriter::with_capacity(1 << 16, stdout.lock());
         // Reopen on any capture error (device invalidated / format change) so the
-        // pipe to ffmpeg never permanently closes.
+        // pipe to the reader never permanently closes.
         loop {
-            if let Err(e) = capture(&mut out) {
-                eprintln!("loopback: {e:?}; reopening endpoint");
+            if let Err(e) = capture(&mut out, mic) {
+                eprintln!("{}: {e:?}; reopening endpoint", if mic { "mic" } else { "loopback" });
                 std::thread::sleep(Duration::from_millis(300));
             }
         }
     }
 }
 
-unsafe fn capture<W: Write>(out: &mut W) -> Result<()> {
+unsafe fn capture<W: Write>(out: &mut W, mic: bool) -> Result<()> {
     let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
-    let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
+    // Mic = default capture endpoint, no loopback flag. Otherwise = default render
+    // endpoint captured in loopback mode.
+    let (flow, stream_flags) = if mic {
+        (eCapture, 0u32)
+    } else {
+        (eRender, AUDCLNT_STREAMFLAGS_LOOPBACK)
+    };
+    let device = enumerator.GetDefaultAudioEndpoint(flow, eConsole)?;
+    let dev_id = endpoint_id(&device); // to detect a later default-device switch
     let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
 
     let pwfx = client.GetMixFormat()?;
@@ -49,13 +61,16 @@ unsafe fn capture<W: Write>(out: &mut W) -> Result<()> {
     let bits = wf.wBitsPerSample;
     let is_float = wf.wFormatTag == 3 /* IEEE_FLOAT */
         || (wf.wFormatTag == 0xFFFE /* EXTENSIBLE */ && bits == 32);
-    eprintln!("loopback: {in_rate} Hz, {in_ch} ch, {bits} bit, float={is_float}");
+    eprintln!(
+        "{}: {in_rate} Hz, {in_ch} ch, {bits} bit, float={is_float}",
+        if mic { "mic" } else { "loopback" }
+    );
 
-    // 200ms shared buffer, loopback mode.
+    // 200ms shared buffer.
     let hns_buffer: i64 = 2_000_000;
     client.Initialize(
         AUDCLNT_SHAREMODE_SHARED,
-        AUDCLNT_STREAMFLAGS_LOOPBACK,
+        stream_flags,
         hns_buffer,
         0,
         pwfx,
@@ -79,6 +94,7 @@ unsafe fn capture<W: Write>(out: &mut W) -> Result<()> {
     let start = Instant::now();
     let mut frames_out: u64 = 0;
     let mut last_packet = Instant::now();
+    let mut last_dev_check = start;
     const IDLE_SECS: f64 = 0.15;
 
     loop {
@@ -143,6 +159,16 @@ unsafe fn capture<W: Write>(out: &mut W) -> Result<()> {
                 frames_out += 1;
             }
         }
+        // Follow the active default device: if the user switches the mic (HyperX <->
+        // Snowball) or the output, reopen on the new default within ~2s.
+        if now.duration_since(last_dev_check).as_secs_f64() > 2.0 {
+            last_dev_check = now;
+            if let Ok(cur) = enumerator.GetDefaultAudioEndpoint(flow, eConsole) {
+                if endpoint_id(&cur) != dev_id {
+                    return Ok(());
+                }
+            }
+        }
         // If the reader (cava / ffmpeg) is gone, the pipe write fails -> exit
         // instead of busy-looping forever as an orphan (that was the CPU leak).
         if out.flush().is_err() {
@@ -150,6 +176,15 @@ unsafe fn capture<W: Write>(out: &mut W) -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+// Endpoint id string of a device (COM-allocated -> freed here). Used to notice when
+// the default device changes so we can reopen on the new one.
+unsafe fn endpoint_id(dev: &IMMDevice) -> Option<String> {
+    let p = dev.GetId().ok()?;
+    let s = p.to_string().ok();
+    CoTaskMemFree(Some(p.0 as *const core::ffi::c_void));
+    s
 }
 
 #[inline]

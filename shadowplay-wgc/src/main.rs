@@ -1,8 +1,8 @@
 // WGC rolling-buffer recorder. Captures the primary monitor via
 // Windows.Graphics.Capture and hardware-encodes to a ring of short HEVC MP4
-// segments. System audio (WASAPI loopback via the sysaudio-loopback helper,
-// s16le 48kHz stereo) is written to a parallel ring of raw PCM files and muxed
-// with the video only at save time.
+// segments. System audio AND the microphone (WASAPI via two sysaudio-loopback
+// helpers, s16le 48kHz stereo) are each written to a parallel ring of raw PCM
+// files -- seg*.pcm and seg*.mic.pcm -- and mixed with the video at save time.
 //
 // Why audio is NOT muxed live through the encoder: windows-capture's MF
 // MediaStreamSource pulls audio and video samples on a shared WinRT thread pool
@@ -181,23 +181,30 @@ impl GraphicsCaptureApiHandler for Rec {
     }
 }
 
-// Read s16le PCM from the loopback child and write it to seg{idx}.pcm, reopening a
-// fresh file whenever the capture thread advances audio_idx at a segment boundary.
-fn spawn_audio(dir: String, audio_idx: Arc<AtomicUsize>) {
+// Read s16le PCM from a sysaudio-loopback child and write it to a per-segment file,
+// reopening a fresh one whenever the capture thread advances audio_idx at a segment
+// boundary. mic=false captures system audio -> seg{idx}.pcm; mic=true captures the
+// microphone (--mic) -> seg{idx}.mic.pcm. Both are wallclock-paced (silence-filled
+// when idle), so they line up with the video and with each other; the save step
+// mixes them. Mixing at save (not live) is why the mic can't drag the framerate.
+fn spawn_audio(dir: String, audio_idx: Arc<AtomicUsize>, mic: bool) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let ext = if mic { "mic.pcm" } else { "pcm" };
     let lb = std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(|p| p.join("sysaudio-loopback.exe")))
         .unwrap_or_else(|| "sysaudio-loopback.exe".into());
     std::thread::spawn(move || {
-        let Ok(mut child) = std::process::Command::new(lb)
-            .stdout(std::process::Stdio::piped())
+        let mut cmd = std::process::Command::new(lb);
+        cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-        else {
-            eprintln!("could not start loopback");
+            .creation_flags(CREATE_NO_WINDOW);
+        if mic {
+            cmd.arg("--mic");
+        }
+        let Ok(mut child) = cmd.spawn() else {
+            eprintln!("could not start {}", if mic { "mic" } else { "loopback" });
             return;
         };
         let Some(mut out) = child.stdout.take() else { return };
@@ -210,7 +217,7 @@ fn spawn_audio(dir: String, audio_idx: Arc<AtomicUsize>) {
                 Ok(n) => {
                     let want = audio_idx.load(Ordering::Relaxed);
                     if want != cur {
-                        file = std::fs::File::create(format!("{dir}\\seg{want:02}.pcm")).ok();
+                        file = std::fs::File::create(format!("{dir}\\seg{want:02}.{ext}")).ok();
                         cur = want;
                     }
                     if let Some(f) = file.as_mut() {
@@ -232,7 +239,8 @@ fn main() {
     std::fs::create_dir_all(&dir).ok();
 
     let audio_idx = Arc::new(AtomicUsize::new(0));
-    spawn_audio(dir.clone(), audio_idx.clone());
+    spawn_audio(dir.clone(), audio_idx.clone(), false); // system audio -> seg*.pcm
+    spawn_audio(dir.clone(), audio_idx.clone(), true); //  microphone   -> seg*.mic.pcm
 
     let monitor = Monitor::primary().expect("no primary monitor");
     // Match the encoder to the monitor's real resolution so frames never hit the
