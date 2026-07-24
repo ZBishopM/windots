@@ -13,7 +13,10 @@ $createdNew = $false
 $mutex = [System.Threading.Mutex]::new($false, 'Global\glazewm-dwindle-ps', [ref]$createdNew)
 try { if (-not $mutex.WaitOne(0)) { return } } catch [System.Threading.AbandonedMutexException] { }
 
-$uri = [Uri]'ws://localhost:6123'
+# 127.0.0.1, not 'localhost': localhost resolves ::1 first, which GlazeWM's IPC
+# doesn't listen on, so every connect burns a ~2.1s IPv6 timeout before falling
+# back to IPv4 (the same trap that made the supervisor kill GlazeWM every 60s).
+$uri = [Uri]'ws://127.0.0.1:6123'
 
 # Release physical RAM while idle: this script mostly waits for events, so we
 # trim the working set (pages go to standby, fault back in on demand). Drops the

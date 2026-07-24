@@ -3,8 +3,14 @@
 # child dwindle, etc.) so a dead piece self-heals within a minute instead of
 # staying dead until the next login. Single-instance; trims its own RAM.
 
+# Single instance, robust: if a previous supervisor was killed while holding the
+# mutex, WaitOne throws AbandonedMutexException. Unhandled, that terminated this
+# script instantly -- the watchdog would be silently dead until the next login
+# (which is exactly what happened after a few Stop-Process restarts). Catching it
+# is correct: the mutex IS acquired, the exception only reports the prior abandon.
 $mutex = New-Object System.Threading.Mutex($false, 'Global\rice-supervisor')
-if (-not $mutex.WaitOne(0)) { exit }   # another supervisor already running
+try { if (-not $mutex.WaitOne(0)) { exit } }   # another supervisor already running
+catch [System.Threading.AbandonedMutexException] { }
 
 $cfg    = 'C:\Users\obisp\.config'
 $scoop  = 'C:\Users\obisp\scoop\apps'
