@@ -55,3 +55,6 @@ Start-Process $wez -ArgumentList 'start', '--', 'pwsh', '-NoExit', '-Command', '
 Start-Sleep -Seconds 3
 
 Focus 1  # end on the primary workspace
+
+# Once at login: has GlazeWM's animation PR #1392 merged yet? Toast if so (fail-silent).
+Start-Process pwsh -ArgumentList '-NoProfile', '-WindowStyle', 'Hidden', '-File', "$env:USERPROFILE\.config\glazewm-animcheck.ps1" -WindowStyle Hidden
