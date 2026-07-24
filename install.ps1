@@ -42,7 +42,7 @@ if (-not (Get-Command scoop -EA SilentlyContinue)) {
     Invoke-RestMethod get.scoop.sh | Invoke-Expression
 }
 scoop bucket add main 2>$null; scoop bucket add extras 2>$null
-foreach ($p in 'fastfetch', 'glazewm', 'altsnap', 'autohotkey', 'ffmpeg') {
+foreach ($p in 'fastfetch', 'glazewm', 'altsnap', 'autohotkey', 'ffmpeg', 'nu') {
     if (-not (scoop list $p 6>$null | Select-String $p)) { scoop install $p } else { Ok "have $p" }
 }
 if (-not (Get-Command wezterm -EA SilentlyContinue) -and -not (Test-Path "$env:ProgramFiles\WezTerm\wezterm.exe")) {
@@ -77,6 +77,9 @@ Deploy "$repo\config\fastfetch\config.jsonc"              "$home_\.config\fastfe
 Deploy "$repo\config\fastfetch\duck.txt"                  "$home_\.config\fastfetch\duck.txt"
 Deploy "$repo\config\glazewm\config.yaml"                 "$home_\.glzr\glazewm\config.yaml"
 Deploy "$repo\powershell\Microsoft.PowerShell_profile.ps1" "$home_\Documents\PowerShell\Microsoft.PowerShell_profile.ps1"
+# Nushell: the fast interactive shell (pwsh still runs the infra scripts). Config
+# carries fastfetch + the rice tool wrappers (cava/mic/notify-test).
+Deploy "$repo\nushell\config.nu"                          "$home_\AppData\Roaming\nushell\config.nu"
 foreach ($f in 'glazewm-dwindle.ps1', 'wezterm-hotkey.ahk', 'shadowplay-record.ps1', 'shadowplay-record.vbs', 'shadowplay-save.ps1', 'shadowplay-wgc-save.ps1', 'shadowplay-wgc.vbs', 'rice-supervisor.ps1', 'rice-supervisor.vbs', 'rice-autostart.ps1', 'rice-autostart.vbs') {
     Deploy "$repo\scripts\$f" "$home_\.config\$f"
 }
