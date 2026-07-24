@@ -38,7 +38,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{CreateMutexW, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LWIN, VK_RWIN, VK_SHIFT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateWindowExW, DefWindowProcW, GetMessageW, PeekMessageW, PostThreadMessageW,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PeekMessageW,
+    PostThreadMessageW,
     RegisterClassW, SetWindowDisplayAffinity, SetWindowsHookExW, ShowWindow, UpdateLayeredWindow,
     KBDLLHOOKSTRUCT, MSG, PM_NOREMOVE, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WDA_EXCLUDEFROMCAPTURE,
     WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER, WNDCLASSW,
@@ -480,6 +481,13 @@ fn worker() {
         while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
             if msg.message == WM_APP {
                 handle_switch(msg.wParam.0 as i32, overlay, screen, &rects, &bufs, &mut sock);
+            } else {
+                // MUST dispatch. The overlay window belongs to this thread, and
+                // without DispatchMessage its WM_PAINT never reaches DefWindowProc,
+                // so the update region is never validated and the system re-posts
+                // WM_PAINT immediately -- GetMessage then returns instantly forever
+                // and this thread spins at ~100% of a core.
+                DispatchMessageW(&msg);
             }
         }
         // Stop advertising: from here the hook must use its own fallback path
@@ -510,6 +518,8 @@ fn main() {
         let hinst: HINSTANCE = GetModuleHandleW(None).unwrap().into();
         let _hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_hook), hinst, 0).unwrap();
         let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).0 > 0 {} // pump so the hook stays alive
+        while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
+            DispatchMessageW(&msg); // pump so the hook stays alive
+        }
     }
 }

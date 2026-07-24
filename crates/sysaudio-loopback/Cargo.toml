@@ -1,0 +1,12 @@
+[package]
+name = "sysaudio-loopback"
+version = "0.1.0"
+edition = "2021"
+
+# WASAPI capture (loopback or microphone) -> s16le on stdout.
+[dependencies]
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_Media_Audio",
+  "Win32_System_Com",
+] }

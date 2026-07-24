@@ -95,11 +95,10 @@ foreach ($f in 'glazewm-dwindle.ps1', 'glazewm-animcheck.ps1', 'wezterm-hotkey.a
 # sysaudio-loopback.exe there automatically, so there is no copy step.
 Say '3/7  Build Rust tools (cargo workspace)'
 $dev = "$home_\dev"
-New-Item -ItemType Directory -Force "$dev\glaze-bar", "$dev\shadowplay-wgc" | Out-Null
-Copy-Item "$repo\glaze-bar\*"      "$dev\glaze-bar"      -Recurse -Force
-Copy-Item "$repo\shadowplay-wgc\*" "$dev\shadowplay-wgc" -Recurse -Force
-Copy-Item "$repo\Cargo.toml"       "$dev\Cargo.toml"     -Force   # workspace root
-Copy-Item "$repo\Cargo.lock"       "$dev\Cargo.lock"     -Force
+New-Item -ItemType Directory -Force "$dev\crates" | Out-Null
+Copy-Item "$repo\crates\*"   "$dev\crates"      -Recurse -Force
+Copy-Item "$repo\Cargo.toml" "$dev\Cargo.toml"  -Force   # workspace root
+Copy-Item "$repo\Cargo.lock" "$dev\Cargo.lock"  -Force
 Push-Location $dev
 try { cargo build --release } finally { Pop-Location }
 Ok "built workspace -> $dev\target\release\"

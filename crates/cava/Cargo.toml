@@ -1,0 +1,9 @@
+[package]
+name = "cava"
+version = "0.1.0"
+edition = "2021"
+
+# Terminal audio spectrum. Realtime FFT -> gets opt-level 3 (see the workspace root).
+[dependencies]
+rustfft = "6"
+crossterm = "0.28"

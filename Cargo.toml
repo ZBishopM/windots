@@ -3,20 +3,40 @@
 # sibling sysaudio-loopback.exe automatically (no copy step) and all bins share one
 # Cargo.lock. flutter/ and projects/ are unrelated -> excluded so cargo never tries
 # to attach them to this workspace.
+#
+# Each tool is its own crate under crates/. That is what makes the per-package
+# profile overrides below possible at all (opt-level is per package, so while all
+# six binaries lived in one package they were forced to share one setting), and it
+# means `cargo build -p micswitch` no longer compiles eframe/glow/rustfft.
 [workspace]
 resolver = "2"
-members = ["glaze-bar", "shadowplay-wgc"]
+members = [
+    "crates/glaze-bar",
+    "crates/shadowplay-notify",
+    "crates/cava",
+    "crates/ws-slide",
+    "crates/sysaudio-loopback",
+    "crates/micswitch",
+    "crates/shadowplay-wgc",
+]
 exclude = ["flutter", "projects"]
 
 # Profiles must live at the workspace root (a member's [profile.*] is ignored).
-# opt-level "z" keeps the egui notify small and is proven fine for cava's real-time
-# FFT; the recorder keeps opt-level 3. lto/strip/panic are shared by both.
+#
+# Default is opt-level 3: most of these tools are realtime (a 165 Hz FFT, a 6 ms
+# animation frame budget, a WASAPI capture loop, a 60 fps hardware encoder feed).
+# The previous workspace-wide "z" was chosen for the toast overlay and silently
+# applied to all of them.
+#
+# lto = "thin" rather than fat: with seven members, fat LTO meant touching any one
+# source file relinked the whole set. Thin keeps nearly all of the win.
 [profile.release]
-opt-level = "z"
-lto = true
+opt-level = 3
+lto = "thin"
 codegen-units = 1
 strip = true
 panic = "abort"
 
-[profile.release.package.shadowplay-wgc]
-opt-level = 3
+# The toast is a short-lived overlay with no hot path -- size is what matters.
+[profile.release.package.shadowplay-notify]
+opt-level = "z"
