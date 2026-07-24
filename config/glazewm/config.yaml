@@ -172,6 +172,15 @@ window_rules:
       - window_process: { equals: 'Microsoft.CmdPal.UI' }
       - window_process: { equals: 'PowerToys' }
         window_title: { regex: '.*? - Peek' }
+      # Claude Desktop is Electron (13 processes) and creates several windows that
+      # all share the class Chrome_WidgetWin_1 -- the real one plus untitled
+      # helpers/dialogs. Class can't tell them apart, so match on the empty title:
+      # the main window is titled 'Claude' and tiles normally, while the untitled
+      # ones would otherwise be inserted into the layout and shove everything
+      # around whenever they appear.
+      - window_process: { equals: 'claude' }
+        window_title: { regex: '^$' }
+
       - window_process: { equals: 'Lively' }
         window_class: { regex: 'HwndWrapper' }
       - window_process: { equals: 'EXCEL' }

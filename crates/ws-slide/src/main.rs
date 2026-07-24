@@ -1,3 +1,9 @@
+// No console: this is a background hook + GDI overlay with nothing to print. As
+// a console binary every launch allocated one, and because the default terminal
+// here is Windows Terminal that surfaced as a WT window popping open, taking
+// focus and sitting there -- the stray "cmd" window.
+#![windows_subsystem = "windows"]
+
 // ws-slide: interim workspace-switch slide animation for GlazeWM, standing in
 // until the official animation PR (glzr-io/glazewm#1392) lands.
 //

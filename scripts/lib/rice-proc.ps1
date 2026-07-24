@@ -70,8 +70,19 @@ function Start-RiceComponent {
     }
     try {
         $argv = if ($Component.Args) { & $Component.Args } else { @() }
-        if ($argv -and $argv.Count) { Start-Process $path -ArgumentList $argv -EA Stop }
-        else { Start-Process $path -EA Stop }
+        # -WindowStyle Hidden on Start-Process itself, NOT just inside the child's
+        # own arguments. Passing pwsh `-WindowStyle Hidden` only hides PowerShell's
+        # window; Windows still allocates a console for the new process, and since
+        # the default terminal here is Windows Terminal that surfaces as a WT
+        # window popping open and stealing focus. `shell:` AppsFolder targets don't
+        # accept the switch, so they are launched plainly.
+        if ($isShell) {
+            Start-Process $path -EA Stop
+        } elseif ($argv -and $argv.Count) {
+            Start-Process $path -ArgumentList $argv -WindowStyle Hidden -EA Stop
+        } else {
+            Start-Process $path -WindowStyle Hidden -EA Stop
+        }
         Write-RiceLog "started" $Component.Name
         return $true
     } catch {
