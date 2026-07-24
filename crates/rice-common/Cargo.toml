@@ -1,0 +1,23 @@
+[package]
+name = "rice-common"
+version = "0.1.0"
+edition = "2021"
+
+# Shared pieces of the rice's Rust tools. Everything is feature-gated so a
+# consumer only compiles what it asks for: micswitch wants `win` and nothing
+# else, the toast wants `ui`, ws-slide wants `ipc`.
+#
+# The `win` module deliberately uses raw `extern "system"` declarations instead
+# of the `windows` crate, so pulling in these helpers never drags a Win32
+# metadata crate into a binary that doesn't otherwise need one.
+[features]
+default = []
+ui = ["dep:eframe"]                       # egui palette + font + icon drawing
+ipc = ["dep:tungstenite", "dep:serde", "dep:serde_json"]
+event = ["dep:serde", "dep:serde_json"]   # island.json notification payload
+
+[dependencies]
+eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts"], optional = true }
+tungstenite = { version = "0.24", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }

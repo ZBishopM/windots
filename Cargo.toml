@@ -11,6 +11,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/rice-common",
     "crates/glaze-bar",
     "crates/shadowplay-notify",
     "crates/cava",

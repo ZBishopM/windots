@@ -826,6 +826,7 @@ version = "0.2.0"
 dependencies = [
  "chrono",
  "eframe",
+ "rice-common",
  "serde",
  "serde_json",
  "sysinfo",
@@ -1958,6 +1959,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rice-common"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "serde",
+ "serde_json",
+ "tungstenite",
+]
+
+[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2098,6 +2109,7 @@ name = "shadowplay-notify"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "rice-common",
 ]
 
 [[package]]

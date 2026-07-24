@@ -3,6 +3,7 @@ name = "shadowplay-notify"
 version = "0.1.0"
 edition = "2021"
 
-# Toast overlay. egui only; its Win32 calls are raw externs.
+# Toast overlay. egui only; its Win32 calls are raw externs (via rice-common::win).
 [dependencies]
 eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts"] }
+rice-common = { path = "../rice-common", features = ["ui"] }

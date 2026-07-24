@@ -6,34 +6,14 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-// ---- Release physical RAM while idle (pages -> standby, fault back on demand) ----
-#[cfg(windows)]
-extern "system" {
-    fn GetCurrentProcess() -> isize;
-    fn K32EmptyWorkingSet(process: isize) -> i32;
-    fn CreateMutexW(attr: *const core::ffi::c_void, owner: i32, name: *const u16) -> isize;
-    fn GetLastError() -> u32;
-}
+use rice_common::ui::{col, draw_icon};
+use rice_common::{config, theme, win};
 
 // Single-instance per monitor: hold a named mutex keyed by --x. A second bar for
 // the same monitor (supervisor race, stray manual launch) finds it already held
 // and exits immediately, so bars can never duplicate.
-#[cfg(windows)]
 fn claim_single_instance(x: i32) {
-    unsafe {
-        let name: Vec<u16> = format!("Global\\glaze-bar-{x}\0").encode_utf16().collect();
-        CreateMutexW(std::ptr::null(), 0, name.as_ptr());
-        if GetLastError() == 183 {
-            // ERROR_ALREADY_EXISTS
-            std::process::exit(0);
-        }
-    }
-}
-fn trim_ram() {
-    #[cfg(windows)]
-    unsafe {
-        K32EmptyWorkingSet(GetCurrentProcess());
-    }
+    win::single_instance_or_exit(&format!("Global\\glaze-bar-{x}"));
 }
 
 // ---- Auto click-through: when a fullscreen app (a game) covers this bar's monitor,
@@ -194,13 +174,13 @@ struct BmResp {
     data: Option<BmData>,
 }
 
-// ---- warm palette (matches the sunset system theme) ----
-const BAR_BG: egui::Color32 = egui::Color32::from_rgb(26, 22, 19); // #1a1613
-const ISL_SURFACE: egui::Color32 = egui::Color32::from_rgb(40, 33, 28); // raised warm pill
-const ISL_HI: egui::Color32 = egui::Color32::from_rgb(60, 50, 43); // top highlight edge
-const WARM_TEXT: egui::Color32 = egui::Color32::from_rgb(233, 224, 214);
-const WARM_SUB: egui::Color32 = egui::Color32::from_rgb(170, 154, 140);
-const WARM_ACCENT: egui::Color32 = egui::Color32::from_rgb(224, 163, 92); // amber
+// ---- warm palette (shared with the toast via rice_common::theme) ----
+const BAR_BG: egui::Color32 = col(theme::BAR_BG);
+const ISL_SURFACE: egui::Color32 = col(theme::SURFACE); // raised warm pill
+const ISL_HI: egui::Color32 = col(theme::HIGHLIGHT); // top highlight edge
+const WARM_TEXT: egui::Color32 = col(theme::TEXT);
+const WARM_SUB: egui::Color32 = col(theme::SUBTEXT);
+const WARM_ACCENT: egui::Color32 = col(theme::ACCENT); // amber
 
 // A transient context the dynamic island morphs to show (written to the event
 // file by the save step / mic command, same content model as the toast).
@@ -226,69 +206,16 @@ struct Shared {
     island_serial: u64, // bumps on each new event so the UI notices
 }
 
-fn parse_hex(s: &str) -> Option<[u8; 3]> {
-    let h = s.trim_start_matches('#');
-    (h.len() == 6).then(|| ()).and_then(|_| {
-        Some([
-            u8::from_str_radix(&h[0..2], 16).ok()?,
-            u8::from_str_radix(&h[2..4], 16).ok()?,
-            u8::from_str_radix(&h[4..6], 16).ok()?,
-        ])
-    })
-}
+// parse_hex, the opacity helpers, the icon table and draw_icon all live in
+// rice_common now (theme / config / ui) so the bar and the toast share one copy.
+use rice_common::theme::parse_hex;
+use rice_common::ui::icon_glyph;
 
-// Live-adjustable translucency values persisted to ~/.config/*-opacity.txt (the bar
-// reads its own; wezterm watches term-opacity.txt and hot-reloads on change).
-fn opacity_path(name: &str) -> String {
-    format!("{}\\.config\\{}", std::env::var("USERPROFILE").unwrap_or_default(), name)
-}
 fn read_opacity(name: &str, default: f32) -> f32 {
-    std::fs::read_to_string(opacity_path(name))
-        .ok()
-        .and_then(|s| s.trim().parse::<f32>().ok())
-        .map(|v| v.clamp(0.3, 1.0))
-        .unwrap_or(default)
+    config::read_opacity(name, default)
 }
 fn write_opacity(name: &str, v: f32) {
-    let _ = std::fs::write(opacity_path(name), format!("{v:.3}"));
-}
-
-fn icon_glyph(name: &str) -> &'static str {
-    match name {
-        "mic" => "\u{f130}",
-        "mic-off" => "\u{f131}",
-        "replay" | "save" => "\u{f03d}",
-        "check" => "\u{f00c}",
-        "rec" => "\u{f111}", // filled circle
-        "info" => "\u{f05a}",
-        "warn" => "\u{f071}",
-        "term" => "\u{f120}", // fa-terminal
-        _ => "",
-    }
-}
-
-// Draw an icon glyph optically centred at `center` using its real ink bounds
-// (mesh_bounds). egui's CENTER_CENTER only centres the layout box; icon glyphs sit
-// off-centre within that box (Nerd Font metrics differ per glyph), so centring the
-// actual painted ink is what makes every icon land dead-centre in its chip.
-// Per-glyph pixel-perfect offset so the glyph's real ink centre lands on the chip
-// centre (measured with the GLAZEBAR_ICONTEST rig; see main). Values are at size 14
-// and scale with the font size.
-// Shift so the glyph's ink CENTROID (visual mass) — not just its box — lands centre.
-// Measured at 10x (GLAZEBAR_ICONTEST) then divided down, so these are exact at size 14.
-fn icon_correction(glyph: &str) -> egui::Vec2 {
-    match glyph {
-        "\u{f03d}" => egui::vec2(0.72, 0.10),  // fa-video-camera (body-heavy left)
-        "\u{f120}" => egui::vec2(1.76, -1.76), // fa-terminal (>_ mass low-left)
-        "\u{f130}" => egui::vec2(0.00, 0.06),  // fa-microphone (symmetric)
-        _ => egui::vec2(0.0, 0.0),
-    }
-}
-
-fn draw_icon(painter: &egui::Painter, center: egui::Pos2, glyph: &str, size: f32, color: egui::Color32) {
-    let galley = painter.layout_no_wrap(glyph.to_string(), egui::FontId::proportional(size), color);
-    let pos = center - galley.mesh_bounds.center().to_vec2() + icon_correction(glyph) * (size / 14.0);
-    painter.galley(pos, galley, color);
+    config::write_opacity(name, v)
 }
 
 // Quick-access buttons shown when the island is expanded: (action, glyph, accent).
@@ -571,33 +498,8 @@ fn fetch_gpu() -> Option<String> {
     None
 }
 
-// Load JetBrainsMono Nerd Font (already installed for the terminal) as the
-// primary font so glyphs like the ↓↑ arrows render; egui's bundled fonts stay
-// as fallback. No-op if the font isn't found (arrows would then show as tofu).
-fn load_font(ctx: &egui::Context) {
-    let mut candidates = vec![
-        "C:\\Windows\\Fonts\\JetBrainsMonoNerdFont-Regular.ttf".to_string(),
-    ];
-    if let Ok(d) = std::env::var("LOCALAPPDATA") {
-        candidates.insert(
-            0,
-            format!("{d}\\Microsoft\\Windows\\Fonts\\JetBrainsMonoNerdFont-Regular.ttf"),
-        );
-    }
-    for path in candidates {
-        if let Ok(bytes) = std::fs::read(&path) {
-            let mut fonts = egui::FontDefinitions::default();
-            fonts
-                .font_data
-                .insert("jbm".to_owned(), egui::FontData::from_owned(bytes));
-            for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-                fonts.families.entry(fam).or_default().insert(0, "jbm".to_owned());
-            }
-            ctx.set_fonts(fonts);
-            return;
-        }
-    }
-}
+// JetBrainsMono Nerd Font loading lives in rice_common::ui (shared with the toast).
+use rice_common::ui::load_nerd_font as load_font;
 
 struct BarApp {
     shared: Arc<Mutex<Shared>>,
@@ -1048,7 +950,7 @@ impl eframe::App for BarApp {
 
         self.frame = self.frame.wrapping_add(1);
         if self.frame % 15 == 5 {
-            trim_ram();
+            win::trim_ram();
         }
         ctx.request_repaint_after(Duration::from_millis(1000));
     }
