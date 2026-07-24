@@ -6,17 +6,23 @@ Start-Sleep -Seconds 12  # let GlazeWM + dwindle + the bars settle after login
 
 $wez = 'C:\Program Files\WezTerm\wezterm-gui.exe'
 
+# 127.0.0.1, not 'localhost'. This one mattered most: 'localhost' resolves ::1
+# first, which GlazeWM's IPC doesn't listen on, so the connect burned ~2.1s of a
+# 3000ms budget on the IPv6 timeout. When it lost that race the catch{} swallowed
+# it, Focus silently did nothing, and the next app opened on whatever workspace
+# happened to be focused -- the "my apps came up on the wrong workspace" symptom.
 function Focus($n) {
     try {
         $s = New-Object System.Net.WebSockets.ClientWebSocket
         $ct = [System.Threading.CancellationToken]::None
-        if ($s.ConnectAsync([Uri]'ws://localhost:6123', $ct).Wait(3000)) {
+        if ($s.ConnectAsync([Uri]'ws://127.0.0.1:6123', $ct).Wait(4000)) {
             $b = [Text.Encoding]::UTF8.GetBytes("command focus --workspace $n")
             [void]$s.SendAsync((New-Object System.ArraySegment[byte] (, $b)), 'Text', $true, $ct).Wait(2000)
             Start-Sleep -Milliseconds 400
         }
+        else { Write-Host "Focus ${n}: no IPC" }
         $s.Dispose()
-    } catch {}
+    } catch { Write-Host "Focus ${n} failed: $_" }
 }
 
 # Launch then block until the app's window exists (login is a clean slate, so the

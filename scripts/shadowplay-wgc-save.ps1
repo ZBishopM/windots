@@ -8,31 +8,44 @@ $out = 'C:\Users\obisp\ShadowPlay\clips'
 $ff  = 'C:\Users\obisp\scoop\apps\ffmpeg\current\bin\ffmpeg.exe'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
+# Only one save at a time: Alt+F10 and the bar's save button are independent
+# triggers, and two overlapping runs used to stomp each other's temp files.
+$saveLock = New-Object System.Threading.Mutex($false, 'Global\shadowplay-save')
+try { if (-not $saveLock.WaitOne(15000)) { exit 1 } }
+catch [System.Threading.AbandonedMutexException] { }   # previous save died; we own it now
+
 $segs = Get-ChildItem "$buf\seg*.mp4" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime
-if ($segs.Count -lt 2) { exit 1 }
+if ($segs.Count -lt 2) { $saveLock.ReleaseMutex(); exit 1 }
 
 # Newest segment is still being written -> drop it, take the newest 6 (~30s).
 $complete = $segs[0..($segs.Count - 2)]
 $last = @($complete | Select-Object -Last 6)
 
-$listFile = Join-Path $buf '_concat.txt'
+# Per-run temp names under TEMP (not fixed names in the buffer dir, which the
+# recorder is also writing), cleaned up in the finally below.
+$tmp      = [System.IO.Path]::GetRandomFileName()
+$listFile = Join-Path $env:TEMP "$tmp.concat.txt"
+$sysOut   = Join-Path $env:TEMP "$tmp.sys.pcm"
+$micOut   = Join-Path $env:TEMP "$tmp.mic.pcm"
+
+try {
+
 ($last | ForEach-Object { "file '" + ($_.FullName -replace "'", "''") + "'" }) |
     Set-Content -Path $listFile -Encoding ascii
 
 # Concat the matching per-segment PCM (same time order): system audio and mic.
-$sysOut = Join-Path $buf '_sys.pcm'
-$micOut = Join-Path $buf '_mic.pcm'
 $haveSys = $true
 $haveMic = $true
 $fsS = [System.IO.File]::Create($sysOut)
 $fsM = [System.IO.File]::Create($micOut)
-foreach ($v in $last) {
-    $ps = Join-Path $buf ($v.BaseName + '.pcm')
-    $pm = Join-Path $buf ($v.BaseName + '.mic.pcm')
-    if (Test-Path $ps) { $b = [System.IO.File]::ReadAllBytes($ps); $fsS.Write($b, 0, $b.Length) } else { $haveSys = $false }
-    if (Test-Path $pm) { $b = [System.IO.File]::ReadAllBytes($pm); $fsM.Write($b, 0, $b.Length) } else { $haveMic = $false }
-}
-$fsS.Close(); $fsM.Close()
+try {
+    foreach ($v in $last) {
+        $ps = Join-Path $buf ($v.BaseName + '.pcm')
+        $pm = Join-Path $buf ($v.BaseName + '.mic.pcm')
+        if (Test-Path $ps) { $b = [System.IO.File]::ReadAllBytes($ps); $fsS.Write($b, 0, $b.Length) } else { $haveSys = $false }
+        if (Test-Path $pm) { $b = [System.IO.File]::ReadAllBytes($pm); $fsM.Write($b, 0, $b.Length) } else { $haveMic = $false }
+    }
+} finally { $fsS.Close(); $fsM.Close() }   # a mid-write segment must not leak handles
 $haveSys = $haveSys -and (Get-Item $sysOut).Length -gt 0
 $haveMic = $haveMic -and (Get-Item $micOut).Length -gt 0
 
@@ -54,7 +67,12 @@ elseif ($haveSys) {
 else {
     & $ff -hide_banner -loglevel error -f concat -safe 0 -i $listFile -c copy -y $dest 2>$null
 }
-Remove-Item $sysOut, $micOut -ErrorAction SilentlyContinue
+if (-not (Test-Path $dest)) {
+    # ffmpeg failed (its stderr is discarded above). Say so instead of leaving
+    # Alt+F10 looking like a dead key.
+    Start-Process 'C:\Users\obisp\dev\target\release\shadowplay-notify.exe' `
+        -ArgumentList '--title "Replay falló" --body "ffmpeg no produjo el clip" --icon warn --accent "#d08770" --hold 6'
+}
 
 if (Test-Path $dest) {
     # Toast on the FOCUSED monitor (per GlazeWM IPC), fall back to primary top-right.
@@ -89,4 +107,11 @@ if (Test-Path $dest) {
     $nargs = "--title `"Replay guardado`" --body `"$fname`" --icon replay --accent `"#a9b56a`" --open `"$dest`" --x $nx --y $ny"
     Start-Process 'C:\Users\obisp\dev\target\release\shadowplay-notify.exe' -ArgumentList $nargs
     Write-Output $dest
+}
+
+}
+finally {
+    Remove-Item $listFile, $sysOut, $micOut -Force -ErrorAction SilentlyContinue
+    try { $saveLock.ReleaseMutex() } catch {}
+    $saveLock.Dispose()
 }

@@ -54,6 +54,7 @@ const DUR: f32 = 0.20; // seconds per slide
 const FRAME: Duration = Duration::from_millis(6);
 const BAR_H: i32 = 34; // top-bar height to leave untouched so glaze-bar doesn't slide
 const HOLD: Duration = Duration::from_millis(35); // brief cover while GlazeWM paints the new ws
+const IO_TIMEOUT: Duration = Duration::from_millis(1200); // per IPC read/write; never block forever
 
 // ---- GlazeWM IPC JSON ---------------------------------------------------------
 #[derive(Deserialize)]
@@ -284,26 +285,42 @@ fn parse_mons(txt: &str) -> Option<Vec<MonInfo>> {
     )
 }
 
+// Connect with read/write timeouts. Without them a wedged GlazeWM blocks the
+// worker in sock.read() forever -- and since the hook swallows Super+N to keep it
+// away from the taskbar, workspace switching would die silently with no way back.
+// Bounded, the worst case is a short stall and a skipped animation.
+fn connect_ipc() -> Option<Sock> {
+    let (sock, _) = tungstenite::connect(IPC).ok()?;
+    if let MaybeTlsStream::Plain(s) = sock.get_ref() {
+        let _ = s.set_read_timeout(Some(IO_TIMEOUT));
+        let _ = s.set_write_timeout(Some(IO_TIMEOUT));
+    }
+    Some(sock)
+}
+
 fn query_on<S: Read + Write>(sock: &mut tungstenite::WebSocket<S>) -> Option<Vec<MonInfo>> {
     sock.send(Message::Text("query monitors".into())).ok()?;
     for _ in 0..8 {
-        if let Ok(Message::Text(t)) = sock.read() {
-            if let Some(v) = parse_mons(&t) {
-                return Some(v);
+        match sock.read() {
+            Ok(Message::Text(t)) => {
+                if let Some(v) = parse_mons(&t) {
+                    return Some(v);
+                }
             }
+            Ok(_) => {}
+            Err(_) => return None, // timed out or closed -> caller falls back
         }
     }
     None
 }
 
 fn query_new() -> Option<Vec<MonInfo>> {
-    let (mut sock, _) = tungstenite::connect(IPC).ok()?;
-    query_on(&mut sock)
+    query_on(&mut connect_ipc()?)
 }
 
 // Fire-and-wait on a throwaway connection (fallback when the persistent one died).
 fn ipc_send(cmd: &str) {
-    if let Ok((mut s, _)) = tungstenite::connect(IPC) {
+    if let Some(mut s) = connect_ipc() {
         if s.send(Message::Text(cmd.into())).is_ok() {
             let _ = s.read();
         }
@@ -318,7 +335,7 @@ fn send_on<S: Read + Write>(sock: &mut tungstenite::WebSocket<S>, cmd: &str) -> 
 // it's stale, so the switch always happens even if the animation is skipped.
 fn cmd(sock: &mut Option<Sock>, c: &str) {
     if sock.is_none() {
-        *sock = tungstenite::connect(IPC).ok().map(|(s, _)| s);
+        *sock = connect_ipc();
     }
     let ok = matches!(sock.as_mut().map(|s| send_on(s, c)), Some(true));
     if !ok {
@@ -329,7 +346,7 @@ fn cmd(sock: &mut Option<Sock>, c: &str) {
 
 fn query(sock: &mut Option<Sock>) -> Option<Vec<MonInfo>> {
     if sock.is_none() {
-        *sock = tungstenite::connect(IPC).ok().map(|(s, _)| s);
+        *sock = connect_ipc();
     }
     let out = sock.as_mut().and_then(|s| query_on(s));
     if out.is_none() {
@@ -420,9 +437,17 @@ unsafe extern "system" fn kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
         } else if down && WIN_DOWN.load(Ordering::Relaxed) && (0x31..=0x39).contains(&vk) {
             // Win+Shift+N is GlazeWM's "move window to workspace" -> leave it alone.
             let shift = (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
-            let tid = WORKER_TID.load(Ordering::Relaxed);
-            if !shift && tid != 0 {
-                let _ = PostThreadMessageW(tid, WM_APP, WPARAM((vk - 0x30) as usize), LPARAM(0));
+            if !shift {
+                let n = (vk - 0x30) as usize;
+                let tid = WORKER_TID.load(Ordering::Relaxed);
+                // Post to the worker, which covers the desktop and animates. If the
+                // worker is gone (panicked, or still starting) fall back to a plain
+                // switch on a detached thread: no animation, but Super+N must never
+                // become a dead key -- GlazeWM no longer binds it, so this process
+                // is the only thing that can service it.
+                if tid == 0 || !PostThreadMessageW(tid, WM_APP, WPARAM(n), LPARAM(0)).is_ok() {
+                    std::thread::spawn(move || ipc_send(&format!("command focus --workspace {n}")));
+                }
                 return LRESULT(1); // swallow so the taskbar doesn't also act on Win+N
             }
         }
@@ -457,6 +482,9 @@ fn worker() {
                 handle_switch(msg.wParam.0 as i32, overlay, screen, &rects, &bufs, &mut sock);
             }
         }
+        // Stop advertising: from here the hook must use its own fallback path
+        // rather than posting into a queue nobody is reading.
+        WORKER_TID.store(0, Ordering::Relaxed);
         for b in &bufs {
             let _ = DeleteDC(b.strip);
         }

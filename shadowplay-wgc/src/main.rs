@@ -229,7 +229,25 @@ fn spawn_audio(dir: String, audio_idx: Arc<AtomicUsize>, mic: bool) {
     });
 }
 
+// Single instance. Every other rice binary has this; without it two recorders
+// would write the same rolling buffer and run the hardware encoder twice, and a
+// stray double-launch (Startup shortcut + supervisor) is enough to cause it.
+fn claim_single_instance() -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::System::Threading::CreateMutexW;
+    let name: Vec<u16> = "Global\\shadowplay-wgc\0".encode_utf16().collect();
+    unsafe {
+        let _ = CreateMutexW(None, false, PCWSTR(name.as_ptr()));
+        GetLastError() != ERROR_ALREADY_EXISTS
+    }
+}
+
 fn main() {
+    if !claim_single_instance() {
+        eprintln!("another shadowplay-wgc is already recording");
+        return;
+    }
     let dir = std::env::args().nth(1).unwrap_or_else(|| {
         format!(
             "{}\\ShadowPlay\\wgc-buffer",

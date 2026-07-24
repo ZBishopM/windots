@@ -24,10 +24,15 @@ $uri = [Uri]'ws://127.0.0.1:6123'
 Add-Type -Namespace Win -Name Mem -MemberDefinition '[System.Runtime.InteropServices.DllImport("psapi.dll")] public static extern bool EmptyWorkingSet(System.IntPtr h);' -ErrorAction SilentlyContinue
 function Trim { try { [Win.Mem]::EmptyWorkingSet([System.Diagnostics.Process]::GetCurrentProcess().Handle) | Out-Null } catch {} }
 
+# Bounded send. An unbounded .Wait() here could block the event loop forever if
+# GlazeWM stopped draining the socket, and the supervisor only checks that this
+# process exists -- so a wedge looked healthy and fibonacci layout just quietly
+# stopped working. Returns $false so callers can drop out and reconnect.
 function Send-WS($ws, $msg) {
   $b = [Text.Encoding]::UTF8.GetBytes($msg)
   $seg = [System.ArraySegment[byte]]::new($b)
-  $ws.SendAsync($seg, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, [Threading.CancellationToken]::None).Wait()
+  try { return $ws.SendAsync($seg, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, [Threading.CancellationToken]::None).Wait(3000) }
+  catch { return $false }
 }
 # Blocking receive with its own buffer; returns text, or $null if the wait times
 # out (the pending task is passed back in/out so it is never leaked).
@@ -38,7 +43,7 @@ function New-WS($uri) {
 }
 # One-shot request/response on the action socket.
 function Query-WS($ws, $msg, $timeoutMs) {
-  Send-WS $ws $msg
+  if (-not (Send-WS $ws $msg)) { return $null }
   $buf = New-Object byte[] 131072
   $seg = [System.ArraySegment[byte]]::new($buf)
   $r = $ws.ReceiveAsync($seg, [Threading.CancellationToken]::None)
@@ -58,7 +63,9 @@ while ($true) {
     # re-tiled the workspace and changed window sizes. window_managed alone still
     # produces the fibonacci spiral as windows are added, and leaves manual
     # moves/resizes untouched.
-    Send-WS $evt 'sub -e window_managed'
+    # If the subscribe itself doesn't land there is nothing to listen to; drop out
+    # and let the outer loop reconnect rather than blocking on a dead socket.
+    if (-not (Send-WS $evt 'sub -e window_managed')) { Start-Sleep 2; continue }
     Start-Sleep -Milliseconds 500; Trim
 
     $buf = New-Object byte[] 131072
