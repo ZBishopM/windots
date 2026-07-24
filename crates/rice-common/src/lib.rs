@@ -19,3 +19,6 @@ pub mod ipc;
 
 #[cfg(feature = "event")]
 pub mod event;
+
+#[cfg(feature = "settings")]
+pub mod settings;

@@ -11,7 +11,7 @@
 // A double-width filmstrip [outgoing | incoming] is scrolled inside a window
 // pinned to the monitor (only the source offset moves), so it stays clipped to
 // its monitor and the two halves of the desktop slide together toward the new
-// content. The top BAR_H rows are left untouched so the bar never slides.
+// content. The top bar_h() rows are left untouched so the bar never slides.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -53,7 +53,12 @@ static WORKER_TID: AtomicU32 = AtomicU32::new(0);
 const IPC: &str = "ws://127.0.0.1:6123";
 const DUR: f32 = 0.20; // seconds per slide
 const FRAME: Duration = Duration::from_millis(6);
-const BAR_H: i32 = 34; // top-bar height to leave untouched so glaze-bar doesn't slide
+/// Top-bar height, left untouched so glaze-bar doesn't slide with the desktop.
+/// Read from ~/.config/rice.json: it used to be written here *and* twice in the
+/// bar, so changing the bar's height made this animation tear by the difference.
+fn bar_h() -> i32 {
+    rice_common::settings::Settings::get().bar_height
+}
 const HOLD: Duration = Duration::from_millis(35); // brief cover while GlazeWM paints the new ws
 const IO_TIMEOUT: Duration = Duration::from_millis(1200); // per IPC read/write; never block forever
 
@@ -172,7 +177,7 @@ fn make_dib(screen: HDC, w: i32, h: i32) -> HDC {
 }
 
 fn make_buf(screen: HDC, w_full: i32, h_full: i32) -> MonBuf {
-    let (w, h) = (w_full, (h_full - BAR_H).max(1));
+    let (w, h) = (w_full, (h_full - bar_h()).max(1));
     MonBuf {
         strip: make_dib(screen, w * 2, h),
         w,
@@ -194,7 +199,7 @@ fn blit(overlay: HWND, screen: HDC, b: &MonBuf, m: &MonRect, off: i32) {
         let size = SIZE { cx: b.w, cy: b.h };
         let dst = POINT {
             x: m.x,
-            y: m.y + BAR_H,
+            y: m.y + bar_h(),
         };
         let src = POINT { x: off, y: 0 };
         let _ = UpdateLayeredWindow(
@@ -217,7 +222,7 @@ fn blit(overlay: HWND, screen: HDC, b: &MonBuf, m: &MonRect, off: i32) {
 fn cover(overlay: HWND, screen: HDC, b: &MonBuf, m: &MonRect, forward: bool) -> (i32, i32) {
     unsafe {
         let (w, h) = (b.w, b.h);
-        let cy = m.y + BAR_H;
+        let cy = m.y + bar_h();
         let (start, end) = if forward {
             let _ = BitBlt(b.strip, 0, 0, w, h, screen, m.x, cy, SRCCOPY | CAPTUREBLT);
             (0, w)
@@ -235,7 +240,7 @@ fn cover(overlay: HWND, screen: HDC, b: &MonBuf, m: &MonRect, forward: bool) -> 
 fn slide(overlay: HWND, screen: HDC, b: &MonBuf, m: &MonRect, forward: bool, start: i32, end: i32) {
     unsafe {
         let (w, h) = (b.w, b.h);
-        let cy = m.y + BAR_H;
+        let cy = m.y + bar_h();
         if forward {
             let _ = BitBlt(b.strip, w, 0, w, h, screen, m.x, cy, SRCCOPY | CAPTUREBLT);
         } else {

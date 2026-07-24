@@ -43,9 +43,19 @@ Cierra sesión y vuelve a entrar (o reinicia) para que arranque todo.
 | **ShadowPlay (WGC)** | Buffer rodante de 30 s vía Windows.Graphics.Capture (HEVC hardware, ~38% menos GPU que ddagrab) + audio del sistema | `~/dev/shadowplay-wgc`, `~/.config/shadowplay-wgc-*` |
 | **ShadowPlay (ddagrab)** | Grabador anterior (ffmpeg AV1 + loopback). Fallback del tag v1.0 | `~/.config/shadowplay-record.*` |
 | **shadowplay-notify** | Toast animado al guardar un clip (Rust) | binario en `~/dev/target/release/` |
-| **sysaudio-loopback** | Captura audio del sistema (WASAPI, Rust) | binario en `~/dev/target/release/` |
-| **rice-supervisor** | Watchdog: revive cualquier componente que muera (<60s) | `~/.config/rice-supervisor.ps1` |
+| **sysaudio-loopback** | Captura audio del sistema o del micro (WASAPI, Rust) | binario en `~/dev/target/release/` |
+| **micswitch** | Alterna el micro por defecto entre los de `rice.json` | binario en `~/dev/target/release/`, comando `mic` |
+| **ws-slide** | Animación de deslizamiento al cambiar de workspace. **Es dueño de SUPER+1..9** (GlazeWM ya no los bindea), así que si muere, el cambio de workspace deja de funcionar hasta que el supervisor lo reviva | binario en `~/dev/target/release/` |
+| **rice-supervisor** | Watchdog: revive cualquier componente que muera (<60s). Tabla de componentes + log en `~/.config/logs/` | `~/.config/rice-supervisor.ps1` |
 | **cava** | Visualizador de espectro de audio en terminal (FFT, 165fps) | binario en `~/dev/target/release/`, comando `cava` |
+
+### Configuración y sincronización
+
+| Archivo | Para qué |
+|---|---|
+| `~/.config/rice.json` | Altura de la barra, lista de micros, URL del IPC. Se lee en caliente por los binarios; sin el archivo se usan los valores por defecto |
+| `~/.config/lib/*.ps1` | Librería común de los scripts: rutas (`rice-paths`), cliente IPC de GlazeWM (`rice-ipc`), helpers de procesos (`rice-proc`) |
+| `sync.ps1` | Copia el sistema vivo → repo (lo inverso de `install.ps1`). `-Check` sólo reporta diferencias y sale con código 1 |
 
 Los binarios Rust viven en un **workspace cargo** (`~/dev/Cargo.toml`, 2 crates): `glaze-bar`
 (barra + `cava` + `sysaudio-loopback` + `shadowplay-notify`) y `shadowplay-wgc` (el grabador).
@@ -132,9 +142,23 @@ dotfiles/
 ├─ config/fastfetch/        # config.jsonc + duck.txt
 ├─ config/glazewm/config.yaml
 ├─ powershell/…profile.ps1
-├─ scripts/                 # dwindle, wezterm-hotkey, shadowplay-*
+├─ scripts/                 # dwindle, wezterm-hotkey, shadowplay-*, supervisor
+│  └─ lib/                  # rice-paths · rice-ipc · rice-proc (dot-sourced)
 ├─ altsnap/AltSnap.ini
-└─ glaze-bar/               # proyecto cargo (3 binarios)
-   ├─ Cargo.toml · Cargo.lock
-   └─ src/{main.rs, bin/shadowplay-notify.rs, bin/sysaudio-loopback.rs}
+├─ sync.ps1                 # live -> repo (inverso de install.ps1)
+├─ Cargo.toml · Cargo.lock  # raíz del workspace
+└─ crates/                  # un crate por herramienta
+   ├─ rice-common/          # lib compartida: theme · ui · win · ipc · config · event · args · settings
+   ├─ glaze-bar/            # barra de estado (egui)
+   ├─ shadowplay-notify/    # toast
+   ├─ shadowplay-wgc/       # grabador WGC
+   ├─ ws-slide/             # animación de workspace (dueño de SUPER+1..9)
+   ├─ sysaudio-loopback/    # captura WASAPI
+   ├─ micswitch/            # cambio de micro
+   └─ cava/                 # visualizador de espectro
 ```
+
+Cada herramienta es su propio crate: así cada una declara sólo lo que usa y
+recibe su propio `opt-level` (el workspace compila a 3 por ser casi todo código
+en tiempo real, y sólo el toast usa `"z"`). Tocar un binario ya no relinkea el
+resto.

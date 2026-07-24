@@ -14,9 +14,13 @@ use windows::Win32::UI::Shell::PropertiesSystem::*; // IPropertyStore, PROPERTYK
 
 const CLSID_POLICY_CONFIG: GUID = GUID::from_u128(0x870af99c_171d_4f9e_af0d_e63df40c2bc9);
 const IID_IPOLICY_CONFIG: GUID = GUID::from_u128(0xf8679f50_850a_41cf_9c72_430f290290c8);
-// Only cycle between the real mics (ignore Steam/Oculus/VoiceMeeter virtual inputs).
-// Matched case-insensitively against the device friendly name.
-const MICS: [&str; 2] = ["hyperx", "snowball"];
+// Only cycle between the real mics (ignore Steam/Oculus/VoiceMeeter virtual
+// inputs). Matched case-insensitively against the device friendly name, and read
+// from ~/.config/rice.json ("mics") so new hardware doesn't mean a recompile.
+// Defaults to hyperx + snowball when the file is absent.
+fn mics() -> &'static [String] {
+    &rice_common::settings::Settings::get().mics
+}
 
 // PKEY_Device_FriendlyName
 const PKEY_FRIENDLY: PROPERTYKEY = PROPERTYKEY {
@@ -76,7 +80,7 @@ fn main() -> Result<()> {
         let picks: Vec<usize> = (0..names.len())
             .filter(|&i| {
                 let n = names[i].to_lowercase();
-                MICS.iter().any(|m| n.contains(m))
+                mics().iter().any(|m| n.contains(m.as_str()))
             })
             .collect();
         if picks.is_empty() {

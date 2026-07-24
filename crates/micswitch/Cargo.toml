@@ -5,6 +5,7 @@ edition = "2021"
 
 # Cycles the default capture device via the undocumented IPolicyConfig COM API.
 [dependencies]
+rice-common = { path = "../rice-common", features = ["settings"] }
 windows = { version = "0.58", features = [
   "Win32_Foundation",
   "Win32_Media_Audio",
