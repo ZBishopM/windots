@@ -57,15 +57,32 @@ unsafe fn friendly_name(dev: &IMMDevice) -> Option<String> {
 }
 
 fn main() -> Result<()> {
+    // `--output` cycles the default PLAYBACK device instead of the microphone.
+    // Same COM path, just the other data flow -- which is all AudioSwitch was
+    // running in the background to do.
+    let argv: Vec<String> = std::env::args().collect();
+    let output = argv.iter().any(|a| a == "--output" || a == "-o");
+    let flow = if output { eRender } else { eCapture };
+    // `--list` prints the endpoints; `--set <substring>` jumps straight to one.
+    // Cycling is fine for two mics, but there are a dozen playback endpoints here
+    // (virtual cables, HDMI outputs, VoiceMeeter, Steam), so blind cycling is not
+    // a usable way to pick one.
+    let list = argv.iter().any(|a| a == "--list" || a == "-l");
+    let want = argv
+        .iter()
+        .position(|a| a == "--set" || a == "-s")
+        .and_then(|i| argv.get(i + 1))
+        .map(|s| s.to_lowercase());
+
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
         let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
 
-        // All active capture endpoints, in enumeration order.
-        let coll = enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE)?;
+        // All active endpoints for this direction, in enumeration order.
+        let coll = enumerator.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE)?;
         let count = coll.GetCount()?;
         if count == 0 {
-            eprintln!("no active capture devices");
+            eprintln!("no active {} devices", if output { "playback" } else { "capture" });
             return Ok(());
         }
         let mut ids = Vec::new();
@@ -76,22 +93,49 @@ fn main() -> Result<()> {
             names.push(friendly_name(&dev).unwrap_or_else(|| "?".into()));
         }
 
-        // Keep only the real mics (HyperX / Snowball), in enumeration order.
-        let picks: Vec<usize> = (0..names.len())
-            .filter(|&i| {
-                let n = names[i].to_lowercase();
-                mics().iter().any(|m| n.contains(m.as_str()))
-            })
-            .collect();
+        if list {
+            let cur_id = enumerator
+                .GetDefaultAudioEndpoint(flow, eConsole)
+                .ok()
+                .and_then(|d| endpoint_id(&d))
+                .unwrap_or_default();
+            for (i, n) in names.iter().enumerate() {
+                println!("{} {}", if ids[i] == cur_id { "*" } else { " " }, n);
+            }
+            return Ok(());
+        }
+
+        // Mics are filtered to the configured allowlist (ignoring Steam/Oculus/
+        // VoiceMeeter virtual inputs); outputs cycle through everything active,
+        // since there is no equivalent noise to filter out.
+        let picks: Vec<usize> = if let Some(w) = &want {
+            let m: Vec<usize> = (0..names.len())
+                .filter(|&i| names[i].to_lowercase().contains(w.as_str()))
+                .collect();
+            if m.is_empty() {
+                eprintln!("no device matching '{w}'");
+                return Ok(());
+            }
+            m
+        } else if output {
+            (0..names.len()).collect()
+        } else {
+            (0..names.len())
+                .filter(|&i| {
+                    let n = names[i].to_lowercase();
+                    mics().iter().any(|m| n.contains(m.as_str()))
+                })
+                .collect()
+        };
         if picks.is_empty() {
-            eprintln!("no HyperX/Snowball mic active");
+            eprintln!("no configured mic active (see mics in ~/.config/rice.json)");
             return Ok(());
         }
 
         // Current default -> next real mic (wraps). If the default isn't one of them,
         // jump to the first real mic.
         let cur = enumerator
-            .GetDefaultAudioEndpoint(eCapture, eConsole)
+            .GetDefaultAudioEndpoint(flow, eConsole)
             .ok()
             .and_then(|d| endpoint_id(&d))
             .unwrap_or_default();

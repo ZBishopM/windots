@@ -260,6 +260,26 @@ def mic [] {
     ^(rice-exe 'shadowplay-notify.exe') --title 'Micrófono' --body $short --icon mic --accent '#e0a35c' --hold 4
 }
 
+# speaker: switch the default PLAYBACK device -- what AudioSwitch was sitting in
+# the tray for. No argument cycles; a substring jumps straight to that device
+# (there are a dozen endpoints here, so cycling blind is not usable).
+#   speaker            -> next output
+#   speaker hyperx     -> the HyperX headset
+#   speaker --list     -> all outputs, * marks the active one
+def speaker [name?: string, --list] {
+    let exe = (rice-exe 'micswitch.exe')
+    if $list { return (^$exe --output --list) }
+    let new = if ($name | is-empty) {
+        (^$exe --output | str trim)
+    } else {
+        (^$exe --output --set $name | str trim)
+    }
+    if ($new | is-empty) { return }
+    {icon: 'desktop', title: 'Salida de audio', body: $new, accent: '#a9b56a'}
+        | to json -r | save -f $'($env.USERPROFILE)/.config/island.json'
+    ^(rice-exe 'shadowplay-notify.exe') --title 'Salida de audio' --body $new --icon desktop --accent '#a9b56a' --hold 4
+}
+
 def island-test [
     title: string = 'Prueba'
     body: string = 'cuerpo de ejemplo'

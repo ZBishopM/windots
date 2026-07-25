@@ -51,15 +51,18 @@ config.set_environment_variables = { FASTFETCH_SHOWN = '' }
 config.window_decorations = 'RESIZE'
 config.hide_tab_bar_if_only_one_tab = true
 config.use_fancy_tab_bar = false
-config.window_padding = { left = 6, right = 6, top = 4, bottom = 2 }
+-- The scroll bar is drawn INSIDE the right padding, so that padding has to be
+-- wide enough to see: at 6px it was a sliver. 16px gives it real width.
+config.window_padding = { left = 6, right = 16, top = 4, bottom = 2 }
 
 -- ---------------------------------------------------------------- scrollback
 -- 20k lines instead of the 3500 default: a fastfetch banner plus a long cargo
 -- build eats the default quickly, and the cost is only memory for text.
 config.scrollback_lines = 20000
 config.enable_scroll_bar = true
--- Warm scrollbar thumb, matching rice-common::theme (HIGHLIGHT).
-config.colors = { scrollbar_thumb = '#3c322b' }
+-- Warm thumb, bright enough to actually read against the dark translucent
+-- background -- the palette's HIGHLIGHT (#3c322b) was near-invisible there.
+config.colors = { scrollbar_thumb = '#8a7460' }
 
 local act = wezterm.action
 config.keys = {
