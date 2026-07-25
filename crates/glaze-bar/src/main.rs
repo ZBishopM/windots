@@ -52,6 +52,47 @@ extern "system" {
 extern "system" {
     fn GetCurrentProcessId() -> u32;
 }
+
+// The island's vertical panel needs the bar's window to be taller than the bar
+// strip. Growing a full-width window would swallow every click in the empty
+// space beside the bubble, so the window's INPUT+PAINT region is clipped to
+// exactly (bar strip) + (bubble): anything outside stays click-through to the
+// desktop. This is what makes a drop-down panel possible without a second
+// always-on-top window fighting the tiling WM for focus.
+#[cfg(windows)]
+#[link(name = "gdi32")]
+extern "system" {
+    fn CreateRectRgn(l: i32, t: i32, r: i32, b: i32) -> isize;
+    fn CreateRoundRectRgn(l: i32, t: i32, r: i32, b: i32, w: i32, h: i32) -> isize;
+    fn CombineRgn(dst: isize, a: isize, b: isize, mode: i32) -> i32;
+    fn DeleteObject(o: isize) -> i32;
+}
+#[cfg(windows)]
+extern "system" {
+    fn SetWindowRgn(hwnd: isize, rgn: isize, redraw: i32) -> i32;
+}
+
+/// Clip the window to the bar strip plus an optional bubble.
+///
+/// Coordinates are client-relative. Passing `bubble = None` restores the plain
+/// full-width bar. The region handle is owned by the system after SetWindowRgn,
+/// so it must not be freed here.
+#[cfg(windows)]
+unsafe fn set_window_shape(hwnd: isize, width: i32, bar_h: i32, bubble: Option<(i32, i32, i32)>) {
+    const RGN_OR: i32 = 2;
+    let strip = CreateRectRgn(0, 0, width, bar_h);
+    match bubble {
+        Some((left, right, bottom)) if bottom > bar_h => {
+            // Rounded, and overlapping the strip by a few px so the bubble reads
+            // as growing out of the bar rather than as a detached box.
+            let bub = CreateRoundRectRgn(left, bar_h - 6, right, bottom, 26, 26);
+            CombineRgn(strip, strip, bub, RGN_OR);
+            DeleteObject(bub);
+        }
+        _ => {}
+    }
+    SetWindowRgn(hwnd, strip, 1);
+}
 // Identify OUR bar window by geometry, not by "first visible window of this
 // process". winit/eframe also keep small helper windows alive -- there are two
 // visible 16x16 ones at (0,0) -- and EnumWindows walks in Z-order, so the naive
@@ -766,10 +807,298 @@ struct BarApp {
     isl_vol: bool,
     vol: Vec<VolRow>,
     vol_ctl: VolCtl,
+    // ---- vertical drop-down panel (the "bubble") ----
+    // Height animates with a spring so it overshoots and settles, the way the
+    // real Dynamic Island does; `panel_v` is that spring's velocity.
+    panel_h: f32,
+    panel_v: f32,
+    panel_shape: (i32, i32), // last shape applied (height, bubble width) -> avoid redundant Win32 calls
+    win_h: i32,              // last window height requested
     last_opacity_write: Instant,
 }
 
 const ISL_HOLD: f32 = 4.0; // seconds a notification stays before collapsing
+
+
+impl BarApp {
+    /// Which sub-view the panel is showing.
+    fn panel_mode(&self) -> u8 {
+        if self.isl_vol { 1 } else if self.isl_bright { 2 } else if self.isl_opacity { 3 } else { 0 }
+    }
+
+    fn panel_width(&self) -> f32 {
+        match self.panel_mode() {
+            1 => (self.vol.len().max(1) as f32 * 46.0 + 70.0).max(200.0),
+            2 => (self.bright.len().max(1) as f32 * 46.0 + 40.0).max(160.0),
+            3 => 160.0,
+            _ => 3.0 * 52.0 + 24.0,
+        }
+    }
+
+    /// Resting height of the bubble for the current sub-view.
+    fn panel_target_h(&self) -> f32 {
+        match self.panel_mode() {
+            1 | 2 | 3 => 140.0,
+            _ => (ACTIONS.len() as f32 / 3.0).ceil() * 52.0 + 22.0,
+        }
+    }
+
+    fn bar_h(&self) -> f32 {
+        rice_common::settings::Settings::get().bar_height as f32
+    }
+
+    fn close_panel(&mut self) {
+        self.isl_expanded = false;
+        self.isl_vol = false;
+        self.isl_bright = false;
+        self.isl_opacity = false;
+        self.vol.clear();
+        self.bright.clear();
+    }
+
+    /// A vertical slider. Returns Some(0..1) while it is being dragged.
+    fn vslider(
+        ui: &mut egui::Ui,
+        p: &egui::Painter,
+        id: impl std::hash::Hash,
+        cx: f32,
+        top: f32,
+        h: f32,
+        value: f32,
+        accent: egui::Color32,
+    ) -> Option<f32> {
+        let w = 8.0;
+        let track = egui::Rect::from_min_max(egui::pos2(cx - w / 2.0, top), egui::pos2(cx + w / 2.0, top + h));
+        p.rect_filled(track, egui::Rounding::same(w / 2.0), ISL_HI);
+        let fill_top = top + h * (1.0 - value.clamp(0.0, 1.0));
+        p.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(cx - w / 2.0, fill_top), egui::pos2(cx + w / 2.0, top + h)),
+            egui::Rounding::same(w / 2.0),
+            accent,
+        );
+        p.circle_filled(egui::pos2(cx, fill_top), 6.0, WARM_TEXT);
+        let hit = egui::Rect::from_min_max(egui::pos2(cx - 11.0, top - 6.0), egui::pos2(cx + 11.0, top + h + 6.0));
+        let r = ui
+            .interact(hit, egui::Id::new(id), egui::Sense::click_and_drag())
+            .on_hover_cursor(egui::CursorIcon::ResizeVertical);
+        r.interact_pointer_pos().map(|pos| (1.0 - (pos.y - top) / h).clamp(0.0, 1.0))
+    }
+
+    /// Draw the drop-down bubble and everything inside it.
+    fn draw_panel(&mut self, ui: &mut egui::Ui, rect: egui::Rect, now: Instant, ctx: &egui::Context) {
+        // Clip the window so only the bar strip and this bubble take input; the
+        // rest of the enlarged window stays click-through to the desktop.
+        #[cfg(windows)]
+        {
+            let want = (rect.bottom().ceil() as i32, rect.width().ceil() as i32);
+            if self.hwnd != 0 && want != self.panel_shape {
+                self.panel_shape = want;
+                let bar_h = rice_common::settings::Settings::get().bar_height;
+                unsafe {
+                    set_window_shape(
+                        self.hwnd,
+                        self.width as i32,
+                        bar_h,
+                        Some((
+                            (rect.left() - self.x as f32) as i32,
+                            (rect.right() - self.x as f32) as i32,
+                            rect.bottom() as i32,
+                        )),
+                    )
+                };
+            }
+        }
+
+        let p = ui.painter().with_clip_rect(rect.expand(10.0));
+        let round = egui::Rounding::same(20.0);
+        for i in 1..=6u8 {
+            let o = i as f32;
+            p.rect_filled(
+                rect.translate(egui::vec2(0.0, o * 0.9)).expand(-o * 0.4),
+                round,
+                egui::Color32::from_rgba_unmultiplied(6, 4, 3, (30 - i as i32 * 4).max(0) as u8),
+            );
+        }
+        p.rect_filled(rect, round, ISL_SURFACE);
+        p.rect_stroke(
+            rect.shrink(0.5),
+            round,
+            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(ISL_HI.r(), ISL_HI.g(), ISL_HI.b(), 120)),
+        );
+
+        // Hold the contents back until the bubble is most of the way open, so
+        // nothing renders squashed while the spring is still travelling.
+        if self.panel_h / self.panel_target_h().max(1.0) < 0.55 {
+            return;
+        }
+
+        match self.panel_mode() {
+            1 => self.panel_volume(ui, &p, rect, now),
+            2 => self.panel_bright(ui, &p, rect, now),
+            3 => self.panel_opacity(ui, &p, rect, now),
+            _ => self.panel_actions(ui, &p, rect, now, ctx),
+        }
+
+        if now.duration_since(self.isl_interact).as_secs_f32() > 6.0 {
+            self.close_panel();
+        }
+    }
+
+    fn panel_actions(&mut self, ui: &mut egui::Ui, p: &egui::Painter, rect: egui::Rect, now: Instant, ctx: &egui::Context) {
+        let slot = 52.0;
+        let cols = 3usize;
+        let x0 = rect.center().x - cols as f32 * slot / 2.0 + slot / 2.0;
+        let y0 = rect.top() + 14.0 + slot / 2.0;
+        for (i, (kind, glyph, col)) in ACTIONS.iter().enumerate() {
+            let c = egui::pos2(x0 + (i % cols) as f32 * slot, y0 + (i / cols) as f32 * slot);
+            let r = ui
+                .interact(
+                    egui::Rect::from_center_size(c, egui::vec2(slot - 8.0, slot - 8.0)),
+                    egui::Id::new(("pnl-btn", i)),
+                    egui::Sense::click(),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if r.hovered() {
+                self.isl_interact = now;
+            }
+            let acc = egui::Color32::from_rgb(col[0], col[1], col[2]);
+            let a = if r.hovered() { 90 } else { 42 };
+            p.circle_filled(c, 17.0, egui::Color32::from_rgba_unmultiplied(acc.r(), acc.g(), acc.b(), a));
+            draw_icon(p, c, glyph, 17.0, acc);
+            if r.clicked() {
+                self.isl_interact = now;
+                match *kind {
+                    "opacity" => self.isl_opacity = true,
+                    "vol" => {
+                        self.vol_ctl.refresh();
+                        self.isl_vol = true;
+                    }
+                    "bright" => {
+                        self.bright_ctl.refresh();
+                        self.isl_bright = true;
+                    }
+                    k => {
+                        run_action(k, self.shared.clone(), ctx.clone());
+                        self.isl_expanded = false;
+                        self.isl_vol = false;
+                        self.isl_bright = false;
+                        self.isl_opacity = false;
+                    }
+                }
+            }
+        }
+    }
+
+    fn panel_volume(&mut self, ui: &mut egui::Ui, p: &egui::Painter, rect: egui::Rect, now: Instant) {
+        if self.vol.is_empty() {
+            self.vol = self.vol_ctl.state.lock().unwrap().clone();
+        }
+        let top = rect.top() + 16.0;
+        let h = 78.0;
+        let n = self.vol.len().max(1) as f32;
+        let step = 46.0;
+        let x0 = rect.center().x - (n - 1.0) * step / 2.0 - 16.0;
+        let mut changed: Option<(String, f32)> = None;
+        for (i, (label, val)) in self.vol.iter_mut().enumerate() {
+            let cx = x0 + i as f32 * step;
+            if let Some(v) = Self::vslider(ui, p, ("pvol", i), cx, top, h, *val, WARM_ACCENT) {
+                *val = v;
+                changed = Some((if i == 0 { String::new() } else { label.clone() }, v));
+            }
+            p.text(
+                egui::pos2(cx, top + h + 12.0),
+                egui::Align2::CENTER_CENTER,
+                label.chars().take(7).collect::<String>(),
+                egui::FontId::proportional(8.5),
+                WARM_SUB,
+            );
+        }
+        if let Some((name, v)) = changed {
+            self.isl_interact = now;
+            self.vol_ctl.set(&name, v);
+        }
+        let c = egui::pos2(rect.right() - 24.0, top + h / 2.0);
+        let r = ui
+            .interact(egui::Rect::from_center_size(c, egui::vec2(30.0, 30.0)), egui::Id::new("pnl-swap"), egui::Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if r.hovered() {
+            self.isl_interact = now;
+        }
+        let a = if r.hovered() { 90 } else { 42 };
+        p.circle_filled(c, 13.0, egui::Color32::from_rgba_unmultiplied(WARM_ACCENT.r(), WARM_ACCENT.g(), WARM_ACCENT.b(), a));
+        draw_icon(p, c, "\u{f0ec}", 13.0, WARM_ACCENT);
+        if r.clicked() {
+            self.vol_ctl.swap_output();
+            self.vol.clear();
+            self.isl_interact = now;
+        }
+    }
+
+    fn panel_bright(&mut self, ui: &mut egui::Ui, p: &egui::Painter, rect: egui::Rect, now: Instant) {
+        if self.bright.is_empty() {
+            self.bright = self.bright_ctl.state.lock().unwrap().clone();
+        }
+        let top = rect.top() + 16.0;
+        let h = 78.0;
+        let n = self.bright.len().max(1) as f32;
+        let step = 46.0;
+        let x0 = rect.center().x - (n - 1.0) * step / 2.0;
+        let mut changed: Option<(isize, f32)> = None;
+        for (i, (hmon, label, val)) in self.bright.iter_mut().enumerate() {
+            let cx = x0 + i as f32 * step;
+            if let Some(v) = Self::vslider(ui, p, ("pbr", i), cx, top, h, *val, WARM_ACCENT) {
+                *val = v;
+                changed = Some((*hmon, v));
+            }
+            p.text(
+                egui::pos2(cx, top + h + 12.0),
+                egui::Align2::CENTER_CENTER,
+                format!("mon {label}"),
+                egui::FontId::proportional(8.5),
+                WARM_SUB,
+            );
+        }
+        if let Some((hm, v)) = changed {
+            self.isl_interact = now;
+            self.bright_ctl.set(hm, v);
+        }
+    }
+
+    fn panel_opacity(&mut self, ui: &mut egui::Ui, p: &egui::Painter, rect: egui::Rect, now: Instant) {
+        let top = rect.top() + 16.0;
+        let h = 78.0;
+        let step = 46.0;
+        let x0 = rect.center().x - step / 2.0;
+        let mut wrote = false;
+        for i in 0..2 {
+            let cx = x0 + i as f32 * step;
+            let cur = if i == 0 { self.bar_opacity } else { self.term_opacity };
+            if let Some(v) = Self::vslider(ui, p, ("pop", i), cx, top, h, config::opacity_to_slider(cur), WARM_ACCENT) {
+                let o = config::slider_to_opacity(v);
+                if i == 0 {
+                    self.bar_opacity = o;
+                } else {
+                    self.term_opacity = o;
+                }
+                self.isl_interact = now;
+                wrote = true;
+            }
+            p.text(
+                egui::pos2(cx, top + h + 12.0),
+                egui::Align2::CENTER_CENTER,
+                if i == 0 { "barra" } else { "term" },
+                egui::FontId::proportional(8.5),
+                WARM_SUB,
+            );
+        }
+        // Throttled: each terminal write triggers a WezTerm config hot-reload.
+        if wrote && now.duration_since(self.last_opacity_write).as_secs_f32() > 0.12 {
+            self.last_opacity_write = now;
+            write_opacity("bar-opacity.txt", self.bar_opacity);
+            write_opacity("term-opacity.txt", self.term_opacity);
+        }
+    }
+}
 
 impl eframe::App for BarApp {
     fn clear_color(&self, _v: &egui::Visuals) -> [f32; 4] {
@@ -827,6 +1156,9 @@ impl eframe::App for BarApp {
             }
         }
 
+        // Precomputed before the lock: calling a &self method inside the render
+        // closure would force a whole-struct borrow and clash with `s`.
+        let panel_rest_h = self.panel_target_h();
         let s = self.shared.lock().unwrap();
         // Translucent bar (live-adjustable) so the desktop / a borderless game shows through.
         // Derived from BAR_BG rather than re-typing its channels, so the palette
@@ -986,27 +1318,19 @@ impl eframe::App for BarApp {
                     };
                     let icon_w = if icon_glyph(&ev.icon).is_empty() { 0.0 } else { 26.0 };
                     icon_w + tw.max(bw)
-                } else if expanded {
-                    if self.isl_opacity {
-                        190.0
-                    } else if self.isl_vol {
-                        // one slot per row, plus the output-swap button
-                        (self.vol.len().max(1) as f32) * 96.0 + 34.0
-                    } else if self.isl_bright {
-                        // one 100px slot per display, so the pill grows with the
-                        // number of monitors that answer DDC/CI
-                        (self.bright.len().max(1) as f32) * 100.0 - 10.0
-                    } else {
-                        ACTIONS.len() as f32 * 36.0
-                    }
                 } else {
+                    // Everything interactive now lives in the vertical panel
+                    // below: growing the pill sideways for six buttons plus
+                    // sliders was crowding the bar, and it does not scale as
+                    // more controls arrive.
                     0.0
                 };
 
                 let pad = 14.0;
                 let div_gap = 22.0; // clock -> divider -> extra spacing (divider centred in it)
                 let idle_w = pad + clock_w + pad;
-                let target_w = if has_extra { pad + clock_w + div_gap + extra_w + pad } else { idle_w };
+                let notif_open = self.isl_notif.is_some();
+                let target_w = if notif_open { pad + clock_w + div_gap + extra_w + pad } else { idle_w };
                 let target_h = if has_extra { 30.0 } else { 24.0 };
 
                 if self.isl_w <= 1.0 {
@@ -1023,6 +1347,28 @@ impl eframe::App for BarApp {
                 let left = cx - idle_w / 2.0;
                 let rect = egui::Rect::from_min_size(egui::pos2(left, cy - h / 2.0), egui::vec2(self.isl_w, h));
                 let round = egui::Rounding::same(h / 2.0);
+
+                // ---- vertical panel spring -------------------------------------
+                // Critically damped would just glide; this is deliberately
+                // under-damped so it overshoots and settles back -- the bounce
+                // that makes it read as a bubble growing out of the bar rather
+                // than a menu appearing.
+                let panel_target = if expanded { panel_rest_h } else { 0.0 };
+                {
+                    const K: f32 = 300.0; // stiffness
+                    const D: f32 = 21.0; // damping (below critical -> overshoot)
+                    let a = (panel_target - self.panel_h) * K - self.panel_v * D;
+                    self.panel_v += a * dt;
+                    self.panel_h += self.panel_v * dt;
+                    if !expanded && self.panel_h < 0.4 && self.panel_v.abs() < 4.0 {
+                        self.panel_h = 0.0;
+                        self.panel_v = 0.0;
+                    }
+                    // Keep repainting while the spring is still moving.
+                    if (self.panel_h - panel_target).abs() > 0.3 || self.panel_v.abs() > 1.0 {
+                        ctx.request_repaint();
+                    }
+                }
 
                 // interactive pill: click to expand/dismiss; when expanded only sense
                 // hover (keeps it open) so the buttons own the clicks (no z-order race).
@@ -1086,271 +1432,21 @@ impl eframe::App for BarApp {
                     if pill.clicked() {
                         self.isl_notif = None; // click dismisses early
                     }
-                } else if expanded && self.isl_vol {
-                    // ---- volume widget: master + the apps currently playing ----
-                    if self.vol.is_empty() {
-                        self.vol = self.vol_ctl.state.lock().unwrap().clone();
-                    }
-                    let tw = 62.0;
-                    let mut slot = tx;
-                    let mut changed: Option<(String, f32)> = None;
-                    if self.vol.is_empty() {
-                        cp.text(
-                            egui::pos2(tx + 6.0, cy),
-                            egui::Align2::LEFT_CENTER,
-                            "leyendo audio…",
-                            egui::FontId::proportional(11.5),
-                            WARM_SUB,
-                        );
-                    }
-                    for (i, (label, val)) in self.vol.iter_mut().enumerate() {
-                        // Master gets the speaker glyph; apps get their name.
-                        let glyph = if i == 0 { "\u{f028}" } else { "" };
-                        if i == 0 {
-                            draw_icon(&cp, egui::pos2(slot + 8.0, cy), glyph, 13.0, WARM_ACCENT);
-                        }
-                        cp.text(
-                            egui::pos2(slot + if i == 0 { 15.0 } else { 8.0 }, cy + 8.0),
-                            egui::Align2::CENTER_CENTER,
-                            // Keep it short: the slot is 96px wide.
-                            label.chars().take(9).collect::<String>(),
-                            egui::FontId::proportional(8.0),
-                            WARM_SUB,
-                        );
-                        let tl = slot + if i == 0 { 20.0 } else { 14.0 };
-                        let h = ui
-                            .interact(
-                                egui::Rect::from_min_max(egui::pos2(tl, cy - 11.0), egui::pos2(tl + tw, cy + 11.0)),
-                                egui::Id::new(("vol", i)),
-                                egui::Sense::click_and_drag(),
-                            )
-                            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
-                        if h.hovered() {
-                            self.isl_interact = now_i;
-                        }
-                        if let Some(p) = h.interact_pointer_pos() {
-                            self.isl_interact = now_i;
-                            *val = ((p.x - tl) / tw).clamp(0.0, 1.0);
-                            // Master is addressed by the empty name.
-                            changed = Some((if i == 0 { String::new() } else { label.clone() }, *val));
-                        }
-                        draw_track(&cp, tl, tw, cy, *val, WARM_ACCENT);
-                        slot += 96.0;
-                    }
-                    if let Some((name, v)) = changed {
-                        self.vol_ctl.set(&name, v);
-                    }
-                    // Output-device swap: headset <-> monitor, the only two in use.
-                    let swap_c = egui::pos2(slot + 14.0, cy);
-                    let sr = ui
-                        .interact(
-                            egui::Rect::from_center_size(swap_c, egui::vec2(28.0, 26.0)),
-                            egui::Id::new("vol-swap"),
-                            egui::Sense::click(),
-                        )
-                        .on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if sr.hovered() {
-                        self.isl_interact = now_i;
-                    }
-                    let a = if sr.hovered() { 80 } else { 42 };
-                    cp.circle_filled(
-                        swap_c,
-                        11.5,
-                        egui::Color32::from_rgba_unmultiplied(WARM_ACCENT.r(), WARM_ACCENT.g(), WARM_ACCENT.b(), a),
-                    );
-                    draw_icon(&cp, swap_c, "\u{f0ec}", 12.0, WARM_ACCENT); // fa-exchange
-                    if sr.clicked() {
-                        self.vol_ctl.swap_output();
-                        self.vol.clear(); // adopt the refreshed levels
-                        self.isl_interact = now_i;
-                    }
-                    let clock_hit = egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.left() + pad + clock_w + div_gap * 0.5, rect.bottom()));
-                    if ui.interact(clock_hit, egui::Id::new("isl-clock"), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                        self.isl_expanded = false;
-                        self.isl_vol = false;
-                        self.vol.clear();
-                    }
-                    if now_i.duration_since(self.isl_interact).as_secs_f32() > 6.0 {
-                        self.isl_expanded = false;
-                        self.isl_vol = false;
-                        self.vol.clear();
-                    }
-                } else if expanded && self.isl_bright {
-                    // ---- brightness widget: one live slider per DDC/CI display ----
-                    let tw = 64.0;
-                    let mut slot = tx;
-                    let mut changed: Option<(isize, f32)> = None;
-                    if self.bright.is_empty() {
-                        // First open (or the worker just answered): adopt its values.
-                        self.bright = self.bright_ctl.state.lock().unwrap().clone();
-                    }
-                    if self.bright.is_empty() {
-                        cp.text(
-                            egui::pos2(tx + 6.0, cy),
-                            egui::Align2::LEFT_CENTER,
-                            "leyendo monitores…",
-                            egui::FontId::proportional(11.5),
-                            WARM_SUB,
-                        );
-                    }
-                    for (i, (hmon, label, val)) in self.bright.iter_mut().enumerate() {
-                        draw_icon(&cp, egui::pos2(slot + 8.0, cy), "\u{f108}", 13.0, WARM_ACCENT); // fa-desktop
-                        // Which monitor this is, so two identical sliders are telling apart.
-                        cp.text(
-                            egui::pos2(slot + 15.0, cy + 7.0),
-                            egui::Align2::CENTER_CENTER,
-                            label,
-                            egui::FontId::proportional(8.0),
-                            WARM_SUB,
-                        );
-                        let tl = slot + 20.0;
-                        let h = ui
-                            .interact(
-                                egui::Rect::from_min_max(egui::pos2(tl, cy - 11.0), egui::pos2(tl + tw, cy + 11.0)),
-                                egui::Id::new(("br", i)),
-                                egui::Sense::click_and_drag(),
-                            )
-                            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
-                        if h.hovered() {
-                            self.isl_interact = now_i;
-                        }
-                        if let Some(p) = h.interact_pointer_pos() {
-                            self.isl_interact = now_i;
-                            *val = ((p.x - tl) / tw).clamp(0.0, 1.0);
-                            changed = Some((*hmon, *val));
-                        }
-                        draw_track(&cp, tl, tw, cy, *val, WARM_ACCENT);
-                        slot += 100.0;
-                    }
-                    // The worker coalesces, so send freely; it applies the latest.
-                    if let Some((hmon, v)) = changed {
-                        self.bright_ctl.set(hmon, v);
-                    }
-                    let clock_hit = egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.left() + pad + clock_w + div_gap * 0.5, rect.bottom()));
-                    if ui.interact(clock_hit, egui::Id::new("isl-clock"), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                        self.isl_expanded = false;
-                        self.isl_bright = false;
-                        self.bright.clear();
-                    }
-                    if now_i.duration_since(self.isl_interact).as_secs_f32() > 6.0 {
-                        self.isl_expanded = false;
-                        self.isl_bright = false;
-                        self.bright.clear();
-                    }
-                } else if expanded && self.isl_opacity {
-                    // ---- opacity widget: two live sliders (bar + terminal) ----
-                    let tw = 64.0;
-                    let (mut bar_ch, mut term_ch) = (false, false);
-                    // bar opacity
-                    draw_icon(&cp, egui::pos2(tx + 8.0, cy), "\u{f108}", 13.0, WARM_ACCENT); // fa-desktop
-                    let btl = tx + 20.0;
-                    let bh = ui
-                        .interact(
-                            egui::Rect::from_min_max(egui::pos2(btl, cy - 11.0), egui::pos2(btl + tw, cy + 11.0)),
-                            egui::Id::new("op-bar"),
-                            egui::Sense::click_and_drag(),
-                        )
-                        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
-                    if bh.hovered() {
-                        self.isl_interact = now_i;
-                    }
-                    if let Some(p) = bh.interact_pointer_pos() {
-                        self.isl_interact = now_i;
-                        self.bar_opacity = (0.3 + ((p.x - btl) / tw).clamp(0.0, 1.0) * 0.7).clamp(0.3, 1.0);
-                        bar_ch = true;
-                    }
-                    draw_track(&cp, btl, tw, cy, (self.bar_opacity - 0.3) / 0.7, WARM_ACCENT);
-                    // terminal opacity
-                    let ttl = tx + 100.0 + 20.0;
-                    draw_icon(&cp, egui::pos2(tx + 100.0 + 8.0, cy), "\u{f120}", 13.0, WARM_ACCENT); // fa-terminal
-                    let th = ui
-                        .interact(
-                            egui::Rect::from_min_max(egui::pos2(ttl, cy - 11.0), egui::pos2(ttl + tw, cy + 11.0)),
-                            egui::Id::new("op-term"),
-                            egui::Sense::click_and_drag(),
-                        )
-                        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
-                    if th.hovered() {
-                        self.isl_interact = now_i;
-                    }
-                    if let Some(p) = th.interact_pointer_pos() {
-                        self.isl_interact = now_i;
-                        self.term_opacity = (0.3 + ((p.x - ttl) / tw).clamp(0.0, 1.0) * 0.7).clamp(0.3, 1.0);
-                        term_ch = true;
-                    }
-                    draw_track(&cp, ttl, tw, cy, (self.term_opacity - 0.3) / 0.7, WARM_ACCENT);
-                    // throttle file writes; only write the one that changed (each term
-                    // write triggers a wezterm hot-reload).
-                    if (bar_ch || term_ch) && now_i.duration_since(self.last_opacity_write).as_secs_f32() > 0.12 {
-                        self.last_opacity_write = now_i;
-                        if bar_ch {
-                            write_opacity("bar-opacity.txt", self.bar_opacity);
-                        }
-                        if term_ch {
-                            write_opacity("term-opacity.txt", self.term_opacity);
-                        }
-                    }
-                    // click the clock to close the widget + retract
-                    let clock_hit = egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.left() + pad + clock_w + div_gap * 0.5, rect.bottom()));
-                    if ui.interact(clock_hit, egui::Id::new("isl-clock"), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                        self.isl_expanded = false;
-                        self.isl_opacity = false;
-                    }
-                    if now_i.duration_since(self.isl_interact).as_secs_f32() > 6.0 {
-                        self.isl_expanded = false;
-                        self.isl_opacity = false;
-                    }
                 } else if expanded {
-                    // click the clock area to retract the options
-                    let clock_hit = egui::Rect::from_min_max(
-                        rect.left_top(),
-                        egui::pos2(rect.left() + pad + clock_w + div_gap * 0.5, rect.bottom()),
-                    );
+                    // The pill itself stays compact while expanded; every control
+                    // now lives in the vertical panel drawn below.
+                    let clock_hit = egui::Rect::from_min_max(rect.left_top(), rect.right_bottom());
                     if ui
                         .interact(clock_hit, egui::Id::new("isl-clock"), egui::Sense::click())
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .clicked()
                     {
+                        // Inlined rather than close_panel(): a method call here
+                        // would borrow all of self and clash with the lock.
                         self.isl_expanded = false;
-                    }
-                    let slot = 36.0;
-                    for (i, (kind, glyph, col)) in ACTIONS.iter().enumerate() {
-                        let bc = egui::pos2(tx + slot / 2.0 + i as f32 * slot, cy);
-                        let brect = egui::Rect::from_center_size(bc, egui::vec2(slot, 26.0));
-                        let br = ui
-                            .interact(brect, egui::Id::new(("isl-btn", i)), egui::Sense::click())
-                            .on_hover_cursor(egui::CursorIcon::PointingHand);
-                        if br.hovered() {
-                            self.isl_interact = now_i;
-                        }
-                        let acc = egui::Color32::from_rgb(col[0], col[1], col[2]);
-                        let a = if br.hovered() { 80 } else { 42 };
-                        cp.circle_filled(bc, 11.5, egui::Color32::from_rgba_unmultiplied(acc.r(), acc.g(), acc.b(), a));
-                        draw_icon(&cp, bc, glyph, 14.0, acc);
-                        if br.clicked() {
-                            if *kind == "opacity" {
-                                self.isl_opacity = true; // open the opacity widget
-                                self.isl_interact = now_i;
-                            } else if *kind == "vol" {
-                                self.vol_ctl.refresh();
-                                self.isl_vol = true;
-                                self.isl_interact = now_i;
-                            } else if *kind == "bright" {
-                                // Ask the worker to re-read the panels; it publishes
-                                // into bright_ctl.state and repaints. Doing the DDC/CI
-                                // query here would block the render thread for the
-                                // best part of a second per display.
-                                self.bright_ctl.refresh();
-                                self.isl_bright = true;
-                                self.isl_interact = now_i;
-                            } else {
-                                run_action(kind, self.shared.clone(), ctx.clone());
-                                self.isl_expanded = false;
-                            }
-                        }
-                    }
-                    if now_i.duration_since(self.isl_interact).as_secs_f32() > 4.0 {
-                        self.isl_expanded = false;
+                        self.isl_vol = false;
+                        self.isl_bright = false;
+                        self.isl_opacity = false;
                     }
                 } else if pill.clicked() {
                     // idle: click reveals the quick-actions
@@ -1368,6 +1464,45 @@ impl eframe::App for BarApp {
                 }
             });
         drop(s);
+
+        // ---- the bubble: drawn after the shared lock is released (draw_panel
+        // needs &mut self, which the lock would block), in its own Area so it can
+        // extend below the bar strip. ----
+        // The window has to be tall enough to contain the bubble: anything drawn
+        // past its height is simply not on screen. Its REGION (set in draw_panel)
+        // is what keeps the enlarged area from eating clicks.
+        {
+            let bar = self.bar_h();
+            let want = (bar + self.panel_h.max(0.0) + 12.0).ceil() as i32;
+            let want = if self.panel_h > 0.5 { want } else { bar as i32 };
+            if want != self.win_h {
+                self.win_h = want;
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(self.width, want as f32)));
+                #[cfg(windows)]
+                if self.panel_h <= 0.5 && self.hwnd != 0 {
+                    // Collapsed: drop the custom region so the bar is a plain strip again.
+                    self.panel_shape = (0, 0);
+                    unsafe { set_window_shape(self.hwnd, self.width as i32, bar as i32, None) };
+                }
+            }
+        }
+
+        if self.panel_h > 0.5 {
+            let screen = ctx.screen_rect();
+            let pw = self.panel_width();
+            let prect = egui::Rect::from_min_size(
+                egui::pos2(screen.center().x - pw / 2.0, screen.top() + self.bar_h() - 2.0),
+                egui::vec2(pw, self.panel_h),
+            );
+            let now_p = Instant::now();
+            let ctx2 = ctx.clone();
+            egui::Area::new(egui::Id::new("isl-panel"))
+                .fixed_pos(prect.min)
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    self.draw_panel(ui, prect, now_p, &ctx2);
+                });
+        }
 
         self.frame = self.frame.wrapping_add(1);
         if self.frame % 15 == 5 {
@@ -1448,6 +1583,10 @@ fn main() -> eframe::Result<()> {
                 isl_vol: false,
                 vol: Vec::new(),
                 vol_ctl: VolCtl::spawn(cc.egui_ctx.clone()),
+                panel_h: 0.0,
+                panel_v: 0.0,
+                panel_shape: (0, 0),
+                win_h: 0,
                 last_opacity_write: Instant::now(),
             }))
         }),
