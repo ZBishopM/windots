@@ -84,7 +84,7 @@ Deploy "$repo\powershell\Microsoft.PowerShell_profile.ps1" "$home_\Documents\Pow
 # Nushell: the fast interactive shell (pwsh still runs the infra scripts). Config
 # carries fastfetch + the rice tool wrappers (cava/mic/notify-test).
 Deploy "$repo\nushell\config.nu"                          "$home_\AppData\Roaming\nushell\config.nu"
-foreach ($f in 'glazewm-dwindle.ps1', 'glazewm-animcheck.ps1', 'wezterm-hotkey.ahk', 'shadowplay-record.ps1', 'shadowplay-record.vbs', 'shadowplay-wgc-save.ps1', 'shadowplay-wgc.vbs', 'rice-supervisor.ps1', 'rice-supervisor.vbs', 'rice-autostart.ps1', 'rice-autostart.vbs') {
+foreach ($f in 'glazewm-dwindle.ps1', 'glazewm-animcheck.ps1', 'rice-accent.ps1', 'wezterm-hotkey.ahk', 'shadowplay-record.ps1', 'shadowplay-record.vbs', 'shadowplay-wgc-save.ps1', 'shadowplay-wgc.vbs', 'rice-supervisor.ps1', 'rice-supervisor.vbs', 'rice-autostart.ps1', 'rice-autostart.vbs') {
     Deploy "$repo\scripts\$f" "$home_\.config\$f"
 }
 # Shared library dot-sourced by the scripts above (paths, GlazeWM IPC, process
@@ -165,3 +165,4 @@ Write-Host @"
       - Monitor layout: glaze-bar --x/--width in glazewm config.yaml startup_commands
         and the notify position are hard-coded to 1920 + 2560; adjust for your screens.
 "@ -ForegroundColor DarkGray
+

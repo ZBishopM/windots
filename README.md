@@ -151,13 +151,16 @@ dotfiles/
 ├─ sync.ps1                 # live -> repo (inverso de install.ps1)
 ├─ Cargo.toml · Cargo.lock  # raíz del workspace
 └─ crates/                  # un crate por herramienta
-   ├─ rice-common/          # lib compartida: theme · ui · win · ipc · config · event · args · settings
+   ├─ rice-common/          # lib compartida: theme · ui · win · ipc · config · event
+   │                        #   args · settings · audio · brightness · media · spectrum
    ├─ glaze-bar/            # barra de estado (egui)
    ├─ shadowplay-notify/    # toast
    ├─ shadowplay-wgc/       # grabador WGC
    ├─ ws-slide/             # animación de workspace (dueño de SUPER+1..9)
    ├─ sysaudio-loopback/    # captura WASAPI
-   ├─ micswitch/            # cambio de micro
+   ├─ micswitch/            # cambio de micro / salida de audio
+   ├─ appvol/               # volumen master y por aplicación
+   ├─ taskbar/              # mostrar/ocultar la barra de tareas
    └─ cava/                 # visualizador de espectro
 ```
 
@@ -165,3 +168,73 @@ Cada herramienta es su propio crate: así cada una declara sólo lo que usa y
 recibe su propio `opt-level` (el workspace compila a 3 por ser casi todo código
 en tiempo real, y sólo el toast usa `"z"`). Tocar un binario ya no relinkea el
 resto.
+
+---
+
+## Estado, pendientes y qué falta verificar
+
+### Verificado y funcionando
+
+| Pieza | Cómo se comprobó |
+|---|---|
+| Animación de workspace (`ws-slide`) | Cambio 1→3→1 con las teclas reales; carrusel sin flash |
+| Brillo DDC/CI | Ida y vuelta real: 12% → 73% → 12% en el monitor 1, sin tocar el 2 |
+| Volumen por app | Discord solo a 30% y de vuelta; vesktop mute/unmute |
+| Cambio de salida | Auriculares → monitor → auriculares |
+| Barra de tareas | Oculta con área de trabajo de 1080 completos, y restaurada a 1032 |
+| Tecla Windows | Inicio bloqueado 3/3, con `Super+N` y `Win+Space` intactos |
+| Espectro | Silencio en reposo; barras y `active=true` con audio real |
+| Guardado de clip | HEVC+AAC válido, sin temporales sueltos |
+| Watchdog | Barra muerta revivida en un tick |
+
+### Falta verificar (con ratón/uso real)
+
+- **Burbuja vertical**: rebote del muelle, tamaño y distribución 3×2 de los
+  botones. Los clics sintéticos de prueba necesitan pulsación mantenida; con
+  ratón real debería ir fino, pero no está confirmado.
+- **Sliders verticales** de volumen, brillo y opacidad dentro de la burbuja.
+- **Vista de medios**: nunca se ha probado con algo realmente sonando. Faltan
+  por confirmar play/pausa, siguiente/anterior y que los botones se atenúen
+  cuando la sesión dice que ese control no está disponible.
+- **Espectro en la píldora**: tamaño de las barras y si el umbral de "hay audio"
+  es el adecuado en uso normal.
+- **Acento del sistema**: aplicado y visible en los bordes de ventana. Falta ver
+  si algún sitio queda ilegible; `rice-accent.ps1 -Restore` deshace exactamente
+  lo que había.
+
+### Pendientes
+
+- **Carátula del reproductor**: los bytes ya se descargan (`media::cover_bytes`)
+  pero no se decodifican ni se dibujan; la vista muestra un placeholder. Falta
+  un decodificador PNG/JPEG y subirla como textura de egui.
+- **Preview de vídeo**: SMTC no entrega fotogramas, así que habría que capturar
+  la ventana del reproductor. Es un problema aparte del de la carátula.
+- **Bandeja del sistema en la barra** — proyecto aparte, ver abajo.
+- **Ocultar barras de título**: en apps que dibujan la suya (Vesktop, Discord,
+  Claude, Zed) no se puede desde fuera; hay que usar el ajuste de cada app. En
+  apps con marco nativo sí se podría quitar `WS_CAPTION`, pendiente de decidir
+  si merece la pena.
+- **Exportar clips en AV1** para compartirlos más pequeños.
+- **Pomatez** (pomodoro en Electron) → temporizador en la isla.
+- **Click-through con LoL en borderless**: NO resuelto. El mecanismo funciona y
+  está verificado (la barra recibe `WS_EX_TRANSPARENT` sólo en el monitor del
+  juego), pero el clic derecho seguía sin llegar al juego. Se usa LoL en
+  *fullscreen* como solución. Sospecha: el juego lee entrada por raw input.
+
+### Bandeja del sistema: por qué es un proyecto aparte
+
+En Windows 11 25H2 la bandeja legacy ya no existe: `TrayNotifyWnd` sigue ahí
+pero **sin `SysPager`/`ToolbarWindow32` dentro**, y los iconos los pinta XAML.
+El truco clásico de leer `TBBUTTON` con `ReadProcessMemory` no tiene nada que
+leer.
+
+Se sondeó **UI Automation** y sí ve la bandeja: 28 botones, con
+`AutomationId` = `NotifyItemIcon` (apps) o `SystemTrayIcon` (sistema), y el
+tooltip completo en `Name`. Posición, nombre e invocación están disponibles.
+
+**Lo que UIA no da son los píxeles del icono.** La salida planteada es mover la
+barra de tareas fuera de pantalla en vez de ocultarla (`SetWindowPos` a y=-100),
+de forma que siga siendo enumerable y capturable con `BitBlt`, y reenviar los
+clics con UIA `Invoke`. Límites conocidos: el menú contextual del clic derecho
+se abriría en la posición real (fuera de pantalla), y la mayoría de los iconos
+viven en el desbordamiento, que es otro island XAML que hay que abrir.
