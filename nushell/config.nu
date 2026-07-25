@@ -140,8 +140,10 @@ $env.config.keybindings = [
       event: { until: [ { send: menu, name: completion_menu }, { send: menunext } ] } }
     { name: history_menu, modifier: control, keycode: char_r, mode: [emacs vi_insert vi_normal]
       event: { send: menu, name: history_menu } }
-    # Accept the inline (history) suggestion, fish-style.
-    { name: accept_hint, modifier: control, keycode: char_f, mode: [emacs vi_insert]
+    # Accept the inline (history) suggestion, fish-style. On Ctrl+E, not Ctrl+F:
+    # WezTerm claims Ctrl+F for scrollback search and never forwards it to the
+    # shell. (Right arrow at end-of-line also accepts the hint, natively.)
+    { name: accept_hint, modifier: control, keycode: char_e, mode: [emacs vi_insert]
       event: { send: historyhintcomplete } }
 ]
 

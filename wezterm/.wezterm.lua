@@ -53,6 +53,36 @@ config.hide_tab_bar_if_only_one_tab = true
 config.use_fancy_tab_bar = false
 config.window_padding = { left = 6, right = 6, top = 4, bottom = 2 }
 
+-- ---------------------------------------------------------------- scrollback
+-- 20k lines instead of the 3500 default: a fastfetch banner plus a long cargo
+-- build eats the default quickly, and the cost is only memory for text.
+config.scrollback_lines = 20000
+config.enable_scroll_bar = true
+-- Warm scrollbar thumb, matching rice-common::theme (HIGHLIGHT).
+config.colors = { scrollbar_thumb = '#3c322b' }
+
+local act = wezterm.action
+config.keys = {
+  -- Search the scrollback. Type to filter, Enter/Esc to leave, arrows to jump
+  -- between matches.
+  { key = 'f', mods = 'CTRL', action = act.Search { CaseInSensitiveString = '' } },
+
+  -- Scrolling without the mouse.
+  { key = 'PageUp',   mods = 'SHIFT', action = act.ScrollByPage(-1) },
+  { key = 'PageDown', mods = 'SHIFT', action = act.ScrollByPage(1) },
+  { key = 'UpArrow',   mods = 'CTRL|SHIFT', action = act.ScrollByLine(-1) },
+  { key = 'DownArrow', mods = 'CTRL|SHIFT', action = act.ScrollByLine(1) },
+  { key = 'Home', mods = 'CTRL|SHIFT', action = act.ScrollToTop },
+  { key = 'End',  mods = 'CTRL|SHIFT', action = act.ScrollToBottom },
+
+  -- Copy mode: vim-style movement through the scrollback (hjkl, /, y to copy,
+  -- Esc to exit) without touching the mouse.
+  { key = 'x', mods = 'CTRL|SHIFT', action = act.ActivateCopyMode },
+
+  -- Drop the scrollback when it gets noisy.
+  { key = 'k', mods = 'CTRL|SHIFT', action = act.ClearScrollback 'ScrollbackAndViewport' },
+}
+
 -- Transparency: plain per-pixel opacity, read from a file the dynamic-island
 -- opacity widget writes. It's on the config reload watch list, so dragging the
 -- slider (or editing the file) hot-reloads the terminal opacity live.
