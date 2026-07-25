@@ -52,23 +52,48 @@ extern "system" {
 extern "system" {
     fn GetCurrentProcessId() -> u32;
 }
+// Identify OUR bar window by geometry, not by "first visible window of this
+// process". winit/eframe also keep small helper windows alive -- there are two
+// visible 16x16 ones at (0,0) -- and EnumWindows walks in Z-order, so the naive
+// version could hand back a helper. Click-through was then applied to a 16x16
+// window while the real bar kept swallowing clicks, which is why it worked only
+// sometimes.
+#[cfg(windows)]
+struct FindCtx {
+    want_x: i32,
+    want_w: i32,
+    found: isize,
+}
+
 #[cfg(windows)]
 extern "system" fn find_cb(hwnd: isize, lparam: isize) -> i32 {
     unsafe {
+        let ctx = &mut *(lparam as *mut FindCtx);
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, &mut pid);
-        if pid == GetCurrentProcessId() && IsWindowVisible(hwnd) != 0 {
-            *(lparam as *mut isize) = hwnd;
-            return 0; // found ours -> stop
+        if pid != GetCurrentProcessId() || IsWindowVisible(hwnd) == 0 {
+            return 1;
+        }
+        let mut r = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+        if GetWindowRect(hwnd, &mut r) == 0 {
+            return 1;
+        }
+        // The bar: our x, our width (a few px of slack for DPI rounding), and
+        // sitting at the top of the screen.
+        let w = r.right - r.left;
+        if (r.left - ctx.want_x).abs() <= 4 && (w - ctx.want_w).abs() <= 8 && r.top < 60 {
+            ctx.found = hwnd;
+            return 0;
         }
     }
     1
 }
+
 #[cfg(windows)]
-fn find_own_window() -> isize {
-    let mut hwnd: isize = 0;
-    unsafe { EnumWindows(find_cb, &mut hwnd as *mut isize as isize) };
-    hwnd
+fn find_own_window(x: i32, width: i32) -> isize {
+    let mut ctx = FindCtx { want_x: x, want_w: width, found: 0 };
+    unsafe { EnumWindows(find_cb, &mut ctx as *mut FindCtx as isize) };
+    ctx.found
 }
 #[cfg(windows)]
 unsafe fn fullscreen_on_monitor(my: isize) -> bool {
@@ -623,6 +648,9 @@ use rice_common::ui::load_nerd_font as load_font;
 struct BarApp {
     shared: Arc<Mutex<Shared>>,
     width: f32,
+    /// Left edge of this bar's monitor (the --x argument), used to identify our
+    /// own window among the process's several.
+    x: i32,
     sized: bool,
     frame: u32,
     // dynamic island animation state
@@ -686,15 +714,19 @@ impl eframe::App for BarApp {
             let now = Instant::now();
             if now.duration_since(self.last_ct).as_secs_f32() > 0.5 {
                 self.last_ct = now;
-                if self.hwnd == 0 {
-                    self.hwnd = find_own_window();
-                }
+                // Re-resolve every tick, not just once: eframe can recreate the
+                // window, and a stale handle means click-through silently stops
+                // being applied to anything.
+                self.hwnd = find_own_window(self.x, self.width as i32);
                 if self.hwnd != 0 {
-                    let fs = unsafe { should_clickthrough(self.hwnd) };
-                    if fs != self.clickthrough {
-                        self.clickthrough = fs;
-                        unsafe { set_clickthrough(self.hwnd, fs) };
-                    }
+                    let want = unsafe { should_clickthrough(self.hwnd) };
+                    self.clickthrough = want;
+                    // Assert the style unconditionally rather than only on a
+                    // transition. set_clickthrough is a no-op when the bit already
+                    // matches, and this way anything that clears the ex-style
+                    // behind our back is corrected on the next tick instead of
+                    // leaving the bar permanently solid.
+                    unsafe { set_clickthrough(self.hwnd, want) };
                 }
                 // Live-reload bar opacity from the file (so editing it directly also
                 // updates in real time), except while the slider owns the value.
@@ -1206,6 +1238,7 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(BarApp {
                 shared,
                 width,
+                x: x as i32,
                 sized: false,
                 frame: 0,
                 isl_w: 0.0,
