@@ -20,6 +20,7 @@ members = [
     "crates/micswitch",
     "crates/taskbar",
     "crates/appvol",
+    "crates/windeco",
     "crates/shadowplay-wgc",
 ]
 exclude = ["flutter", "projects"]

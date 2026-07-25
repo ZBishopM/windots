@@ -1,0 +1,9 @@
+[package]
+name = "windeco"
+version = "0.1.0"
+edition = "2021"
+
+# Strips window decorations and optionally blocks minimising. Raw Win32.
+[dependencies]
+serde_json = "1"
+rice-common = { path = "../rice-common" }
