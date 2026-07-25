@@ -91,11 +91,42 @@ unsafe fn fullscreen_on_monitor(my: isize) -> bool {
         return false;
     }
     // A tiled/maximised window sits BELOW the bar; only a true fullscreen window
-    // covers the monitor's top strip too.
-    r.left <= mi.rc_monitor.left
-        && r.top <= mi.rc_monitor.top
-        && r.right >= mi.rc_monitor.right
-        && r.bottom >= mi.rc_monitor.bottom
+    // covers the monitor's top strip too. A few pixels of slack, because some
+    // borderless windows land a hair inside the monitor rect and an exact
+    // comparison then misses them.
+    const SLACK: i32 = 4;
+    r.left <= mi.rc_monitor.left + SLACK
+        && r.top <= mi.rc_monitor.top + SLACK
+        && r.right >= mi.rc_monitor.right - SLACK
+        && r.bottom >= mi.rc_monitor.bottom - SLACK
+}
+
+/// Should the bar ignore mouse input right now?
+///
+/// Geometry alone isn't enough: a game in *borderless* mode can sit short of the
+/// monitor rect or keep a child window focused, so the focused executable is
+/// also checked against `clickthrough_apps` in ~/.config/rice.json. The bar
+/// stays fully visible either way -- only hit-testing changes.
+#[cfg(windows)]
+unsafe fn should_clickthrough(my: isize) -> bool {
+    if fullscreen_on_monitor(my) {
+        return true;
+    }
+    let apps = &rice_common::settings::Settings::get().clickthrough_apps;
+    if apps.is_empty() {
+        return false;
+    }
+    // Only the bar on the game's own monitor goes click-through. Without this,
+    // focusing the game would also disarm the bar on the second screen, where
+    // there is nothing to click through to.
+    let fg = GetForegroundWindow();
+    if fg == 0 || fg == my || MonitorFromWindow(fg, 2) != MonitorFromWindow(my, 2) {
+        return false;
+    }
+    match win::foreground_process_name() {
+        Some(name) => apps.iter().any(|a| name.contains(&a.to_lowercase())),
+        None => false,
+    }
 }
 #[cfg(windows)]
 unsafe fn set_clickthrough(hwnd: isize, on: bool) {
@@ -659,7 +690,7 @@ impl eframe::App for BarApp {
                     self.hwnd = find_own_window();
                 }
                 if self.hwnd != 0 {
-                    let fs = unsafe { fullscreen_on_monitor(self.hwnd) };
+                    let fs = unsafe { should_clickthrough(self.hwnd) };
                     if fs != self.clickthrough {
                         self.clickthrough = fs;
                         unsafe { set_clickthrough(self.hwnd, fs) };

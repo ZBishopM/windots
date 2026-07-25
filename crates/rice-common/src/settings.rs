@@ -33,6 +33,20 @@ pub struct Settings {
 
     #[serde(default = "default_ipc")]
     pub ipc_url: String,
+
+    /// Executables that should always make the bar click-through while focused,
+    /// matched case-insensitively as substrings of the exe name.
+    ///
+    /// The geometric test (does the focused window cover this monitor?) handles
+    /// true fullscreen, but some games in *borderless* mode sit a few pixels
+    /// short of the monitor rect, or place a child window on top, and slip past
+    /// it. Naming the executable is unambiguous.
+    #[serde(default = "default_clickthrough")]
+    pub clickthrough_apps: Vec<String>,
+}
+
+fn default_clickthrough() -> Vec<String> {
+    vec!["league of legends".into(), "valorant".into()]
 }
 
 impl Default for Settings {
@@ -41,6 +55,7 @@ impl Default for Settings {
             bar_height: default_bar_height(),
             mics: default_mics(),
             ipc_url: default_ipc(),
+            clickthrough_apps: default_clickthrough(),
         }
     }
 }

@@ -93,6 +93,66 @@ pub unsafe fn harden_overlay(hwnd: isize) {
     SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
+#[cfg(windows)]
+#[link(name = "user32")]
+extern "system" {
+    fn GetForegroundWindow() -> isize;
+    fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
+}
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> isize;
+    fn QueryFullProcessImageNameW(h: isize, flags: u32, buf: *mut u16, size: *mut u32) -> i32;
+    fn CloseHandle(h: isize) -> i32;
+}
+
+/// Lowercased executable name of whatever window currently has focus, e.g.
+/// `"league of legends.exe"`. `None` if there is no foreground window or the
+/// process can't be opened (elevated processes, for instance).
+///
+/// Used to decide click-through by application rather than only by geometry:
+/// some games in borderless mode don't quite cover the monitor, so a purely
+/// geometric test misses them.
+#[cfg(windows)]
+pub fn foreground_process_name() -> Option<String> {
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd == 0 {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == 0 {
+            return None;
+        }
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h == 0 {
+            return None;
+        }
+        let mut buf = [0u16; 260];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len);
+        CloseHandle(h);
+        if ok == 0 {
+            return None;
+        }
+        let full = String::from_utf16_lossy(&buf[..len as usize]);
+        Some(
+            full.rsplit(['\\', '/'])
+                .next()
+                .unwrap_or(&full)
+                .to_lowercase(),
+        )
+    }
+}
+
+#[cfg(not(windows))]
+pub fn foreground_process_name() -> Option<String> {
+    None
+}
+
 /// Path to a sibling executable in the same directory as this one. Every tool
 /// finds its helpers this way, which is what lets the workspace ship a single
 /// flat `target/release/` with no copy step.
