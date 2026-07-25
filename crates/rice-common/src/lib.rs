@@ -22,3 +22,5 @@ pub mod event;
 
 #[cfg(feature = "settings")]
 pub mod settings;
+
+pub mod brightness;

@@ -227,11 +227,82 @@ fn write_opacity(name: &str, v: f32) {
 }
 
 // Quick-access buttons shown when the island is expanded: (action, glyph, accent).
-const ACTIONS: [(&str, &str, [u8; 3]); 4] = [
+// Monitor brightness over DDC/CI (what Twinkle Tray does). Each set() talks to
+// the display's controller over the cable and takes tens of milliseconds, so it
+// runs on a worker thread and only the LATEST value is applied -- dragging a
+// slider produces far more updates than a monitor can absorb, and queueing them
+// would make the panel lag seconds behind the handle.
+enum BrightMsg {
+    /// Re-read every display's current brightness.
+    Refresh,
+    /// Apply a 0..1 fraction to one display.
+    Set(isize, f32),
+}
+
+struct BrightCtl {
+    tx: std::sync::mpsc::Sender<BrightMsg>,
+    /// Latest known state, published by the worker: (hmonitor, label, 0..1).
+    state: Arc<Mutex<Vec<(isize, String, f32)>>>,
+}
+
+impl BrightCtl {
+    fn spawn(ctx: egui::Context) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<BrightMsg>();
+        let state = Arc::new(Mutex::new(Vec::new()));
+        let out = state.clone();
+        std::thread::spawn(move || {
+            let mut displays: Vec<rice_common::brightness::Display> = Vec::new();
+            while let Ok(first) = rx.recv() {
+                // Coalesce: a slider drag emits far more updates than a monitor can
+                // absorb, and queueing them would leave the panel seconds behind the
+                // handle. Keep only the newest value per display.
+                let mut refresh = matches!(first, BrightMsg::Refresh);
+                let mut pending = std::collections::HashMap::new();
+                if let BrightMsg::Set(h, v) = first {
+                    pending.insert(h, v);
+                }
+                while let Ok(m) = rx.try_recv() {
+                    match m {
+                        BrightMsg::Refresh => refresh = true,
+                        BrightMsg::Set(h, v) => {
+                            pending.insert(h, v);
+                        }
+                    }
+                }
+                if refresh || displays.is_empty() {
+                    displays = rice_common::brightness::displays();
+                    *out.lock().unwrap() = displays
+                        .iter()
+                        .enumerate()
+                        .map(|(i, d)| (d.hmonitor, format!("{}", i + 1), d.fraction()))
+                        .collect();
+                    ctx.request_repaint();
+                }
+                for (hmon, v) in pending {
+                    if let Some(d) = displays.iter_mut().find(|d| d.hmonitor == hmon) {
+                        rice_common::brightness::set(d, v);
+                        let span = (d.max.saturating_sub(d.min)) as f32;
+                        d.current = d.min + (v.clamp(0.0, 1.0) * span).round() as u32;
+                    }
+                }
+            }
+        });
+        Self { tx, state }
+    }
+    fn refresh(&self) {
+        let _ = self.tx.send(BrightMsg::Refresh);
+    }
+    fn set(&self, hmonitor: isize, fraction: f32) {
+        let _ = self.tx.send(BrightMsg::Set(hmonitor, fraction));
+    }
+}
+
+const ACTIONS: [(&str, &str, [u8; 3]); 5] = [
     ("mic", "\u{f130}", [224, 163, 92]),      // switch mic
     ("save", "\u{f03d}", [169, 181, 106]),    // save a replay clip
     ("term", "\u{f120}", [206, 150, 112]),    // open a terminal
     ("opacity", "\u{f1de}", [200, 172, 150]), // fa-sliders -> opacity widget
+    ("bright", "\u{f185}", [230, 190, 120]),  // fa-sun -> monitor brightness (DDC/CI)
 ];
 
 // Draw an opacity slider track (bg + accent fill + handle) at a normalized value t.
@@ -540,6 +611,11 @@ struct BarApp {
     bar_opacity: f32,
     term_opacity: f32,
     isl_opacity: bool, // opacity-adjust widget shown
+    // Monitor brightness (DDC/CI). `bright` is queried when the widget opens --
+    // never per frame, since each query costs tens of ms per display.
+    isl_bright: bool,
+    bright: Vec<(isize, String, f32)>, // (hmonitor, label, 0..1)
+    bright_ctl: BrightCtl,
     last_opacity_write: Instant,
 }
 
@@ -757,7 +833,15 @@ impl eframe::App for BarApp {
                     let icon_w = if icon_glyph(&ev.icon).is_empty() { 0.0 } else { 26.0 };
                     icon_w + tw.max(bw)
                 } else if expanded {
-                    if self.isl_opacity { 190.0 } else { ACTIONS.len() as f32 * 36.0 }
+                    if self.isl_opacity {
+                        190.0
+                    } else if self.isl_bright {
+                        // one 100px slot per display, so the pill grows with the
+                        // number of monitors that answer DDC/CI
+                        (self.bright.len().max(1) as f32) * 100.0 - 10.0
+                    } else {
+                        ACTIONS.len() as f32 * 36.0
+                    }
                 } else {
                     0.0
                 };
@@ -844,6 +928,68 @@ impl eframe::App for BarApp {
                     }
                     if pill.clicked() {
                         self.isl_notif = None; // click dismisses early
+                    }
+                } else if expanded && self.isl_bright {
+                    // ---- brightness widget: one live slider per DDC/CI display ----
+                    let tw = 64.0;
+                    let mut slot = tx;
+                    let mut changed: Option<(isize, f32)> = None;
+                    if self.bright.is_empty() {
+                        // First open (or the worker just answered): adopt its values.
+                        self.bright = self.bright_ctl.state.lock().unwrap().clone();
+                    }
+                    if self.bright.is_empty() {
+                        cp.text(
+                            egui::pos2(tx + 6.0, cy),
+                            egui::Align2::LEFT_CENTER,
+                            "leyendo monitores…",
+                            egui::FontId::proportional(11.5),
+                            WARM_SUB,
+                        );
+                    }
+                    for (i, (hmon, label, val)) in self.bright.iter_mut().enumerate() {
+                        draw_icon(&cp, egui::pos2(slot + 8.0, cy), "\u{f108}", 13.0, WARM_ACCENT); // fa-desktop
+                        // Which monitor this is, so two identical sliders are telling apart.
+                        cp.text(
+                            egui::pos2(slot + 15.0, cy + 7.0),
+                            egui::Align2::CENTER_CENTER,
+                            label,
+                            egui::FontId::proportional(8.0),
+                            WARM_SUB,
+                        );
+                        let tl = slot + 20.0;
+                        let h = ui
+                            .interact(
+                                egui::Rect::from_min_max(egui::pos2(tl, cy - 11.0), egui::pos2(tl + tw, cy + 11.0)),
+                                egui::Id::new(("br", i)),
+                                egui::Sense::click_and_drag(),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+                        if h.hovered() {
+                            self.isl_interact = now_i;
+                        }
+                        if let Some(p) = h.interact_pointer_pos() {
+                            self.isl_interact = now_i;
+                            *val = ((p.x - tl) / tw).clamp(0.0, 1.0);
+                            changed = Some((*hmon, *val));
+                        }
+                        draw_track(&cp, tl, tw, cy, *val, WARM_ACCENT);
+                        slot += 100.0;
+                    }
+                    // The worker coalesces, so send freely; it applies the latest.
+                    if let Some((hmon, v)) = changed {
+                        self.bright_ctl.set(hmon, v);
+                    }
+                    let clock_hit = egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.left() + pad + clock_w + div_gap * 0.5, rect.bottom()));
+                    if ui.interact(clock_hit, egui::Id::new("isl-clock"), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        self.isl_expanded = false;
+                        self.isl_bright = false;
+                        self.bright.clear();
+                    }
+                    if now_i.duration_since(self.isl_interact).as_secs_f32() > 6.0 {
+                        self.isl_expanded = false;
+                        self.isl_bright = false;
+                        self.bright.clear();
                     }
                 } else if expanded && self.isl_opacity {
                     // ---- opacity widget: two live sliders (bar + terminal) ----
@@ -938,6 +1084,14 @@ impl eframe::App for BarApp {
                         if br.clicked() {
                             if *kind == "opacity" {
                                 self.isl_opacity = true; // open the opacity widget
+                                self.isl_interact = now_i;
+                            } else if *kind == "bright" {
+                                // Ask the worker to re-read the panels; it publishes
+                                // into bright_ctl.state and repaints. Doing the DDC/CI
+                                // query here would block the render thread for the
+                                // best part of a second per display.
+                                self.bright_ctl.refresh();
+                                self.isl_bright = true;
                                 self.isl_interact = now_i;
                             } else {
                                 run_action(kind, self.shared.clone(), ctx.clone());
@@ -1037,6 +1191,9 @@ fn main() -> eframe::Result<()> {
                 bar_opacity: read_opacity("bar-opacity.txt", 0.78),
                 term_opacity: read_opacity("term-opacity.txt", 0.85),
                 isl_opacity: false,
+                isl_bright: false,
+                bright: Vec::new(),
+                bright_ctl: BrightCtl::spawn(cc.egui_ctx.clone()),
                 last_opacity_write: Instant::now(),
             }))
         }),
