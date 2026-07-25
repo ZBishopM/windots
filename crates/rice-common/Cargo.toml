@@ -17,12 +17,15 @@ ipc = ["dep:tungstenite", "dep:serde", "dep:serde_json"]
 event = ["dep:serde", "dep:serde_json"]   # island.json notification payload
 settings = ["dep:serde", "dep:serde_json"] # ~/.config/rice.json
 audio = ["dep:windows"]                    # per-app + master volume (Core Audio)
+media = ["dep:windows"]                    # what is playing + transport controls (SMTC)
+spectrum = ["dep:rustfft"]                 # tiny live FFT for the island visualiser
 
 [dependencies]
 eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts"], optional = true }
 tungstenite = { version = "0.24", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
+rustfft = { version = "6", optional = true }
 windows = { version = "0.58", optional = true, features = [
   "Win32_Foundation",
   "Win32_Media_Audio",
@@ -31,4 +34,7 @@ windows = { version = "0.58", optional = true, features = [
   "Win32_System_Com_StructuredStorage",
   "Win32_Devices_FunctionDiscovery",
   "Win32_UI_Shell_PropertiesSystem",
+  "Media_Control",
+  "Storage_Streams",
+  "Foundation",
 ] }

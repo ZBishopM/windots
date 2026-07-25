@@ -813,6 +813,11 @@ struct BarApp {
     panel_h: f32,
     panel_v: f32,
     panel_shape: (i32, i32), // last shape applied (height, bubble width) -> avoid redundant Win32 calls
+    // ---- media: what is playing, plus a live spectrum for the pill ----
+    spectrum: rice_common::spectrum::Spectrum,
+    media: Option<rice_common::media::NowPlaying>,
+    media_at: Instant, // last poll (SMTC calls are tens of ms -> polled, not per frame)
+    isl_media: bool,   // bubble is showing the media view
     win_h: i32,              // last window height requested
     last_opacity_write: Instant,
 }
@@ -823,7 +828,17 @@ const ISL_HOLD: f32 = 4.0; // seconds a notification stays before collapsing
 impl BarApp {
     /// Which sub-view the panel is showing.
     fn panel_mode(&self) -> u8 {
-        if self.isl_vol { 1 } else if self.isl_bright { 2 } else if self.isl_opacity { 3 } else { 0 }
+        if self.isl_vol {
+            1
+        } else if self.isl_bright {
+            2
+        } else if self.isl_opacity {
+            3
+        } else if self.isl_media {
+            4
+        } else {
+            0
+        }
     }
 
     fn panel_width(&self) -> f32 {
@@ -831,6 +846,7 @@ impl BarApp {
             1 => (self.vol.len().max(1) as f32 * 46.0 + 70.0).max(200.0),
             2 => (self.bright.len().max(1) as f32 * 46.0 + 40.0).max(160.0),
             3 => 160.0,
+            4 => 300.0,
             _ => 3.0 * 52.0 + 24.0,
         }
     }
@@ -839,6 +855,7 @@ impl BarApp {
     fn panel_target_h(&self) -> f32 {
         match self.panel_mode() {
             1 | 2 | 3 => 140.0,
+            4 => 132.0,
             _ => (ACTIONS.len() as f32 / 3.0).ceil() * 52.0 + 22.0,
         }
     }
@@ -852,6 +869,7 @@ impl BarApp {
         self.isl_vol = false;
         self.isl_bright = false;
         self.isl_opacity = false;
+        self.isl_media = false;
         self.vol.clear();
         self.bright.clear();
     }
@@ -936,6 +954,7 @@ impl BarApp {
             1 => self.panel_volume(ui, &p, rect, now),
             2 => self.panel_bright(ui, &p, rect, now),
             3 => self.panel_opacity(ui, &p, rect, now),
+            4 => self.panel_media(ui, &p, rect, now),
             _ => self.panel_actions(ui, &p, rect, now, ctx),
         }
 
@@ -1064,6 +1083,81 @@ impl BarApp {
         }
     }
 
+
+    /// Media view: what is playing plus transport controls.
+    fn panel_media(&mut self, ui: &mut egui::Ui, p: &egui::Painter, rect: egui::Rect, now: Instant) {
+        let Some(m) = self.media.clone() else {
+            p.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "nada reproduciendose",
+                egui::FontId::proportional(11.5),
+                WARM_SUB,
+            );
+            return;
+        };
+
+        // Cover placeholder on the left. The artwork itself is fetched and
+        // decoded separately; until then this keeps the layout stable.
+        let art = egui::Rect::from_min_size(egui::pos2(rect.left() + 14.0, rect.top() + 14.0), egui::vec2(56.0, 56.0));
+        p.rect_filled(art, egui::Rounding::same(8.0), ISL_HI);
+        draw_icon(p, art.center(), "\u{f001}", 22.0, WARM_SUB); // fa-music
+
+        let tx = art.right() + 12.0;
+        p.text(
+            egui::pos2(tx, rect.top() + 26.0),
+            egui::Align2::LEFT_CENTER,
+            m.title.chars().take(28).collect::<String>(),
+            egui::FontId::proportional(12.5),
+            WARM_TEXT,
+        );
+        p.text(
+            egui::pos2(tx, rect.top() + 44.0),
+            egui::Align2::LEFT_CENTER,
+            m.artist.chars().take(32).collect::<String>(),
+            egui::FontId::proportional(10.5),
+            WARM_SUB,
+        );
+
+        // Transport row.
+        let by = rect.top() + 92.0;
+        let bx = rect.center().x;
+        let btns: [(&str, f32, bool); 3] = [
+            ("\u{f048}", bx - 46.0, m.can_prev),                              // prev
+            (if m.playing { "\u{f04c}" } else { "\u{f04b}" }, bx, true),      // pause / play
+            ("\u{f051}", bx + 46.0, m.can_next),                              // next
+        ];
+        for (i, (glyph, x, enabled)) in btns.iter().enumerate() {
+            let c = egui::pos2(*x, by);
+            let r = ui
+                .interact(
+                    egui::Rect::from_center_size(c, egui::vec2(34.0, 34.0)),
+                    egui::Id::new(("media-btn", i)),
+                    egui::Sense::click(),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if r.hovered() {
+                self.isl_interact = now;
+            }
+            let acc = if *enabled { WARM_ACCENT } else { WARM_SUB };
+            let a = if r.hovered() && *enabled { 90 } else { 42 };
+            let rad = if i == 1 { 16.0 } else { 13.0 };
+            p.circle_filled(c, rad, egui::Color32::from_rgba_unmultiplied(acc.r(), acc.g(), acc.b(), a));
+            draw_icon(p, c, glyph, if i == 1 { 15.0 } else { 12.0 }, acc);
+            if r.clicked() && *enabled {
+                self.isl_interact = now;
+                // Each of these is a blocking WinRT call; off the render thread.
+                std::thread::spawn(move || match i {
+                    0 => rice_common::media::previous(),
+                    1 => rice_common::media::toggle_play(),
+                    _ => rice_common::media::next(),
+                });
+                // Re-read shortly after so the play/pause glyph flips.
+                self.media_at = now - Duration::from_millis(1500);
+            }
+        }
+    }
+
     fn panel_opacity(&mut self, ui: &mut egui::Ui, p: &egui::Painter, rect: egui::Rect, now: Instant) {
         let top = rect.top() + 16.0;
         let h = 78.0;
@@ -1152,6 +1246,21 @@ impl eframe::App for BarApp {
                 // updates in real time), except while the slider owns the value.
                 if !self.isl_opacity {
                     self.bar_opacity = read_opacity("bar-opacity.txt", self.bar_opacity);
+                }
+            }
+        }
+
+        let now_tick = Instant::now();
+        // Poll what is playing. SMTC round trips cost tens of milliseconds, so it
+        // runs on an interval rather than per frame, and only while the spectrum
+        // says something is actually audible (or a session was already known).
+        if now_tick.duration_since(self.media_at).as_secs_f32() > 2.0 {
+            self.media_at = now_tick;
+            if self.spectrum.active() || self.media.is_some() {
+                let m = rice_common::media::now_playing();
+                if m != self.media {
+                    self.media = m;
+                    ctx.request_repaint();
                 }
             }
         }
@@ -1328,7 +1437,8 @@ impl eframe::App for BarApp {
 
                 let pad = 14.0;
                 let div_gap = 22.0; // clock -> divider -> extra spacing (divider centred in it)
-                let idle_w = pad + clock_w + pad;
+                let spec_reserve = if self.spectrum.active() && self.isl_notif.is_none() { 48.0 } else { 0.0 };
+                let idle_w = pad + clock_w + spec_reserve + pad;
                 let notif_open = self.isl_notif.is_some();
                 let target_w = if notif_open { pad + clock_w + div_gap + extra_w + pad } else { idle_w };
                 let target_h = if has_extra { 30.0 } else { 24.0 };
@@ -1399,12 +1509,37 @@ impl eframe::App for BarApp {
                     egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(ISL_HI.r(), ISL_HI.g(), ISL_HI.b(), 110)),
                 );
 
+                // Live spectrum, drawn inside the pill to the right of the clock when
+                // something is audible. This is the "it knows music is playing" cue.
+                let spec_w = if self.spectrum.active() && self.isl_notif.is_none() { 42.0 } else { 0.0 };
+
                 // ---- content, CLIPPED to the animated pill so it wipes in/out as the
                 // pill grows/shrinks (the clock is at the left, always inside) ----
                 let cp = ui.painter().with_clip_rect(rect);
                 let mut tx = rect.left() + pad;
                 cp.text(egui::pos2(tx, cy), egui::Align2::LEFT_CENTER, &clock, egui::FontId::proportional(14.0), WARM_TEXT);
                 tx += clock_w;
+                if spec_w > 0.0 {
+                    let levels = self.spectrum.levels();
+                    let n = levels.len().max(1);
+                    let bw = 3.0;
+                    let gap = (spec_w - n as f32 * bw) / (n as f32 - 1.0).max(1.0);
+                    let base = cy + 7.0;
+                    let max_h = 13.0;
+                    for (i, v) in levels.iter().enumerate() {
+                        let h = (v * max_h).clamp(1.0, max_h);
+                        let x = tx + 6.0 + i as f32 * (bw + gap);
+                        // Colour follows the level: amber low, lime at the top, so
+                        // it matches the rest of the rice rather than being a
+                        // separate palette.
+                        let c = if *v > 0.66 { col(theme::ACCENT_OK) } else { WARM_ACCENT };
+                        cp.rect_filled(
+                            egui::Rect::from_min_max(egui::pos2(x, base - h), egui::pos2(x + bw, base)),
+                            egui::Rounding::same(1.5),
+                            c,
+                        );
+                    }
+                }
                 if has_extra {
                     let dx = tx + div_gap / 2.0;
                     cp.line_segment(
@@ -1449,8 +1584,11 @@ impl eframe::App for BarApp {
                         self.isl_opacity = false;
                     }
                 } else if pill.clicked() {
-                    // idle: click reveals the quick-actions
+                    // idle: click opens the bubble. If something is playing, go
+                    // straight to the media view -- that is what the spectrum in
+                    // the pill was advertising.
                     self.isl_expanded = true;
+                    self.isl_media = self.media.is_some();
                     self.isl_interact = now_i;
                 }
 
@@ -1586,6 +1724,11 @@ fn main() -> eframe::Result<()> {
                 panel_h: 0.0,
                 panel_v: 0.0,
                 panel_shape: (0, 0),
+                // Eight bands is what fits legibly at pill size.
+                spectrum: rice_common::spectrum::Spectrum::start(8),
+                media: None,
+                media_at: Instant::now() - Duration::from_secs(9),
+                isl_media: false,
                 win_h: 0,
                 last_opacity_write: Instant::now(),
             }))

@@ -27,3 +27,9 @@ pub mod brightness;
 
 #[cfg(feature = "audio")]
 pub mod audio;
+
+#[cfg(feature = "media")]
+pub mod media;
+
+#[cfg(feature = "spectrum")]
+pub mod spectrum;
