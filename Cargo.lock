@@ -72,6 +72,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "appvol"
+version = "0.1.0"
+dependencies = [
+ "rice-common",
+]
+
+[[package]]
 name = "arboard"
 version = "3.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1967,6 +1974,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tungstenite",
+ "windows 0.58.0",
 ]
 
 [[package]]

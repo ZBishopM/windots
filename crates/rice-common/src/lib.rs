@@ -24,3 +24,6 @@ pub mod event;
 pub mod settings;
 
 pub mod brightness;
+
+#[cfg(feature = "audio")]
+pub mod audio;

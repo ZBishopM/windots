@@ -1,0 +1,8 @@
+[package]
+name = "appvol"
+version = "0.1.0"
+edition = "2021"
+
+# Master + per-application volume, and quick default-output switching.
+[dependencies]
+rice-common = { path = "../rice-common", features = ["audio", "settings"] }

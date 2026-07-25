@@ -19,6 +19,7 @@ members = [
     "crates/sysaudio-loopback",
     "crates/micswitch",
     "crates/taskbar",
+    "crates/appvol",
     "crates/shadowplay-wgc",
 ]
 exclude = ["flutter", "projects"]

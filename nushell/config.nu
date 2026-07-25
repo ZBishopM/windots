@@ -261,24 +261,38 @@ def mic [] {
 }
 
 # speaker: switch the default PLAYBACK device -- what AudioSwitch was sitting in
-# the tray for. No argument cycles; a substring jumps straight to that device
-# (there are a dozen endpoints here, so cycling blind is not usable).
-#   speaker            -> next output
-#   speaker hyperx     -> the HyperX headset
+# the tray for. With no argument it TOGGLES between the two you actually use
+# (headset <-> monitor) rather than cycling all fourteen endpoints.
+#   speaker            -> toggle HyperX <-> VG270
+#   speaker hyperx     -> jump to a specific one by substring
 #   speaker --list     -> all outputs, * marks the active one
-def speaker [name?: string, --list] {
+#   speaker --cycle    -> step to the next endpoint
+def speaker [name?: string, --list, --cycle] {
     let exe = (rice-exe 'micswitch.exe')
     if $list { return (^$exe --output --list) }
-    let new = if ($name | is-empty) {
+
+    let target = if ($name | is-not-empty) { $name } else if $cycle { null } else {
+        # Which of the pair is active now? Pick the other one.
+        let cur = (^$exe --output --list | lines | where { |l| $l starts-with '*' } | get -o 0 | default '')
+        if ($cur | str lowercase | str contains 'hyperx') { 'VG270' } else { 'HyperX' }
+    }
+    let new = if ($target | is-empty) {
         (^$exe --output | str trim)
     } else {
-        (^$exe --output --set $name | str trim)
+        (^$exe --output --set $target | str trim)
     }
     if ($new | is-empty) { return }
     {icon: 'desktop', title: 'Salida de audio', body: $new, accent: '#a9b56a'}
         | to json -r | save -f $'($env.USERPROFILE)/.config/island.json'
     ^(rice-exe 'shadowplay-notify.exe') --title 'Salida de audio' --body $new --icon desktop --accent '#a9b56a' --hold 4
 }
+
+# vol: master and per-application volume -- what EarTrumpet did from the tray.
+#   vol                    list master + every app playing audio
+#   vol 40                 master to 40%
+#   vol discord 20         Discord to 20% (across all its processes)
+#   vol discord mute       (also: unmute)
+def vol [...args: string] { ^(rice-exe 'appvol.exe') ...$args }
 
 def island-test [
     title: string = 'Prueba'

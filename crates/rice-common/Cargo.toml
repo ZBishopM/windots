@@ -16,9 +16,16 @@ ui = ["dep:eframe"]                       # egui palette + font + icon drawing
 ipc = ["dep:tungstenite", "dep:serde", "dep:serde_json"]
 event = ["dep:serde", "dep:serde_json"]   # island.json notification payload
 settings = ["dep:serde", "dep:serde_json"] # ~/.config/rice.json
+audio = ["dep:windows"]                    # per-app + master volume (Core Audio)
 
 [dependencies]
 eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts"], optional = true }
 tungstenite = { version = "0.24", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
+windows = { version = "0.58", optional = true, features = [
+  "Win32_Foundation",
+  "Win32_Media_Audio",
+  "Win32_Media_Audio_Endpoints",
+  "Win32_System_Com",
+] }
