@@ -12,6 +12,21 @@
 }
 
 ; ------------------------------------------------------------
+; Stop a BARE Win press from opening the Start menu, without breaking any
+; Win+... combination.
+;
+; Windows opens Start on Win *keyup* only when no other key was pressed in
+; between. So: `~` passes the real LWin through (GlazeWM's lwin+... bindings and
+; CmdPal's Win+Ctrl+Space still see it), and we immediately send vkE8 -- an
+; unassigned virtual key that does nothing -- so the OS sees a combination and
+; leaves Start alone.
+;
+; Remapping LWin outright would have been simpler and wrong: GlazeWM listens for
+; the physical LWin, so the entire keybind set would have died with it.
+; ------------------------------------------------------------
+~LWin::Send '{Blind}{vkE8}'
+
+; ------------------------------------------------------------
 ; Win+Space -> Command Palette (CmdPal), NOT the OS language switch.
 ; Windows fires its input-language switcher on Win+Space even with a
 ; low-level hook, so AHK claims the combo (suppressing the switch) and
@@ -32,6 +47,15 @@
         if !WinActive('ahk_exe Microsoft.CmdPal.UI.exe')
             WinActivate('ahk_exe Microsoft.CmdPal.UI.exe')
     }
+}
+
+; ------------------------------------------------------------
+; Win+Shift+B -> show/hide the Windows taskbar.
+; Auto-hide alone still slides it back in on hover; the tool combines that (which
+; is what frees the work area for tiling) with hiding the window outright.
+; ------------------------------------------------------------
+#+b:: {
+    Run('"' . EnvGet('USERPROFILE') . '\dev\target\release\taskbar.exe" --toggle', , 'Hide')
 }
 
 ; ------------------------------------------------------------

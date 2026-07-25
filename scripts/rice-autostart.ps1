@@ -55,5 +55,9 @@ Start-Sleep -Seconds 3
 
 Focus 1  # end on the primary workspace
 
+# Hide the Windows taskbar. Explorer restores it on every login, so this has to
+# run each time; Win+Shift+B toggles it back when something needs the tray.
+Start-Process (Join-Path $Rice.Dev 'taskbar.exe') -ArgumentList '--hide' -WindowStyle Hidden
+
 # Once at login: has GlazeWM's animation PR #1392 merged yet? Toast if so (fail-silent).
 Start-Process pwsh -ArgumentList '-NoProfile', '-WindowStyle', 'Hidden', '-File', "$env:USERPROFILE\.config\glazewm-animcheck.ps1" -WindowStyle Hidden
