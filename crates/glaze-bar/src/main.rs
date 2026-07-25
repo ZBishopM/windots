@@ -353,12 +353,99 @@ impl BrightCtl {
     }
 }
 
-const ACTIONS: [(&str, &str, [u8; 3]); 5] = [
+// Master + per-application volume, and the output-device toggle. Same shape as
+// BrightCtl: every Core Audio call is a COM round trip costing milliseconds, so
+// it lives on a worker and the UI only ever reads a published snapshot.
+enum VolMsg {
+    Refresh,
+    /// Empty name = master.
+    Set(String, f32),
+    /// Flip the default output between the two devices actually in use.
+    SwapOutput,
+}
+
+/// One row of the widget: label, 0..1 level. The first row is always master.
+type VolRow = (String, f32);
+
+struct VolCtl {
+    tx: std::sync::mpsc::Sender<VolMsg>,
+    state: Arc<Mutex<Vec<VolRow>>>,
+}
+
+impl VolCtl {
+    fn spawn(ctx: egui::Context) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<VolMsg>();
+        let state = Arc::new(Mutex::new(Vec::new()));
+        let out = state.clone();
+        std::thread::spawn(move || {
+            while let Ok(first) = rx.recv() {
+                // Coalesce a drag into one write per target, newest wins.
+                let mut refresh = matches!(first, VolMsg::Refresh);
+                let mut swap = matches!(first, VolMsg::SwapOutput);
+                let mut pending: std::collections::HashMap<String, f32> = Default::default();
+                if let VolMsg::Set(n, v) = first {
+                    pending.insert(n, v);
+                }
+                while let Ok(m) = rx.try_recv() {
+                    match m {
+                        VolMsg::Refresh => refresh = true,
+                        VolMsg::SwapOutput => swap = true,
+                        VolMsg::Set(n, v) => {
+                            pending.insert(n, v);
+                        }
+                    }
+                }
+                for (name, v) in pending {
+                    if name.is_empty() {
+                        rice_common::audio::set_master_volume(v);
+                    } else {
+                        rice_common::audio::set_app_volume(&name, v);
+                    }
+                }
+                if swap {
+                    // micswitch owns the IPolicyConfig dance; reuse it rather
+                    // than duplicating that undocumented COM call here.
+                    let exe = win::sibling_exe("micswitch.exe");
+                    let cur = rice_common::audio::current_output_name().unwrap_or_default();
+                    let target = if cur.to_lowercase().contains("hyperx") { "VG270" } else { "HyperX" };
+                    use std::os::windows::process::CommandExt;
+                    let _ = std::process::Command::new(exe)
+                        .args(["--output", "--set", target])
+                        .creation_flags(win::CREATE_NO_WINDOW)
+                        .output();
+                    refresh = true;
+                }
+                if refresh || swap {
+                    let mut rows: Vec<VolRow> =
+                        vec![("master".into(), rice_common::audio::master_volume().unwrap_or(0.0))];
+                    for s in rice_common::audio::sessions().into_iter().take(4) {
+                        rows.push((s.name.trim_end_matches(".exe").to_string(), s.volume));
+                    }
+                    *out.lock().unwrap() = rows;
+                    ctx.request_repaint();
+                }
+            }
+        });
+        Self { tx, state }
+    }
+    fn refresh(&self) {
+        let _ = self.tx.send(VolMsg::Refresh);
+    }
+    fn set(&self, name: &str, v: f32) {
+        let _ = self.tx.send(VolMsg::Set(name.to_string(), v));
+    }
+    fn swap_output(&self) {
+        let _ = self.tx.send(VolMsg::SwapOutput);
+    }
+}
+
+const ACTIONS: [(&str, &str, [u8; 3]); 6] = [
     ("mic", "\u{f130}", [224, 163, 92]),      // switch mic
     ("save", "\u{f03d}", [169, 181, 106]),    // save a replay clip
     ("term", "\u{f120}", [206, 150, 112]),    // open a terminal
     ("opacity", "\u{f1de}", [200, 172, 150]), // fa-sliders -> opacity widget
     ("bright", "\u{f185}", [230, 190, 120]),  // fa-sun -> monitor brightness (DDC/CI)
+    ("vol", "\u{f028}", [150, 190, 200]),     // fa-volume-up -> master + per-app volume
 ];
 
 // Draw an opacity slider track (bg + accent fill + handle) at a normalized value t.
@@ -675,6 +762,10 @@ struct BarApp {
     isl_bright: bool,
     bright: Vec<(isize, String, f32)>, // (hmonitor, label, 0..1)
     bright_ctl: BrightCtl,
+    // Volume: master + up to four apps, queried when the widget opens.
+    isl_vol: bool,
+    vol: Vec<VolRow>,
+    vol_ctl: VolCtl,
     last_opacity_write: Instant,
 }
 
@@ -898,6 +989,9 @@ impl eframe::App for BarApp {
                 } else if expanded {
                     if self.isl_opacity {
                         190.0
+                    } else if self.isl_vol {
+                        // one slot per row, plus the output-swap button
+                        (self.vol.len().max(1) as f32) * 96.0 + 34.0
                     } else if self.isl_bright {
                         // one 100px slot per display, so the pill grows with the
                         // number of monitors that answer DDC/CI
@@ -991,6 +1085,95 @@ impl eframe::App for BarApp {
                     }
                     if pill.clicked() {
                         self.isl_notif = None; // click dismisses early
+                    }
+                } else if expanded && self.isl_vol {
+                    // ---- volume widget: master + the apps currently playing ----
+                    if self.vol.is_empty() {
+                        self.vol = self.vol_ctl.state.lock().unwrap().clone();
+                    }
+                    let tw = 62.0;
+                    let mut slot = tx;
+                    let mut changed: Option<(String, f32)> = None;
+                    if self.vol.is_empty() {
+                        cp.text(
+                            egui::pos2(tx + 6.0, cy),
+                            egui::Align2::LEFT_CENTER,
+                            "leyendo audio…",
+                            egui::FontId::proportional(11.5),
+                            WARM_SUB,
+                        );
+                    }
+                    for (i, (label, val)) in self.vol.iter_mut().enumerate() {
+                        // Master gets the speaker glyph; apps get their name.
+                        let glyph = if i == 0 { "\u{f028}" } else { "" };
+                        if i == 0 {
+                            draw_icon(&cp, egui::pos2(slot + 8.0, cy), glyph, 13.0, WARM_ACCENT);
+                        }
+                        cp.text(
+                            egui::pos2(slot + if i == 0 { 15.0 } else { 8.0 }, cy + 8.0),
+                            egui::Align2::CENTER_CENTER,
+                            // Keep it short: the slot is 96px wide.
+                            label.chars().take(9).collect::<String>(),
+                            egui::FontId::proportional(8.0),
+                            WARM_SUB,
+                        );
+                        let tl = slot + if i == 0 { 20.0 } else { 14.0 };
+                        let h = ui
+                            .interact(
+                                egui::Rect::from_min_max(egui::pos2(tl, cy - 11.0), egui::pos2(tl + tw, cy + 11.0)),
+                                egui::Id::new(("vol", i)),
+                                egui::Sense::click_and_drag(),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+                        if h.hovered() {
+                            self.isl_interact = now_i;
+                        }
+                        if let Some(p) = h.interact_pointer_pos() {
+                            self.isl_interact = now_i;
+                            *val = ((p.x - tl) / tw).clamp(0.0, 1.0);
+                            // Master is addressed by the empty name.
+                            changed = Some((if i == 0 { String::new() } else { label.clone() }, *val));
+                        }
+                        draw_track(&cp, tl, tw, cy, *val, WARM_ACCENT);
+                        slot += 96.0;
+                    }
+                    if let Some((name, v)) = changed {
+                        self.vol_ctl.set(&name, v);
+                    }
+                    // Output-device swap: headset <-> monitor, the only two in use.
+                    let swap_c = egui::pos2(slot + 14.0, cy);
+                    let sr = ui
+                        .interact(
+                            egui::Rect::from_center_size(swap_c, egui::vec2(28.0, 26.0)),
+                            egui::Id::new("vol-swap"),
+                            egui::Sense::click(),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if sr.hovered() {
+                        self.isl_interact = now_i;
+                    }
+                    let a = if sr.hovered() { 80 } else { 42 };
+                    cp.circle_filled(
+                        swap_c,
+                        11.5,
+                        egui::Color32::from_rgba_unmultiplied(WARM_ACCENT.r(), WARM_ACCENT.g(), WARM_ACCENT.b(), a),
+                    );
+                    draw_icon(&cp, swap_c, "\u{f0ec}", 12.0, WARM_ACCENT); // fa-exchange
+                    if sr.clicked() {
+                        self.vol_ctl.swap_output();
+                        self.vol.clear(); // adopt the refreshed levels
+                        self.isl_interact = now_i;
+                    }
+                    let clock_hit = egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.left() + pad + clock_w + div_gap * 0.5, rect.bottom()));
+                    if ui.interact(clock_hit, egui::Id::new("isl-clock"), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        self.isl_expanded = false;
+                        self.isl_vol = false;
+                        self.vol.clear();
+                    }
+                    if now_i.duration_since(self.isl_interact).as_secs_f32() > 6.0 {
+                        self.isl_expanded = false;
+                        self.isl_vol = false;
+                        self.vol.clear();
                     }
                 } else if expanded && self.isl_bright {
                     // ---- brightness widget: one live slider per DDC/CI display ----
@@ -1148,6 +1331,10 @@ impl eframe::App for BarApp {
                             if *kind == "opacity" {
                                 self.isl_opacity = true; // open the opacity widget
                                 self.isl_interact = now_i;
+                            } else if *kind == "vol" {
+                                self.vol_ctl.refresh();
+                                self.isl_vol = true;
+                                self.isl_interact = now_i;
                             } else if *kind == "bright" {
                                 // Ask the worker to re-read the panels; it publishes
                                 // into bright_ctl.state and repaints. Doing the DDC/CI
@@ -1258,6 +1445,9 @@ fn main() -> eframe::Result<()> {
                 isl_bright: false,
                 bright: Vec::new(),
                 bright_ctl: BrightCtl::spawn(cc.egui_ctx.clone()),
+                isl_vol: false,
+                vol: Vec::new(),
+                vol_ctl: VolCtl::spawn(cc.egui_ctx.clone()),
                 last_opacity_write: Instant::now(),
             }))
         }),

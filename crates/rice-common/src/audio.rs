@@ -166,6 +166,26 @@ unsafe fn endpoint_volume() -> Option<IAudioEndpointVolume> {
     dev.Activate(CLSCTX_ALL, None).ok()
 }
 
+/// Friendly name of the current default playback device, e.g.
+/// `Altavoces (HyperX Cloud II Wireless)`.
+pub fn current_output_name() -> Option<String> {
+    use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
+    use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
+    use windows::Win32::System::Com::{CoTaskMemFree, STGM_READ};
+    init_com();
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+        let dev = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
+        let store = dev.OpenPropertyStore(STGM_READ).ok()?;
+        let pv = store.GetValue(&PKEY_Device_FriendlyName).ok()?;
+        let ws = PropVariantToStringAlloc(&pv).ok()?;
+        let s = ws.to_string().ok();
+        CoTaskMemFree(Some(ws.0 as *const core::ffi::c_void));
+        s
+    }
+}
+
 /// Master volume of the default playback device, 0.0..=1.0.
 pub fn master_volume() -> Option<f32> {
     init_com();
