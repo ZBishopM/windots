@@ -480,13 +480,14 @@ impl VolCtl {
     }
 }
 
-const ACTIONS: [(&str, &str, [u8; 3]); 6] = [
+const ACTIONS: [(&str, &str, [u8; 3]); 7] = [
     ("mic", "\u{f130}", [224, 163, 92]),      // switch mic
     ("save", "\u{f03d}", [169, 181, 106]),    // save a replay clip
     ("term", "\u{f120}", [206, 150, 112]),    // open a terminal
     ("opacity", "\u{f1de}", [200, 172, 150]), // fa-sliders -> opacity widget
     ("bright", "\u{f185}", [230, 190, 120]),  // fa-sun -> monitor brightness (DDC/CI)
     ("vol", "\u{f028}", [150, 190, 200]),     // fa-volume-up -> master + per-app volume
+    ("timer", "\u{f017}", [205, 150, 170]),   // fa-clock-o -> pomodoro
 ];
 
 // Draw an opacity slider track (bg + accent fill + handle) at a normalized value t.
@@ -818,6 +819,12 @@ struct BarApp {
     media: Option<rice_common::media::NowPlaying>,
     media_at: Instant, // last poll (SMTC calls are tens of ms -> polled, not per frame)
     isl_media: bool,   // bubble is showing the media view
+    // ---- pomodoro ----
+    isl_timer: bool,
+    timer_left: Duration,
+    timer_total: Duration,
+    timer_running: bool,
+    timer_tick: Instant,
     win_h: i32,              // last window height requested
     last_opacity_write: Instant,
 }
@@ -836,6 +843,8 @@ impl BarApp {
             3
         } else if self.isl_media {
             4
+        } else if self.isl_timer {
+            5
         } else {
             0
         }
@@ -847,6 +856,7 @@ impl BarApp {
             2 => (self.bright.len().max(1) as f32 * 46.0 + 40.0).max(160.0),
             3 => 160.0,
             4 => 300.0,
+            5 => 230.0,
             _ => 3.0 * 52.0 + 24.0,
         }
     }
@@ -856,6 +866,7 @@ impl BarApp {
         match self.panel_mode() {
             1 | 2 | 3 => 140.0,
             4 => 132.0,
+            5 => 138.0,
             _ => (ACTIONS.len() as f32 / 3.0).ceil() * 52.0 + 22.0,
         }
     }
@@ -870,6 +881,7 @@ impl BarApp {
         self.isl_bright = false;
         self.isl_opacity = false;
         self.isl_media = false;
+        self.isl_timer = false;
         self.vol.clear();
         self.bright.clear();
     }
@@ -955,6 +967,7 @@ impl BarApp {
             2 => self.panel_bright(ui, &p, rect, now),
             3 => self.panel_opacity(ui, &p, rect, now),
             4 => self.panel_media(ui, &p, rect, now),
+            5 => self.panel_timer(ui, &p, rect, now),
             _ => self.panel_actions(ui, &p, rect, now, ctx),
         }
 
@@ -996,6 +1009,7 @@ impl BarApp {
                         self.bright_ctl.refresh();
                         self.isl_bright = true;
                     }
+                    "timer" => self.isl_timer = true,
                     k => {
                         run_action(k, self.shared.clone(), ctx.clone());
                         self.isl_expanded = false;
@@ -1158,6 +1172,91 @@ impl BarApp {
         }
     }
 
+
+    /// Pomodoro: a countdown with presets, start/pause and reset.
+    fn panel_timer(&mut self, ui: &mut egui::Ui, p: &egui::Painter, rect: egui::Rect, now: Instant) {
+        let secs = self.timer_left.as_secs();
+        let label = format!("{:02}:{:02}", secs / 60, secs % 60);
+        // Ring showing how much of the block is left.
+        let ring_c = egui::pos2(rect.center().x, rect.top() + 44.0);
+        let frac = if self.timer_total.as_secs_f32() > 0.0 {
+            (self.timer_left.as_secs_f32() / self.timer_total.as_secs_f32()).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        p.circle_stroke(ring_c, 30.0, egui::Stroke::new(4.0, ISL_HI));
+        // egui has no arc primitive; draw the remaining portion as short segments.
+        let steps = 48;
+        let lit = (frac * steps as f32).round() as usize;
+        for i in 0..lit {
+            let a0 = -std::f32::consts::FRAC_PI_2 + (i as f32 / steps as f32) * std::f32::consts::TAU;
+            let a1 = -std::f32::consts::FRAC_PI_2 + ((i + 1) as f32 / steps as f32) * std::f32::consts::TAU;
+            p.line_segment(
+                [
+                    ring_c + egui::vec2(a0.cos(), a0.sin()) * 30.0,
+                    ring_c + egui::vec2(a1.cos(), a1.sin()) * 30.0,
+                ],
+                egui::Stroke::new(4.0, WARM_ACCENT),
+            );
+        }
+        p.text(ring_c, egui::Align2::CENTER_CENTER, &label, egui::FontId::proportional(17.0), WARM_TEXT);
+
+        // Controls: presets on the left/right of play-pause and reset.
+        let by = rect.top() + 100.0;
+        let cx = rect.center().x;
+        // (glyph, x, action) -- action: 0 = toggle, 1 = reset, else = preset minutes
+        let items: [(&str, f32, u64); 4] = [
+            ("\u{f01e}", cx - 78.0, 1),                                        // reset
+            (if self.timer_running { "\u{f04c}" } else { "\u{f04b}" }, cx - 26.0, 0),
+            ("25", cx + 26.0, 25),
+            ("5", cx + 78.0, 5),
+        ];
+        for (i, (glyph, x, action)) in items.iter().enumerate() {
+            let c = egui::pos2(*x, by);
+            let r = ui
+                .interact(
+                    egui::Rect::from_center_size(c, egui::vec2(40.0, 32.0)),
+                    egui::Id::new(("timer-btn", i)),
+                    egui::Sense::click(),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if r.hovered() {
+                self.isl_interact = now;
+            }
+            let a = if r.hovered() { 90 } else { 42 };
+            p.circle_filled(c, 14.0, egui::Color32::from_rgba_unmultiplied(WARM_ACCENT.r(), WARM_ACCENT.g(), WARM_ACCENT.b(), a));
+            if *action >= 5 {
+                // Preset: draw the number rather than an icon.
+                p.text(c, egui::Align2::CENTER_CENTER, *glyph, egui::FontId::proportional(11.5), WARM_ACCENT);
+            } else {
+                draw_icon(p, c, glyph, 13.0, WARM_ACCENT);
+            }
+            if r.clicked() {
+                self.isl_interact = now;
+                match action {
+                    0 => {
+                        // Starting from zero restarts the block instead of doing nothing.
+                        if self.timer_left.is_zero() {
+                            self.timer_left = self.timer_total;
+                        }
+                        self.timer_running = !self.timer_running;
+                        self.timer_tick = now;
+                    }
+                    1 => {
+                        self.timer_running = false;
+                        self.timer_left = self.timer_total;
+                    }
+                    m => {
+                        self.timer_total = Duration::from_secs(m * 60);
+                        self.timer_left = self.timer_total;
+                        self.timer_running = true;
+                        self.timer_tick = now;
+                    }
+                }
+            }
+        }
+    }
+
     fn panel_opacity(&mut self, ui: &mut egui::Ui, p: &egui::Painter, rect: egui::Rect, now: Instant) {
         let top = rect.top() + 16.0;
         let h = 78.0;
@@ -1251,6 +1350,39 @@ impl eframe::App for BarApp {
         }
 
         let now_tick = Instant::now();
+
+        // Pomodoro countdown. Driven off wall-clock deltas rather than a frame
+        // count, so it stays correct even when the bar throttles its repaints.
+        if self.timer_running {
+            let dt = now_tick.saturating_duration_since(self.timer_tick);
+            self.timer_tick = now_tick;
+            self.timer_left = self.timer_left.saturating_sub(dt);
+            if self.timer_left.is_zero() {
+                self.timer_running = false;
+                // Announce through the same island/toast path everything else uses.
+                let ev = rice_common::event::IslandEvent::new(
+                    "check",
+                    "Temporizador",
+                    "tiempo cumplido",
+                    "#a9b56a",
+                );
+                let _ = ev.publish();
+                let exe = win::sibling_exe("shadowplay-notify.exe");
+                std::thread::spawn(move || {
+                    use std::os::windows::process::CommandExt;
+                    let _ = std::process::Command::new(exe)
+                        .args([
+                            "--title", "Temporizador", "--body", "tiempo cumplido",
+                            "--icon", "check", "--accent", "#a9b56a", "--hold", "8",
+                        ])
+                        .creation_flags(win::CREATE_NO_WINDOW)
+                        .spawn();
+                });
+            }
+            ctx.request_repaint_after(Duration::from_millis(250));
+        } else {
+            self.timer_tick = now_tick;
+        }
         // Poll what is playing. SMTC round trips cost tens of milliseconds, so it
         // runs on an interval rather than per frame, and only while the spectrum
         // says something is actually audible (or a session was already known).
@@ -1438,7 +1570,8 @@ impl eframe::App for BarApp {
                 let pad = 14.0;
                 let div_gap = 22.0; // clock -> divider -> extra spacing (divider centred in it)
                 let spec_reserve = if self.spectrum.active() && self.isl_notif.is_none() { 48.0 } else { 0.0 };
-                let idle_w = pad + clock_w + spec_reserve + pad;
+                let timer_reserve = if self.timer_running && self.isl_notif.is_none() { 44.0 } else { 0.0 };
+                let idle_w = pad + clock_w + timer_reserve + spec_reserve + pad;
                 let notif_open = self.isl_notif.is_some();
                 let target_w = if notif_open { pad + clock_w + div_gap + extra_w + pad } else { idle_w };
                 let target_h = if has_extra { 30.0 } else { 24.0 };
@@ -1512,6 +1645,8 @@ impl eframe::App for BarApp {
                 // Live spectrum, drawn inside the pill to the right of the clock when
                 // something is audible. This is the "it knows music is playing" cue.
                 let spec_w = if self.spectrum.active() && self.isl_notif.is_none() { 42.0 } else { 0.0 };
+                // A running countdown is worth seeing without opening anything.
+                let timer_w = if self.timer_running && self.isl_notif.is_none() { 44.0 } else { 0.0 };
 
                 // ---- content, CLIPPED to the animated pill so it wipes in/out as the
                 // pill grows/shrinks (the clock is at the left, always inside) ----
@@ -1519,6 +1654,17 @@ impl eframe::App for BarApp {
                 let mut tx = rect.left() + pad;
                 cp.text(egui::pos2(tx, cy), egui::Align2::LEFT_CENTER, &clock, egui::FontId::proportional(14.0), WARM_TEXT);
                 tx += clock_w;
+                if timer_w > 0.0 {
+                    let secs = self.timer_left.as_secs();
+                    cp.text(
+                        egui::pos2(tx + 8.0, cy),
+                        egui::Align2::LEFT_CENTER,
+                        format!("{:02}:{:02}", secs / 60, secs % 60),
+                        egui::FontId::proportional(11.5),
+                        col(theme::ACCENT_OK),
+                    );
+                    tx += timer_w;
+                }
                 if spec_w > 0.0 {
                     let levels = self.spectrum.levels();
                     let n = levels.len().max(1);
@@ -1729,6 +1875,11 @@ fn main() -> eframe::Result<()> {
                 media: None,
                 media_at: Instant::now() - Duration::from_secs(9),
                 isl_media: false,
+                isl_timer: false,
+                timer_left: Duration::from_secs(25 * 60),
+                timer_total: Duration::from_secs(25 * 60),
+                timer_running: false,
+                timer_tick: Instant::now(),
                 win_h: 0,
                 last_opacity_write: Instant::now(),
             }))
