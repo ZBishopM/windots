@@ -4,7 +4,8 @@
 # stereo. We concat the video + each audio ring; if the mic ring exists we mix
 # system + mic into one track, otherwise system audio only.
 . "$env:USERPROFILE\.config\lib\rice-paths.ps1"
-. "$env:USERPROFILE\.config\lib\rice-ipc.ps1"
+# (rice-ipc is no longer needed here: the toast used to be positioned on the
+#  focused monitor via GlazeWM IPC, and the toast is gone.)
 
 $buf = $Rice.WgcBuffer
 $out = $Rice.Clips
@@ -70,34 +71,28 @@ elseif ($haveSys) {
 else {
     & $ff -hide_banner -loglevel error -f concat -safe 0 -i $listFile -c copy -y $dest 2>$null
 }
-if (-not (Test-Path $dest)) {
-    # ffmpeg failed (its stderr is discarded above). Say so instead of leaving
-    # Alt+F10 looking like a dead key.
-    Start-Process $Rice.Notify `
-        -ArgumentList '--title "Replay falló" --body "ffmpeg no produjo el clip" --icon warn --accent "#d08770" --hold 6'
+# Feedback goes to the dynamic island only. The standalone toast used to fire as
+# well, because the bar was hidden under a fullscreen game -- but the game runs
+# Borderless, so the bar (and the island with it) stays visible during play and
+# the toast was just the same message twice.
+#
+# Write-then-rename: the bar polls this file, so a truncate-then-write could be
+# observed half-written.
+function Set-Island($icon, $title, $body, $accent) {
+    $tmp = "$($Rice.Island).tmp"
+    @{icon = $icon; title = $title; body = $body; accent = $accent } |
+        ConvertTo-Json -Compress | Set-Content $tmp -Encoding utf8
+    [System.IO.File]::Move($tmp, $Rice.Island, $true)
 }
 
 if (Test-Path $dest) {
-    # Toast on the FOCUSED monitor (per GlazeWM IPC), fall back to primary top-right.
-    # 420 = the toast's 400px width plus its 10px outer margin, doubled.
-    $nx = 1490; $ny = 50
-    $mon = Get-GlazeFocusedMonitor
-    if ($mon) {
-        $nx = [int]($mon.x + $mon.width - 420 - 10)
-        $ny = [int]($mon.y + 50)
-    }
-    $fname = Split-Path $dest -Leaf
-    # feed the in-bar dynamic island (shows when the bar is visible)
-    # Write-then-rename: the bar polls this file, so a truncate-then-write could
-    # be observed half-written.
-    $isl = "$($Rice.Island).tmp"
-    @{icon = 'replay'; title = 'Replay guardado'; body = $fname; accent = '#a9b56a' } |
-        ConvertTo-Json -Compress | Set-Content $isl -Encoding utf8
-    [System.IO.File]::Move($isl, $Rice.Island, $true)
-    # and the standalone toast (visible over fullscreen games, where the bar is hidden)
-    $nargs = "--title `"Replay guardado`" --body `"$fname`" --icon replay --accent `"#a9b56a`" --open `"$dest`" --x $nx --y $ny"
-    Start-Process $Rice.Notify -ArgumentList $nargs
+    Set-Island 'replay' 'Replay guardado' (Split-Path $dest -Leaf) '#a9b56a'
     Write-Output $dest
+}
+else {
+    # ffmpeg failed (its stderr is discarded above). Say so, so Alt+F10 never
+    # just silently does nothing.
+    Set-Island 'warn' 'Replay falló' 'ffmpeg no produjo el clip' '#d08770'
 }
 
 }
