@@ -1078,6 +1078,8 @@ struct BarApp {
     // ---- pomodoro ----
     isl_timer: bool,
     isl_devices: bool,
+    want_close: bool,   // set under the shared lock, acted on after it is dropped
+    want_back: bool,    // return to the action grid without closing
     timer_left: Duration,
     timer_total: Duration,
     timer_running: bool,
@@ -1215,6 +1217,32 @@ impl BarApp {
         // nothing renders squashed while the spring is still travelling.
         if self.panel_h / self.panel_target_h().max(1.0) < 0.55 {
             return;
+        }
+
+        // Sub-views get a back chevron; the action grid is the root and has none.
+        if self.panel_mode() != 0 {
+            let c = egui::pos2(rect.left() + 18.0, rect.top() + 17.0);
+            let r = ui
+                .interact(
+                    egui::Rect::from_center_size(c, egui::vec2(30.0, 28.0)),
+                    egui::Id::new("panel-back"),
+                    egui::Sense::click(),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if r.hovered() {
+                self.isl_interact = now;
+            }
+            draw_icon(
+                &p,
+                c,
+                "\u{f053}", // fa-chevron-left
+                12.0,
+                if r.hovered() { WARM_ACCENT } else { WARM_SUB },
+            );
+            if r.clicked() {
+                self.want_back = true;
+                self.isl_interact = now;
+            }
         }
 
         match self.panel_mode() {
@@ -2174,18 +2202,23 @@ impl eframe::App for BarApp {
                 } else if expanded {
                     // The pill itself stays compact while expanded; every control
                     // now lives in the vertical panel drawn below.
-                    let clock_hit = egui::Rect::from_min_max(rect.left_top(), rect.right_bottom());
+                    // Only the strip: `rect` is the whole morphed shape while
+                    // the panel is open, and using it made every click over the
+                    // panel background a dismiss.
+                    let clock_hit = egui::Rect::from_min_max(
+                        rect.left_top(),
+                        egui::pos2(rect.right(), (cy + h / 2.0).min(rect.bottom())),
+                    );
                     if ui
                         .interact(clock_hit, egui::Id::new("isl-clock"), egui::Sense::click())
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .clicked()
                     {
-                        // Inlined rather than close_panel(): a method call here
-                        // would borrow all of self and clash with the lock.
-                        self.isl_expanded = false;
-                        self.isl_vol = false;
-                        self.isl_bright = false;
-                        self.isl_opacity = false;
+                        // close_panel() cannot be called here -- the shared lock
+                        // is still held and it needs all of self -- so ask for it
+                        // and let the code past the lock do it. Duplicating the
+                        // reset is what broke this before.
+                        self.want_close = true;
                     }
                 } else if pill.clicked() {
                     // Which part of the pill was hit decides what opens. Opening
@@ -2210,6 +2243,22 @@ impl eframe::App for BarApp {
                 }
             });
         drop(s);
+
+        if std::mem::take(&mut self.want_close) {
+            self.close_panel();
+        }
+        if std::mem::take(&mut self.want_back) {
+            // Back to the action grid: drop the sub-view but stay open.
+            self.isl_vol = false;
+            self.isl_bright = false;
+            self.isl_opacity = false;
+            self.isl_media = false;
+            self.isl_timer = false;
+            self.isl_devices = false;
+            self.vol.clear();
+            self.bright.clear();
+            self.isl_interact = Instant::now();
+        }
 
         // A click anywhere outside the bar/bubble should dismiss the panel. Those
         // clicks never arrive as egui events: the window region excludes that
@@ -2387,6 +2436,8 @@ fn main() -> eframe::Result<()> {
                 isl_media: false,
                 isl_timer: false,
                 isl_devices: false,
+                want_close: false,
+                want_back: false,
                 timer_left: Duration::from_secs(25 * 60),
                 timer_total: Duration::from_secs(25 * 60),
                 timer_running: false,
