@@ -71,6 +71,17 @@
 }
 
 ; ------------------------------------------------------------
+; Ctrl+Alt+Space -> cycle the input language.
+;
+; The OS normally offers Win+Space and Alt+Shift for this. Win+Space is taken
+; above (Command Palette), and Alt+Shift is now disabled in the registry because
+; it fires by accident far too easily -- a stray Alt+Shift stepped the input
+; language on to the Chinese IME and every keystroke after that came out as
+; pinyin, with no obvious way back. This is the deliberate replacement.
+; ------------------------------------------------------------
+^!Space:: PostMessage(0x0050, 2, 0, , 'A')   ; WM_INPUTLANGCHANGEREQUEST, FORWARD
+
+; ------------------------------------------------------------
 ; Win+Shift+B -> show/hide the Windows taskbar.
 ; Auto-hide alone still slides it back in on hover; the tool combines that (which
 ; is what frees the work area for tiling) with hiding the window outright.
