@@ -76,6 +76,14 @@ $Components = @(
     # It honours the marker file, so Win+Shift+B still wins over it.
     @{ Name = 'taskbar'; Check = 'Process'; Match = 'taskbar'
        Path = { Get-RiceExe 'taskbar.exe' }; Args = { @('--watch') } }
+
+    # Strips native window decorations as windows appear. Note the measured
+    # limit: Electron/Chromium apps (Vesktop, Claude, Zed) draw their own title
+    # bar inside the web content, so this only helps natively framed windows.
+    # Started WITHOUT --no-minimize: that flag undoes every minimise, including
+    # the deliberate minimise-to-tray that several apps rely on.
+    @{ Name = 'windeco'; Check = 'Process'; Match = 'windeco'
+       Path = { Get-RiceExe 'windeco.exe' } }
 )
 
 # One bar per monitor, each with its own single-instance mutex keyed by --x.

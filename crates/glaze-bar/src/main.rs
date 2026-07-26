@@ -869,6 +869,7 @@ struct BarApp {
     // Height animates with a spring so it overshoots and settles, the way the
     // real Dynamic Island does; `panel_v` is that spring's velocity.
     panel_h: f32,
+    panel_p: f32,            // monotonic 0..1 open progress (no overshoot) for text
     panel_v: f32,
     panel_shape: (i32, i32), // last shape applied (height, bubble width) -> avoid redundant Win32 calls
     // ---- media: what is playing, plus a live spectrum for the pill ----
@@ -1469,7 +1470,7 @@ impl eframe::App for BarApp {
             (self.bar_opacity * 255.0) as u8,
         );
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(bar_bg).inner_margin(egui::Margin::symmetric(10.0, 5.0)))
+            .frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(10.0, 5.0)))
             .show(ctx, |ui| {
                 // The window is TALLER than the bar whenever the bubble is open, so
                 // ui.max_rect() is not the bar. Everything here is positioned against
@@ -1480,6 +1481,17 @@ impl eframe::App for BarApp {
                 let full = egui::Rect::from_min_size(
                     win.min,
                     egui::vec2(win.width(), (bar_strip_h - 10.0).max(1.0)),
+                );
+                // Only the strip gets the bar colour. Anything below it belongs to
+                // the bubble and must stay transparent so the island is the only
+                // thing drawn there.
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_size(
+                        win.min - egui::vec2(10.0, 5.0),
+                        egui::vec2(win.width() + 20.0, bar_strip_h),
+                    ),
+                    egui::Rounding::ZERO,
+                    bar_bg,
                 );
 
                 // Frame delta, shared by every in-bar animation (island + workspace indicator).
@@ -1663,9 +1675,15 @@ impl eframe::App for BarApp {
                 // that makes it read as a bubble growing out of the bar rather
                 // than a menu appearing.
                 let panel_target = if expanded { panel_rest_h } else { 0.0 };
+                self.panel_p += ((if expanded { 1.0 } else { 0.0 }) - self.panel_p)
+                    * (1.0 - (-dt * 14.0).exp());
                 {
                     const K: f32 = 300.0; // stiffness
-                    const D: f32 = 21.0; // damping (below critical -> overshoot)
+                    // zeta = D/(2*sqrt(K)) = 0.66. One clear overshoot of ~6% and a
+                    // second one under half a percent, i.e. below a pixel: a single
+                    // visible bounce. It was 21 (zeta 0.61), which rang several
+                    // times; 26 (zeta 0.75) settled in ~4px and read as no bounce.
+                    const D: f32 = 23.0;
                     let a = (panel_target - self.panel_h) * K - self.panel_v * D;
                     self.panel_v += a * dt;
                     self.panel_h += self.panel_v * dt;
@@ -1741,14 +1759,14 @@ impl eframe::App for BarApp {
                 // The clock scales with the expansion and slides to the centre of
                 // the open shape, so it reads as the header of the panel rather
                 // than a leftover from the collapsed pill.
-                let clock_fs = 14.0 + 5.0 * morph;
+                let clock_fs = 14.0 + 5.0 * self.panel_p;
                 let clock_w2 = ui
                     .painter()
                     .layout_no_wrap(clock.clone(), egui::FontId::proportional(clock_fs), WARM_TEXT)
                     .size()
                     .x;
                 let clock_left = rect.left() + pad;
-                let mut tx = clock_left + ((cx - clock_w2 / 2.0) - clock_left) * morph;
+                let mut tx = clock_left + ((cx - clock_w2 / 2.0) - clock_left) * self.panel_p;
                 cp.text(
                     egui::pos2(tx, cy),
                     egui::Align2::LEFT_CENTER,
@@ -1758,7 +1776,7 @@ impl eframe::App for BarApp {
                 );
                 tx += clock_w2;
                 let fade = |c: egui::Color32| {
-                    egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), ((1.0 - morph) * 255.0) as u8)
+                    egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), ((1.0 - self.panel_p) * 255.0) as u8)
                 };
                 if timer_w > 0.0 {
                     let secs = self.timer_left.as_secs();
@@ -2023,6 +2041,7 @@ fn main() -> eframe::Result<()> {
                 vol: Vec::new(),
                 vol_ctl: VolCtl::spawn(cc.egui_ctx.clone()),
                 panel_h: 0.0,
+                panel_p: 0.0,
                 panel_v: 0.0,
                 panel_shape: (0, 0),
                 // Eight bands is what fits legibly at pill size.
