@@ -30,6 +30,7 @@ pub fn icon_glyph(name: &str) -> &'static str {
         "term" => "\u{f120}",    // fa-terminal
         "desktop" => "\u{f108}", // fa-desktop
         "sliders" => "\u{f1de}",
+        "bell" => "\u{f0f3}", // fa-bell: web notifications relayed by Firefox's AutoConfig
         _ => "",
     }
 }

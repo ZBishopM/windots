@@ -92,6 +92,18 @@ foreach ($f in 'glazewm-dwindle.ps1', 'glazewm-animcheck.ps1', 'rice-accent.ps1'
 foreach ($f in Get-ChildItem "$repo\scripts\lib\*.ps1") {
     Deploy $f.FullName "$home_\.config\lib\$($f.Name)"
 }
+# Firefox AutoConfig -- the only two files in this repo that do NOT live under
+# $home_. AutoConfig is read from the application directory next to firefox.exe,
+# which is how it gets to override @mozilla.org/alerts-service;1 before any
+# profile JS exists. Program Files needs elevation, so they are only *staged*
+# here (Deploy still rewrites the home path); step 7 copies them in under the one
+# UAC prompt the installer already asks for.
+$ffStage = "$home_\.config\firefox-autoconfig"
+Deploy "$repo\firefox\config.js"                     "$ffStage\config.js"
+Deploy "$repo\firefox\defaults\pref\config-prefs.js" "$ffStage\config-prefs.js"
+$ffDirs = @("$env:ProgramFiles\Firefox Developer Edition", "$env:ProgramFiles\Mozilla Firefox") |
+    Where-Object { Test-Path $_ }
+if (-not $ffDirs) { Ok 'no Firefox in Program Files - notification override will be skipped' }
 
 # ---------------------------------------------------------------- 3. Rust tools
 # One cargo workspace (dev/Cargo.toml) builds every bin -- glaze-bar, cava,
@@ -144,9 +156,16 @@ Ok 'Alt+Shift language switch disabled (use Win+Space for lang / Command Palette
 Ok 'telemetry optout'
 
 # ---------------------------------------------------------------- 7. system tweaks (admin)
-Say '7/7  Disable unused services + MPO (optional, needs admin)'
+Say '7/7  Firefox AutoConfig + disable unused services + MPO (optional, needs admin)'
 $svc = 'DiagTrack', 'SysMain', 'DPS', 'Spooler'
 $adminCmd = ($svc | ForEach-Object { "Set-Service $_ -StartupType Disabled -EA SilentlyContinue; Stop-Service $_ -Force -EA SilentlyContinue" }) -join '; '
+# The staged AutoConfig pair, folded into the same elevated call so the installer
+# still prompts for UAC exactly once. Firefox has to be restarted to pick it up.
+foreach ($d in $ffDirs) {
+    $adminCmd += "; New-Item -ItemType Directory -Force '$d\defaults\pref' | Out-Null"
+    $adminCmd += "; Copy-Item '$ffStage\config.js' '$d\config.js' -Force"
+    $adminCmd += "; Copy-Item '$ffStage\config-prefs.js' '$d\defaults\pref\config-prefs.js' -Force"
+}
 # Disable Multi-Plane Overlay: hardware video overlays (MPO) bypass DWM
 # composition, so Desktop Duplication (ddagrab) can't see them and ShadowPlay
 # captures a FROZEN frame whenever a hardware-accelerated video plays. Forcing
@@ -155,7 +174,11 @@ $adminCmd += '; reg add "HKLM\SOFTWARE\Microsoft\Windows\Dwm" /v OverlayTestMode
 try {
     Start-Process pwsh -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile', '-Command', $adminCmd
     Ok 'services disabled + MPO off (reboot to apply MPO)'
-} catch { Ok 'skipped (no elevation) - see README to do it manually' }
+    if ($ffDirs) { Ok 'Firefox AutoConfig installed (restart Firefox)' }
+} catch {
+    Ok 'skipped (no elevation) - see README to do it manually'
+    if ($ffDirs) { Ok "  Firefox part, run elevated:  $adminCmd" }
+}
 
 Write-Host ''
 Say 'Done. Log out/in (or reboot) to start everything.' Green

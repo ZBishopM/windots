@@ -7,9 +7,16 @@
 //   shadowplay-notify --title T --body B [--icon mic|replay|check|rec|info|warn|term]
 //                     [--accent #e0a35c] [--open PATH] [--x N] [--y N] [--hold S]
 // --open PATH: clicking the toast opens that file's folder in Explorer.
+//
+// Exit code says how the toast ended: 0 = faded out on its own, 10 = the user
+// clicked it. Firefox's AutoConfig (dotfiles/firefox/config.js) drives the whole
+// notification system through this binary and turns a 10 into the alerts
+// service's "alertclickcallback" observer topic, which is what focuses the tab
+// that posted the notification.
 
 use eframe::egui;
 use egui::{Align2, Color32, FontId, Margin, Rounding, Sense, Stroke, Vec2};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use rice_common::ui::col;
@@ -35,6 +42,11 @@ fn harden_overlay() {
 }
 
 const OUT_DUR: f32 = 0.40; // fade-out seconds
+const EXIT_CLICKED: i32 = 10;
+
+/// Set once, read after the event loop returns. A static rather than a field on
+/// `Notify` because the app is moved into eframe's closure and never handed back.
+static CLICKED: AtomicBool = AtomicBool::new(false);
 
 // Palette comes from rice_common::theme so the toast and the bar can't drift
 // apart again (they had: different card, text and subtext greys).
@@ -83,6 +95,7 @@ impl eframe::App for Notify {
         }
         if ctx.input(|i| i.pointer.any_click()) && !self.opened {
             self.opened = true;
+            CLICKED.store(true, Ordering::Relaxed);
             self.open_folder();
             if self.closing_at.is_none() {
                 self.closing_at = Some(now);
@@ -190,5 +203,10 @@ fn main() -> eframe::Result<()> {
                 frame: 0,
             }))
         }),
-    )
+    )?;
+
+    if CLICKED.load(Ordering::Relaxed) {
+        std::process::exit(EXIT_CLICKED);
+    }
+    Ok(())
 }

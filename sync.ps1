@@ -36,6 +36,22 @@ foreach ($f in 'glazewm-dwindle.ps1', 'glazewm-animcheck.ps1', 'wezterm-hotkey.a
 foreach ($f in Get-ChildItem "$home_\.config\lib\*.ps1" -EA SilentlyContinue) {
     $Map["scripts\lib\$($f.Name)"] = $f.FullName
 }
+# The one exception to the $home_ convention: Firefox reads AutoConfig from its
+# application directory, next to firefox.exe, so the notification override can
+# only live in Program Files. Absolute paths on purpose. Pulling live -> repo is
+# a plain read and needs no elevation; pushing back does, which is why only
+# install.ps1's admin step writes them.
+#
+# They are tracked unconditionally, so -Check reports MISSING LIVE when they are
+# not there. That is the point: a Firefox update rewrites its own install
+# directory and can take config.js with it, which would silently give the stock
+# Windows toasts back. This is the only thing that notices.
+foreach ($ff in "$env:ProgramFiles\Firefox Developer Edition", "$env:ProgramFiles\Mozilla Firefox") {
+    if (-not (Test-Path $ff)) { continue }
+    $Map['firefox\config.js'] = "$ff\config.js"
+    $Map['firefox\defaults\pref\config-prefs.js'] = "$ff\defaults\pref\config-prefs.js"
+    break   # first install wins; two Firefox channels would map to the same repo file
+}
 
 # Rust sources: whole trees, minus build output.
 $Trees = @{ 'crates' = "$home_\dev\crates" }
