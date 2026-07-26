@@ -52,6 +52,18 @@ extern "system" {
 extern "system" {
     fn GetCurrentProcessId() -> u32;
 }
+#[cfg(windows)]
+#[repr(C)]
+struct CursorPos {
+    x: i32,
+    y: i32,
+}
+#[cfg(windows)]
+#[link(name = "user32")]
+extern "system" {
+    fn GetCursorPos(p: *mut CursorPos) -> i32;
+    fn GetAsyncKeyState(vk: i32) -> i16;
+}
 
 // The island's vertical panel needs the bar's window to be taller than the bar
 // strip. Growing a full-width window would swallow every click in the empty
@@ -826,6 +838,7 @@ struct BarApp {
     timer_running: bool,
     timer_tick: Instant,
     win_h: i32,              // last window height requested
+    panel_rect: Option<egui::Rect>, // where the bubble is, for outside-click hit testing
     last_opacity_write: Instant,
 }
 
@@ -882,6 +895,7 @@ impl BarApp {
         self.isl_opacity = false;
         self.isl_media = false;
         self.isl_timer = false;
+        self.panel_rect = None;
         self.vol.clear();
         self.bright.clear();
     }
@@ -1400,6 +1414,7 @@ impl eframe::App for BarApp {
         // Precomputed before the lock: calling a &self method inside the render
         // closure would force a whole-struct borrow and clash with `s`.
         let panel_rest_h = self.panel_target_h();
+        let bar_strip_h = self.bar_h();
         let s = self.shared.lock().unwrap();
         // Translucent bar (live-adjustable) so the desktop / a borderless game shows through.
         // Derived from BAR_BG rather than re-typing its channels, so the palette
@@ -1413,13 +1428,23 @@ impl eframe::App for BarApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(bar_bg).inner_margin(egui::Margin::symmetric(10.0, 5.0)))
             .show(ctx, |ui| {
-                let full = ui.max_rect();
+                // The window is TALLER than the bar whenever the bubble is open, so
+                // ui.max_rect() is not the bar. Everything here is positioned against
+                // `full`, so pin that to the top strip: using the whole window pushed
+                // the workspaces, clock and metrics down into the enlarged area, where
+                // the window region clips them away and they vanished.
+                let win = ui.max_rect();
+                let full = egui::Rect::from_min_size(
+                    win.min,
+                    egui::vec2(win.width(), (bar_strip_h - 10.0).max(1.0)),
+                );
 
                 // Frame delta, shared by every in-bar animation (island + workspace indicator).
                 let now_i = Instant::now();
                 let dt = (now_i - self.last_frame).as_secs_f32().clamp(0.0, 0.05);
                 self.last_frame = now_i;
 
+                ui.allocate_ui_at_rect(full, |ui| {
                 ui.horizontal_centered(|ui| {
                     // ---- left: workspaces (clickable -> focus that workspace) ----
                     // The focused-workspace highlight is one pill that SLIDES between
@@ -1522,6 +1547,7 @@ impl eframe::App for BarApp {
                                 });
                         }
                     });
+                });
                 });
 
                 // ---- center: dynamic island (morphs to show context) ----
@@ -1749,6 +1775,41 @@ impl eframe::App for BarApp {
             });
         drop(s);
 
+        // A click anywhere outside the bar/bubble should dismiss the panel. Those
+        // clicks never arrive as egui events: the window region excludes that
+        // area, so the press goes straight to whatever is underneath. Poll the
+        // physical button and the cursor instead.
+        #[cfg(windows)]
+        if self.isl_expanded {
+            let outside = unsafe {
+                let mut pt = CursorPos { x: 0, y: 0 };
+                if GetCursorPos(&mut pt) == 0 {
+                    false
+                } else {
+                    let bar = self.bar_h() as i32;
+                    let in_strip = pt.y >= 0
+                        && pt.y < bar
+                        && pt.x >= self.x
+                        && pt.x < self.x + self.width as i32;
+                    let in_bubble = match self.panel_rect {
+                        Some(r) => {
+                            (pt.x as f32) >= r.left()
+                                && (pt.x as f32) <= r.right()
+                                && (pt.y as f32) >= r.top()
+                                && (pt.y as f32) <= r.bottom()
+                        }
+                        None => false,
+                    };
+                    !(in_strip || in_bubble)
+                }
+            };
+            let down = unsafe { (GetAsyncKeyState(0x01) as u16 & 0x8000) != 0 }; // VK_LBUTTON
+            if down && outside {
+                self.close_panel();
+                ctx.request_repaint();
+            }
+        }
+
         // ---- the bubble: drawn after the shared lock is released (draw_panel
         // needs &mut self, which the lock would block), in its own Area so it can
         // extend below the bar strip. ----
@@ -1778,6 +1839,7 @@ impl eframe::App for BarApp {
                 egui::pos2(screen.center().x - pw / 2.0, screen.top() + self.bar_h() - 2.0),
                 egui::vec2(pw, self.panel_h),
             );
+            self.panel_rect = Some(prect);
             let now_p = Instant::now();
             let ctx2 = ctx.clone();
             egui::Area::new(egui::Id::new("isl-panel"))
@@ -1881,6 +1943,7 @@ fn main() -> eframe::Result<()> {
                 timer_running: false,
                 timer_tick: Instant::now(),
                 win_h: 0,
+                panel_rect: None,
                 last_opacity_write: Instant::now(),
             }))
         }),
