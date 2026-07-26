@@ -1,0 +1,92 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "rice.json",
+  "description": "Settings for the desktop. Everything under \"animation\" is re-read while the bar is running, so saving this file shows the change on the next frame. The rest is read at startup.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+
+    "ipc_url": {
+      "type": "string",
+      "default": "ws://127.0.0.1:6123",
+      "description": "GlazeWM's IPC socket. Use 127.0.0.1, never localhost: localhost resolves to ::1 first and every connection then burns ~2.1s waiting for the IPv6 attempt to time out."
+    },
+    "bar_height": {
+      "type": "integer",
+      "minimum": 16,
+      "maximum": 120,
+      "default": 34,
+      "description": "Status bar height in pixels. The workspace slide animation leaves this many rows alone so the bar does not move with the desktop. Read at startup: restart the bar after changing it."
+    },
+    "mics": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": ["hyperx", "snowball"],
+      "description": "Substrings matched against capture-device names. micswitch cycles through the matching devices in this order."
+    },
+    "clickthrough_apps": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": ["league of legends", "valorant"],
+      "description": "Executables that make the bar click-through while focused, matched case-insensitively. The geometric test covers true fullscreen; borderless games that sit a few pixels short of the monitor rect slip past it, so those need naming here."
+    },
+
+    "animation": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Motion tuning. Live-reloaded: edit, save, watch.",
+      "properties": {
+        "spring_stiffness": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 300.0,
+          "description": "Stiffness of the island's vertical bubble spring. Higher is snappier."
+        },
+        "spring_damping": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 23.0,
+          "description": "Damping of that spring. What matters is damping / (2 * sqrt(stiffness)): below 1.0 it overshoots and bounces, at 1.0 it glides in without overshooting. The default works out to 0.66 = one clear bounce. Near 0.6 it rings several times; near 0.75 the overshoot is a few pixels and reads as no bounce at all."
+        },
+        "pill_ease": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 15.0,
+          "description": "How fast the pill itself resizes, as an exponential rate. Higher is faster. Does not overshoot."
+        },
+        "text_ease": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 14.0,
+          "description": "How fast the clock travels and scales as the island opens. Deliberately separate from the spring: the shape may bounce, the text may not, because letters visibly wobbling read as a glitch."
+        },
+        "workspace_ease": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 16.0,
+          "description": "How fast the focused-workspace highlight slides between workspace numbers."
+        },
+        "notification_hold_secs": {
+          "type": "number",
+          "minimum": 0,
+          "default": 4.0,
+          "description": "Seconds a notification stays in the island before collapsing."
+        },
+        "panel_timeout_secs": {
+          "type": "number",
+          "minimum": 0,
+          "default": 6.0,
+          "description": "Seconds without interaction before an open island panel closes itself."
+        },
+        "spectrum_fps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 240,
+          "default": 30,
+          "description": "Frame rate of the audio spectrum while sound plays. This is the bar's main CPU lever, being the only thing that repaints continuously: measured on a 2560px bar, 60fps cost about 8% of a core and 30fps costs about 1%, with no visible difference."
+        }
+      }
+    }
+  }
+}

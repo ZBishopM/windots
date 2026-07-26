@@ -1,0 +1,20 @@
+{
+  "$schema": "./rice.schema.json",
+
+  "ipc_url": "ws://127.0.0.1:6123",
+  "bar_height": 34,
+
+  "mics": ["hyperx", "snowball"],
+  "clickthrough_apps": ["league of legends", "valorant"],
+
+  "animation": {
+    "spring_stiffness": 300.0,
+    "spring_damping": 23.0,
+    "pill_ease": 15.0,
+    "text_ease": 14.0,
+    "workspace_ease": 16.0,
+    "notification_hold_secs": 4.0,
+    "panel_timeout_secs": 6.0,
+    "spectrum_fps": 30
+  }
+}

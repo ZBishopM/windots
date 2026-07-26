@@ -1020,7 +1020,8 @@ impl BarApp {
             _ => self.panel_actions(ui, &p, rect, now, ctx),
         }
 
-        if now.duration_since(self.isl_interact).as_secs_f32() > 6.0 {
+        let timeout = rice_common::settings::Settings::live().animation.panel_timeout_secs;
+        if now.duration_since(self.isl_interact).as_secs_f32() > timeout {
             self.close_panel();
         }
     }
@@ -1458,6 +1459,10 @@ impl eframe::App for BarApp {
         // closure would force a whole-struct borrow and clash with `s`.
         let panel_rest_h = self.panel_target_h();
         let panel_w_now = self.panel_width();
+        // Re-read on every frame so rice.json can be tuned with the bar running.
+        // The call is a cached Arc clone; it only touches the disk once a second.
+        let anim = rice_common::settings::Settings::live().animation.clone();
+        let anim_ws = anim.workspace_ease;
         let bar_strip_h = self.bar_h();
         let s = self.shared.lock().unwrap();
         // Translucent bar (live-adjustable) so the desktop / a borderless game shows through.
@@ -1551,7 +1556,7 @@ impl eframe::App for BarApp {
                         Some(target) => match self.ws_ind {
                             None => self.ws_ind = Some(target),
                             Some(cur) => {
-                                let k = 1.0 - (-dt * 16.0).exp();
+                                let k = 1.0 - (-dt * anim_ws).exp();
                                 let ni = egui::Rect::from_min_max(
                                     cur.min + (target.min - cur.min) * k,
                                     cur.max + (target.max - cur.max) * k,
@@ -1611,7 +1616,7 @@ impl eframe::App for BarApp {
                     }
                 }
                 if let Some((_, t)) = &self.isl_notif {
-                    if now_i.duration_since(*t).as_secs_f32() > ISL_HOLD {
+                    if now_i.duration_since(*t).as_secs_f32() > anim.notification_hold_secs {
                         self.isl_notif = None;
                     }
                 }
@@ -1659,8 +1664,9 @@ impl eframe::App for BarApp {
                     self.isl_w = target_w;
                     self.isl_h = target_h;
                 }
-                self.isl_w += (target_w - self.isl_w) * (1.0 - (-dt * 15.0).exp());
-                self.isl_h += (target_h - self.isl_h) * (1.0 - (-dt * 15.0).exp());
+                let pill_k = 1.0 - (-dt * anim.pill_ease).exp();
+                self.isl_w += (target_w - self.isl_w) * pill_k;
+                self.isl_h += (target_h - self.isl_h) * pill_k;
 
                 let h = self.isl_h;
                 let (cx, cy) = (full.center().x, full.center().y);
@@ -1676,15 +1682,12 @@ impl eframe::App for BarApp {
                 // than a menu appearing.
                 let panel_target = if expanded { panel_rest_h } else { 0.0 };
                 self.panel_p += ((if expanded { 1.0 } else { 0.0 }) - self.panel_p)
-                    * (1.0 - (-dt * 14.0).exp());
+                    * (1.0 - (-dt * anim.text_ease).exp());
                 {
-                    const K: f32 = 300.0; // stiffness
-                    // zeta = D/(2*sqrt(K)) = 0.66. One clear overshoot of ~6% and a
-                    // second one under half a percent, i.e. below a pixel: a single
-                    // visible bounce. It was 21 (zeta 0.61), which rang several
-                    // times; 26 (zeta 0.75) settled in ~4px and read as no bounce.
-                    const D: f32 = 23.0;
-                    let a = (panel_target - self.panel_h) * K - self.panel_v * D;
+                    // Both live in rice.json now -- see the notes on the fields
+                    // there for what the damping ratio does to the bounce.
+                    let (k, d) = (anim.spring_stiffness, anim.spring_damping);
+                    let a = (panel_target - self.panel_h) * k - self.panel_v * d;
                     self.panel_v += a * dt;
                     self.panel_h += self.panel_v * dt;
                     if !expanded && self.panel_h < 0.4 && self.panel_v.abs() < 4.0 {
@@ -1797,7 +1800,8 @@ impl eframe::App for BarApp {
                     // measured, 60 costs ~8% CPU for the whole (2560px) bar and
                     // looks no different on bars this small.
                     if self.spectrum.active() {
-                        ctx.request_repaint_after(Duration::from_millis(33));
+                        let ms = (1000 / anim.spectrum_fps.clamp(1, 240)) as u64;
+                        ctx.request_repaint_after(Duration::from_millis(ms));
                     }
                     let levels = self.spectrum.levels();
                     let n = levels.len().max(1);
