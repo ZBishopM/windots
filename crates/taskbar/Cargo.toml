@@ -3,5 +3,7 @@ name = "taskbar"
 version = "0.1.0"
 edition = "2021"
 
-# Show/hide the Windows taskbar. Pure Win32 via raw externs, no dependencies.
+# Show/hide the Windows taskbar. Win32 via raw externs; rice-common only for the
+# shared config dir, so --watch and the hotkey agree on where the marker lives.
 [dependencies]
+rice-common = { path = "../rice-common" }

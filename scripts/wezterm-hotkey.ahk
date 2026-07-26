@@ -1,5 +1,6 @@
 #Requires AutoHotkey v2.0
 #SingleInstance Force
+
 ; ------------------------------------------------------------
 ; Hyprland-style global hotkey to launch WezTerm.
 ;   #  = SUPER (Windows key)
@@ -33,13 +34,33 @@
 ; forwards to CmdPal, which listens on Win+Ctrl+Space.
 ; ------------------------------------------------------------
 #Space:: {
-    Send '#^{Space}'
-    ; Then FORCE the palette foreground instead of hoping it wins the race.
-    ; Sending the hotkey alone is racy: CmdPal shows its window and calls
+    ; CmdPal's own Win+Ctrl+Space already toggles it, so just forward the combo
+    ; and let it decide -- but note whether it was up first, because that decides
+    ; whether the focus nudge below applies.
+    wasActive := WinActive('ahk_exe Microsoft.CmdPal.UI.exe')
+
+    ; {Blind} plus Ctrl only. Super is already physically down -- this IS a
+    ; #Space hotkey -- so there is nothing to synthesise. Letting AHK build the
+    ; '#' itself made it emit an LWin up afterwards, after which AHK stopped
+    ; seeing Super as held at all: of four Space taps with Super held down, only
+    ; the FIRST ever reached this handler. That was the "press it again and
+    ; nothing happens" bug, and it was never about the palette.
+    SendInput '{Blind}{Ctrl down}{Space}{Ctrl up}'
+
+    ; Closing? Then stop here. The wait below would never match (the palette is
+    ; going away), so it would park this thread for the full timeout -- and AHK
+    ; runs one thread per hotkey by default, so a press arriving meanwhile is
+    ; DISCARDED rather than queued. Worse, the WinActivate would drag the palette
+    ; back on screen right after the toggle closed it.
+    if wasActive
+        return
+
+    ; Opening: FORCE it foreground instead of hoping it wins the race. Sending
+    ; the hotkey alone is racy -- CmdPal shows its window and calls
     ; SetForegroundWindow, but another process asserting focus at the same moment
-    ; can win -- leaving the palette drawn on screen yet not foreground, so every
+    ; can win, leaving the palette drawn on screen yet not foreground, so every
     ; keystroke goes to the previous window. That is the "I can't type in the
-    ; palette" symptom; measured with the window visible at 800x480 while the
+    ; palette" symptom, measured with the window visible at 800x480 while the
     ; foreground window was WezTerm.
     ; AHK just handled this keypress, so it holds foreground rights and its
     ; WinActivate is allowed to reassign focus.

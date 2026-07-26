@@ -2357,6 +2357,9 @@ dependencies = [
 [[package]]
 name = "taskbar"
 version = "0.1.0"
+dependencies = [
+ "rice-common",
+]
 
 [[package]]
 name = "thiserror"

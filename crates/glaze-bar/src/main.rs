@@ -829,7 +829,9 @@ struct BarApp {
     // ---- media: what is playing, plus a live spectrum for the pill ----
     spectrum: rice_common::spectrum::Spectrum,
     media: Option<rice_common::media::NowPlaying>,
-    media_at: Instant, // last poll (SMTC calls are tens of ms -> polled, not per frame)
+    // Written by a background poller: SMTC calls are far too slow to make from
+    // the render thread.
+    media_rx: Arc<Mutex<Option<rice_common::media::NowPlaying>>>,
     isl_media: bool,   // bubble is showing the media view
     // ---- pomodoro ----
     isl_timer: bool,
@@ -1180,8 +1182,14 @@ impl BarApp {
                     1 => rice_common::media::toggle_play(),
                     _ => rice_common::media::next(),
                 });
-                // Re-read shortly after so the play/pause glyph flips.
-                self.media_at = now - Duration::from_millis(1500);
+                // Flip the glyph immediately rather than waiting for the poller
+                // to notice: a play button that stays on "play" for over a
+                // second after being pressed reads as not having worked.
+                if i == 1 {
+                    if let Some(m) = self.media.as_mut() {
+                        m.playing = !m.playing;
+                    }
+                }
             }
         }
     }
@@ -1397,17 +1405,16 @@ impl eframe::App for BarApp {
         } else {
             self.timer_tick = now_tick;
         }
-        // Poll what is playing. SMTC round trips cost tens of milliseconds, so it
-        // runs on an interval rather than per frame, and only while the spectrum
-        // says something is actually audible (or a session was already known).
-        if now_tick.duration_since(self.media_at).as_secs_f32() > 2.0 {
-            self.media_at = now_tick;
-            if self.spectrum.active() || self.media.is_some() {
-                let m = rice_common::media::now_playing();
-                if m != self.media {
-                    self.media = m;
-                    ctx.request_repaint();
-                }
+        // Pick up whatever the poller last saw. Just a lock and a compare; the
+        // expensive part happens on its thread. Polling unconditionally (rather
+        // than only while audible, as before) is what lets a *paused* session be
+        // discovered at all -- previously nothing was detected until sound came
+        // out, so a paused track offered nothing to press play on.
+        {
+            let m = self.media_rx.lock().unwrap().clone();
+            if m != self.media {
+                self.media = m;
+                ctx.request_repaint();
             }
         }
 
@@ -1452,11 +1459,7 @@ impl eframe::App for BarApp {
                     // last frame's animated rect) so it sits *behind* the labels; the
                     // focused pill is itself transparent and this pill is its fill.
                     if let Some(r) = self.ws_ind {
-                        ui.painter().rect_filled(
-                            r,
-                            egui::Rounding::same(5.0),
-                            egui::Color32::from_rgb(90, 140, 255),
-                        );
+                        ui.painter().rect_filled(r, egui::Rounding::same(5.0), WARM_ACCENT);
                     }
                     let mut focus_rect: Option<egui::Rect> = None;
                     for ws in &s.workspaces {
@@ -1466,12 +1469,13 @@ impl eframe::App for BarApp {
                             .filter(|t| !t.is_empty())
                             .unwrap_or(&ws.name);
                         let (bg, fg) = if ws.has_focus {
-                            // transparent: the sliding indicator is this pill's highlight
-                            (egui::Color32::TRANSPARENT, egui::Color32::WHITE)
+                            // transparent: the sliding indicator is this pill's highlight.
+                            // Dark text, because the indicator behind it is now amber.
+                            (egui::Color32::TRANSPARENT, BAR_BG)
                         } else if ws.is_displayed {
-                            (egui::Color32::from_rgb(45, 45, 58), egui::Color32::from_rgb(220, 220, 230))
+                            (ISL_HI, WARM_TEXT)
                         } else {
-                            (egui::Color32::TRANSPARENT, egui::Color32::from_rgb(120, 120, 135))
+                            (egui::Color32::TRANSPARENT, WARM_SUB)
                         };
                         let resp = egui::Frame::none()
                             .fill(bg)
@@ -1595,7 +1599,8 @@ impl eframe::App for BarApp {
 
                 let pad = 14.0;
                 let div_gap = 22.0; // clock -> divider -> extra spacing (divider centred in it)
-                let spec_reserve = if self.spectrum.active() && self.isl_notif.is_none() { 48.0 } else { 0.0 };
+                let has_sound = (self.media.is_some() || self.spectrum.active()) && self.isl_notif.is_none();
+                let spec_reserve = if has_sound { 48.0 } else { 0.0 };
                 let timer_reserve = if self.timer_running && self.isl_notif.is_none() { 44.0 } else { 0.0 };
                 let idle_w = pad + clock_w + timer_reserve + spec_reserve + pad;
                 let notif_open = self.isl_notif.is_some();
@@ -1670,13 +1675,16 @@ impl eframe::App for BarApp {
 
                 // Live spectrum, drawn inside the pill to the right of the clock when
                 // something is audible. This is the "it knows music is playing" cue.
-                let spec_w = if self.spectrum.active() && self.isl_notif.is_none() { 42.0 } else { 0.0 };
+                let spec_w = if has_sound { 42.0 } else { 0.0 };
                 // A running countdown is worth seeing without opening anything.
                 let timer_w = if self.timer_running && self.isl_notif.is_none() { 44.0 } else { 0.0 };
 
                 // ---- content, CLIPPED to the animated pill so it wipes in/out as the
                 // pill grows/shrinks (the clock is at the left, always inside) ----
                 let cp = ui.painter().with_clip_rect(rect);
+                // Left edge of the spectrum slot, filled in below; clicking there
+                // means "media", clicking anywhere else on the pill means "controls".
+                let mut spec_x0 = f32::INFINITY;
                 let mut tx = rect.left() + pad;
                 cp.text(egui::pos2(tx, cy), egui::Align2::LEFT_CENTER, &clock, egui::FontId::proportional(14.0), WARM_TEXT);
                 tx += clock_w;
@@ -1692,6 +1700,15 @@ impl eframe::App for BarApp {
                     tx += timer_w;
                 }
                 if spec_w > 0.0 {
+                    spec_x0 = tx;
+                    // The bars are an animation: at the bar's idle 1 fps they
+                    // looked broken rather than slow. Ask for animation rates
+                    // while they are actually moving. 30fps rather than 60 --
+                    // measured, 60 costs ~8% CPU for the whole (2560px) bar and
+                    // looks no different on bars this small.
+                    if self.spectrum.active() {
+                        ctx.request_repaint_after(Duration::from_millis(33));
+                    }
                     let levels = self.spectrum.levels();
                     let n = levels.len().max(1);
                     let bw = 3.0;
@@ -1756,11 +1773,15 @@ impl eframe::App for BarApp {
                         self.isl_opacity = false;
                     }
                 } else if pill.clicked() {
-                    // idle: click opens the bubble. If something is playing, go
-                    // straight to the media view -- that is what the spectrum in
-                    // the pill was advertising.
+                    // Which part of the pill was hit decides what opens. Opening
+                    // the player whenever *anything* was playing meant the media
+                    // controls sat on top of the bubble permanently and every
+                    // other control became unreachable while listening to music.
+                    // Only the spectrum -- the thing advertising the playback --
+                    // opens the player now.
+                    let on_spec = pill.interact_pointer_pos().map(|p| p.x >= spec_x0).unwrap_or(false);
                     self.isl_expanded = true;
-                    self.isl_media = self.media.is_some();
+                    self.isl_media = on_spec && self.media.is_some();
                     self.isl_interact = now_i;
                 }
 
@@ -1935,7 +1956,17 @@ fn main() -> eframe::Result<()> {
                 // Eight bands is what fits legibly at pill size.
                 spectrum: rice_common::spectrum::Spectrum::start(8),
                 media: None,
-                media_at: Instant::now() - Duration::from_secs(9),
+                media_rx: {
+                    let cell: Arc<Mutex<Option<rice_common::media::NowPlaying>>> =
+                        Arc::new(Mutex::new(None));
+                    let w = cell.clone();
+                    std::thread::spawn(move || loop {
+                        let m = rice_common::media::now_playing();
+                        *w.lock().unwrap() = m;
+                        std::thread::sleep(Duration::from_millis(1500));
+                    });
+                    cell
+                },
                 isl_media: false,
                 isl_timer: false,
                 timer_left: Duration::from_secs(25 * 60),
