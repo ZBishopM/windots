@@ -96,6 +96,7 @@ fn default_animation() -> Animation { Animation::default() }
 
 fn default_bar_height() -> i32 { 34 }
 fn default_mics() -> Vec<String> { vec!["hyperx".into(), "snowball".into()] }
+fn default_outputs() -> Vec<String> { vec!["hyperx".into(), "vg270".into(), "airpods".into()] }
 fn default_ipc() -> String { "ws://127.0.0.1:6123".into() }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -109,6 +110,20 @@ pub struct Settings {
     /// cycles between the devices that match, in this order.
     #[serde(default = "default_mics")]
     pub mics: Vec<String>,
+
+    /// Substrings matched against playback-device names, in the order they
+    /// should appear in the island's device page.
+    ///
+    /// A whitelist rather than the full list on purpose: this machine reports 29
+    /// playback endpoints, of which 13 are "active", and nearly all of them are
+    /// virtual -- six RODE UNIFY buses, VB-Cable, VoiceMeeter, two Steam
+    /// Streaming devices, Oculus, NVIDIA Broadcast. Showing them all would bury
+    /// the two or three real ones.
+    ///
+    /// Bluetooth audio devices are always listed too, whether or not they match
+    /// anything here, so a newly paired headset shows up without editing this.
+    #[serde(default = "default_outputs")]
+    pub outputs: Vec<String>,
 
     #[serde(default = "default_ipc")]
     pub ipc_url: String,
@@ -137,6 +152,7 @@ impl Default for Settings {
         Self {
             bar_height: default_bar_height(),
             mics: default_mics(),
+            outputs: default_outputs(),
             ipc_url: default_ipc(),
             clickthrough_apps: default_clickthrough(),
             animation: Animation::default(),

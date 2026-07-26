@@ -5,6 +5,7 @@
   "bar_height": 34,
 
   "mics": ["hyperx", "snowball"],
+  "outputs": ["hyperx", "vg270", "airpods"],
   "clickthrough_apps": ["league of legends", "valorant"],
 
   "animation": {

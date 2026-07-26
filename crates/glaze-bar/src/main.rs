@@ -537,7 +537,201 @@ impl VolCtl {
     }
 }
 
-const ACTIONS: [(&str, &str, [u8; 3]); 7] = [
+/// One row on the device page: either a plain playback endpoint or a Bluetooth
+/// device that may need connecting first.
+#[derive(Clone)]
+struct DevRow {
+    label: String,
+    /// Endpoint to make default. None for a Bluetooth device that is offline --
+    /// it has no usable endpoint until it connects.
+    endpoint: Option<String>,
+    /// Set for Bluetooth devices, so the row can offer connect/disconnect.
+    bt_container: Option<u128>,
+    connected: bool,
+    is_default: bool,
+    /// An operation is in flight; the row is greyed and ignores clicks so a
+    /// second press cannot queue another multi-second connect.
+    busy: bool,
+}
+
+enum DevMsg {
+    Refresh,
+    /// Make this endpoint the default output.
+    Select(String),
+    /// Connect a Bluetooth device, then make it default once it is really up.
+    Connect(u128),
+    Disconnect(u128),
+}
+
+/// Device list + switching, off the render thread. Connecting a Bluetooth
+/// headset takes seconds and the endpoint only becomes usable asynchronously
+/// afterwards, so none of this can happen inline.
+struct DevCtl {
+    tx: std::sync::mpsc::Sender<DevMsg>,
+    state: Arc<Mutex<Vec<DevRow>>>,
+}
+
+impl DevCtl {
+    fn new(ctx: egui::Context) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<DevMsg>();
+        let state: Arc<Mutex<Vec<DevRow>>> = Arc::new(Mutex::new(Vec::new()));
+        let out = state.clone();
+        std::thread::spawn(move || {
+            while let Ok(msg) = rx.recv() {
+                match msg {
+                    DevMsg::Refresh => {}
+                    DevMsg::Select(id) => {
+                        rice_common::audio::set_default_output(&id);
+                    }
+                    DevMsg::Connect(container) => {
+                        mark_busy(&out, container, true);
+                        ctx.request_repaint();
+                        let asked = rice_common::bluetooth::devices()
+                            .iter()
+                            .find(|d| d.container == container)
+                            .map(|d| d.connect())
+                            .unwrap_or(false);
+                        // A successful call only means the driver tried, so wait
+                        // for the endpoint to actually come up before selecting
+                        // it -- setting a still-unplugged device as default is
+                        // silently a no-op.
+                        if asked
+                            && rice_common::bluetooth::wait_connected(
+                                container,
+                                Duration::from_secs(12),
+                            )
+                        {
+                            if let Some(id) = rice_common::bluetooth::devices()
+                                .iter()
+                                .find(|d| d.container == container)
+                                .and_then(|d| d.output_id.clone())
+                            {
+                                rice_common::audio::set_default_output(&id);
+                            }
+                        }
+                    }
+                    DevMsg::Disconnect(container) => {
+                        mark_busy(&out, container, true);
+                        ctx.request_repaint();
+                        if let Some(d) = rice_common::bluetooth::devices()
+                            .iter()
+                            .find(|d| d.container == container)
+                        {
+                            d.disconnect();
+                        }
+                    }
+                }
+                *out.lock().unwrap() = build_device_rows();
+                ctx.request_repaint();
+            }
+        });
+        Self { tx, state }
+    }
+    fn refresh(&self) {
+        let _ = self.tx.send(DevMsg::Refresh);
+    }
+    fn rows(&self) -> Vec<DevRow> {
+        self.state.lock().unwrap().clone()
+    }
+    fn select(&self, id: String) {
+        let _ = self.tx.send(DevMsg::Select(id));
+    }
+    fn connect(&self, container: u128) {
+        let _ = self.tx.send(DevMsg::Connect(container));
+    }
+    fn disconnect(&self, container: u128) {
+        let _ = self.tx.send(DevMsg::Disconnect(container));
+    }
+}
+
+fn mark_busy(state: &Arc<Mutex<Vec<DevRow>>>, container: u128, busy: bool) {
+    for r in state.lock().unwrap().iter_mut() {
+        if r.bt_container == Some(container) {
+            r.busy = busy;
+        }
+    }
+}
+
+/// The configured outputs, plus every Bluetooth audio device.
+fn build_device_rows() -> Vec<DevRow> {
+    let cfg = rice_common::settings::Settings::live();
+    let current = rice_common::audio::current_output_id().unwrap_or_default();
+    let endpoints = rice_common::audio::outputs(true);
+    let bt = rice_common::bluetooth::devices();
+    let bt_containers: Vec<u128> = bt.iter().map(|d| d.container).collect();
+
+    let mut rows: Vec<DevRow> = Vec::new();
+
+    // Configured wired/virtual outputs, in the order they are listed.
+    for want in &cfg.outputs {
+        let want = want.to_lowercase();
+        let matches: Vec<&rice_common::audio::Endpoint> = endpoints
+            .iter()
+            .filter(|e| {
+                e.name.to_lowercase().contains(&want)
+                    // Bluetooth devices get their own row below; don't list twice.
+                    && !e.container.map(|c| bt_containers.contains(&c)).unwrap_or(false)
+            })
+            .collect();
+        // One name can match several endpoints -- this machine reports the same
+        // NVIDIA HDMI output half a dozen times. Prefer the one that is actually
+        // the current default, then any live one, so the tick lands on the right
+        // row instead of on an identically named dead instance.
+        let Some(e) = matches
+            .iter()
+            .find(|e| e.id == current)
+            .or_else(|| matches.iter().find(|e| e.active))
+            .or_else(|| matches.first())
+        else {
+            continue;
+        };
+        rows.push(DevRow {
+            label: short_output_name(&e.name, &want),
+            endpoint: Some(e.id.clone()),
+            bt_container: None,
+            connected: e.active,
+            is_default: e.id == current,
+            busy: false,
+        });
+    }
+
+    for d in bt {
+        let is_default = d.output_id.as_deref() == Some(current.as_str());
+        rows.push(DevRow {
+            label: d.name.clone(),
+            endpoint: d.output_id.clone(),
+            bt_container: Some(d.container),
+            connected: d.connected,
+            is_default,
+            busy: false,
+        });
+    }
+    rows
+}
+
+/// Trim a Windows endpoint name down to the part a human would say.
+///
+/// Which half that is depends on the device, so the configured match string
+/// decides: `Altavoces (HyperX Cloud II Wireless)` matched on "hyperx" keeps the
+/// text in brackets, while `VG270 V (NVIDIA High Definition Audio)` matched on
+/// "vg270" keeps the text before them -- always taking the bracketed half would
+/// label the monitor "NVIDIA High Definition Audio".
+fn short_output_name(raw: &str, want: &str) -> String {
+    let (Some(a), Some(b)) = (raw.find('('), raw.rfind(')')) else {
+        return raw.trim().to_string();
+    };
+    if b <= a + 1 {
+        return raw.trim().to_string();
+    }
+    let inside = raw[a + 1..b].trim();
+    let outside = raw[..a].trim();
+    if !want.is_empty() && !inside.to_lowercase().contains(want) && outside.to_lowercase().contains(want) {
+        return outside.to_string();
+    }
+    if inside.is_empty() { outside.to_string() } else { inside.to_string() }
+}
+
+const ACTIONS: [(&str, &str, [u8; 3]); 8] = [
     ("mic", "\u{f130}", [224, 163, 92]),      // switch mic
     ("save", "\u{f03d}", [169, 181, 106]),    // save a replay clip
     ("term", "\u{f120}", [206, 150, 112]),    // open a terminal
@@ -545,6 +739,7 @@ const ACTIONS: [(&str, &str, [u8; 3]); 7] = [
     ("bright", "\u{f185}", [230, 190, 120]),  // fa-sun -> monitor brightness (DDC/CI)
     ("vol", "\u{f028}", [150, 190, 200]),     // fa-volume-up -> master + per-app volume
     ("timer", "\u{f017}", [205, 150, 170]),   // fa-clock-o -> pomodoro
+    ("devices", "\u{f025}", [150, 200, 190]), // fa-headphones -> outputs + bluetooth
 ];
 
 // Draw an opacity slider track (bg + accent fill + handle) at a normalized value t.
@@ -861,6 +1056,7 @@ struct BarApp {
     isl_bright: bool,
     bright: Vec<(isize, String, f32)>, // (hmonitor, label, 0..1)
     bright_ctl: BrightCtl,
+    dev_ctl: DevCtl,
     // Volume: master + up to four apps, queried when the widget opens.
     isl_vol: bool,
     vol: Vec<VolRow>,
@@ -881,6 +1077,7 @@ struct BarApp {
     isl_media: bool,   // bubble is showing the media view
     // ---- pomodoro ----
     isl_timer: bool,
+    isl_devices: bool,
     timer_left: Duration,
     timer_total: Duration,
     timer_running: bool,
@@ -906,6 +1103,8 @@ impl BarApp {
             4
         } else if self.isl_timer {
             5
+        } else if self.isl_devices {
+            6
         } else {
             0
         }
@@ -918,6 +1117,7 @@ impl BarApp {
             3 => 160.0,
             4 => 300.0,
             5 => 230.0,
+            6 => 300.0,
             _ => 3.0 * 52.0 + 24.0,
         }
     }
@@ -928,6 +1128,11 @@ impl BarApp {
             1 | 2 | 3 => 140.0,
             4 => 132.0,
             5 => 138.0,
+            6 => {
+                // One row per device, plus the header line.
+                let n = self.dev_ctl.rows().len().max(1) as f32;
+                (n * 38.0 + 34.0).min(230.0)
+            }
             _ => (ACTIONS.len() as f32 / 3.0).ceil() * 52.0 + 22.0,
         }
     }
@@ -943,6 +1148,7 @@ impl BarApp {
         self.isl_opacity = false;
         self.isl_media = false;
         self.isl_timer = false;
+        self.isl_devices = false;
         self.panel_rect = None;
         self.vol.clear();
         self.bright.clear();
@@ -1017,6 +1223,7 @@ impl BarApp {
             3 => self.panel_opacity(ui, &p, rect, now),
             4 => self.panel_media(ui, &p, rect, now),
             5 => self.panel_timer(ui, &p, rect, now),
+            6 => self.panel_devices(ui, &p, rect, now),
             _ => self.panel_actions(ui, &p, rect, now, ctx),
         }
 
@@ -1060,6 +1267,10 @@ impl BarApp {
                         self.isl_bright = true;
                     }
                     "timer" => self.isl_timer = true,
+                    "devices" => {
+                        self.dev_ctl.refresh();
+                        self.isl_devices = true;
+                    }
                     k => {
                         run_action(k, self.shared.clone(), ctx.clone());
                         self.isl_expanded = false;
@@ -1310,6 +1521,116 @@ impl BarApp {
                     }
                 }
             }
+        }
+    }
+
+
+    /// Playback outputs and Bluetooth devices in one list. Tapping a row makes
+    /// it the default output; a Bluetooth device that is offline connects first
+    /// and is then selected once it is really up.
+    fn panel_devices(&mut self, ui: &mut egui::Ui, p: &egui::Painter, rect: egui::Rect, now: Instant) {
+        let rows = self.dev_ctl.rows();
+        p.text(
+            egui::pos2(rect.center().x, rect.top() + 18.0),
+            egui::Align2::CENTER_CENTER,
+            "Dispositivos",
+            egui::FontId::proportional(12.5),
+            WARM_SUB,
+        );
+        if rows.is_empty() {
+            p.text(
+                egui::pos2(rect.center().x, rect.top() + 52.0),
+                egui::Align2::CENTER_CENTER,
+                "ninguno",
+                egui::FontId::proportional(12.0),
+                WARM_SUB,
+            );
+            return;
+        }
+
+        let mut y = rect.top() + 38.0;
+        for (i, r) in rows.iter().enumerate() {
+            let row_rect = egui::Rect::from_min_size(
+                egui::pos2(rect.left() + 12.0, y),
+                egui::vec2(rect.width() - 24.0, 32.0),
+            );
+            let resp = ui
+                .interact(row_rect, egui::Id::new(("dev-row", i)), egui::Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if resp.hovered() {
+                self.isl_interact = now;
+            }
+            if resp.hovered() || r.is_default {
+                let a = if r.is_default { 46 } else { 24 };
+                p.rect_filled(
+                    row_rect,
+                    egui::Rounding::same(8.0),
+                    egui::Color32::from_rgba_unmultiplied(
+                        WARM_ACCENT.r(),
+                        WARM_ACCENT.g(),
+                        WARM_ACCENT.b(),
+                        a,
+                    ),
+                );
+            }
+
+            // Status dot: filled when connected, hollow when the device is known
+            // but offline. Bluetooth rows are the only ones that can be offline
+            // and still worth showing.
+            let dot = egui::pos2(row_rect.left() + 12.0, row_rect.center().y);
+            if r.busy {
+                // Simple spinner: a dot that pulses while the connect is in flight.
+                let t = now.elapsed().as_secs_f32();
+                let pulse = 3.0 + 2.0 * (t * 6.0).sin().abs();
+                p.circle_filled(dot, pulse, WARM_ACCENT);
+            } else if r.connected {
+                p.circle_filled(dot, 4.5, col(theme::ACCENT_OK));
+            } else {
+                p.circle_stroke(dot, 4.5, egui::Stroke::new(1.5, WARM_SUB));
+            }
+
+            let fg = if r.connected { WARM_TEXT } else { WARM_SUB };
+            p.text(
+                egui::pos2(row_rect.left() + 28.0, row_rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                &r.label,
+                egui::FontId::proportional(12.5),
+                fg,
+            );
+
+            if r.bt_container.is_some() {
+                draw_icon(
+                    p,
+                    egui::pos2(row_rect.right() - 32.0, row_rect.center().y),
+                    "\u{f294}", // fa-bluetooth
+                    11.0,
+                    if r.connected { col(theme::ACCENT_OK) } else { WARM_SUB },
+                );
+            }
+            if r.is_default {
+                draw_icon(
+                    p,
+                    egui::pos2(row_rect.right() - 12.0, row_rect.center().y),
+                    "\u{f00c}", // fa-check
+                    11.0,
+                    WARM_ACCENT,
+                );
+            }
+
+            if resp.clicked() && !r.busy {
+                self.isl_interact = now;
+                match (r.bt_container, r.connected, &r.endpoint) {
+                    // Offline Bluetooth device: wake it up, then select it.
+                    (Some(c), false, _) => self.dev_ctl.connect(c),
+                    // Connected Bluetooth device that is already the default:
+                    // a second tap disconnects, which is the only way to hand
+                    // the headset back to a phone.
+                    (Some(c), true, _) if r.is_default => self.dev_ctl.disconnect(c),
+                    (_, _, Some(id)) => self.dev_ctl.select(id.clone()),
+                    _ => {}
+                }
+            }
+            y += 38.0;
         }
     }
 
@@ -2041,6 +2362,7 @@ fn main() -> eframe::Result<()> {
                 isl_bright: false,
                 bright: Vec::new(),
                 bright_ctl: BrightCtl::spawn(cc.egui_ctx.clone()),
+                dev_ctl: DevCtl::new(cc.egui_ctx.clone()),
                 isl_vol: false,
                 vol: Vec::new(),
                 vol_ctl: VolCtl::spawn(cc.egui_ctx.clone()),
@@ -2064,6 +2386,7 @@ fn main() -> eframe::Result<()> {
                 },
                 isl_media: false,
                 isl_timer: false,
+                isl_devices: false,
                 timer_left: Duration::from_secs(25 * 60),
                 timer_total: Duration::from_secs(25 * 60),
                 timer_running: false,

@@ -214,6 +214,14 @@ resto.
   Claude, Zed) no se puede desde fuera; hay que usar el ajuste de cada app. En
   apps con marco nativo sí se podría quitar `WS_CAPTION`, pendiente de decidir
   si merece la pena.
+- **`windeco` deja retazos**: se probó lanzándolo desde el supervisor y hubo que
+  retirarlo el mismo día. Quitar `WS_CAPTION`/`WS_THICKFRAME` cambia el área
+  cliente, y las apps que pintan su propio marco no se enteran: WezTerm
+  (`window_decorations = 'RESIZE'`) y Firefox siguieron dibujando con el offset
+  viejo y dejaron trozos de su barra de pestañas por la pantalla. Son justo las
+  apps a las que no puede ayudar. El crate sigue en el árbol pero **no lo lanza
+  nadie**. Si se retoma, hace falta forzar un `WM_SIZE` real en cada ventana
+  tocada (redimensionar un píxel y devolverla); `wm-redraw` de GlazeWM no basta.
 - **Exportar clips en AV1** para compartirlos más pequeños.
 - **Pomatez** (pomodoro en Electron) → temporizador en la isla.
 - **Click-through con LoL en borderless**: NO resuelto. El mecanismo funciona y

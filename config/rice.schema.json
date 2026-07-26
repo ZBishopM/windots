@@ -25,6 +25,12 @@
       "default": ["hyperx", "snowball"],
       "description": "Substrings matched against capture-device names. micswitch cycles through the matching devices in this order."
     },
+    "outputs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": ["hyperx", "vg270", "airpods"],
+      "description": "Substrings matched against playback-device names, in the order they appear in the island's device page. A whitelist, not the full list: this machine reports 29 playback endpoints and nearly all are virtual (six RODE UNIFY buses, VB-Cable, VoiceMeeter, Steam Streaming, Oculus, NVIDIA Broadcast), which would bury the real ones. Bluetooth audio devices are always listed regardless, so a newly paired headset appears without editing this."
+    },
     "clickthrough_apps": {
       "type": "array",
       "items": { "type": "string" },

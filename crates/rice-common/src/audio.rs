@@ -42,6 +42,11 @@ fn is_internal(name: &str) -> bool {
 /// COM has to be initialised on each thread that touches these APIs. Safe to
 /// call repeatedly -- a second call on an already-initialised thread just
 /// returns S_FALSE.
+/// Same as `init_com`, for sibling modules that also talk COM.
+pub fn init_com_pub() {
+    init_com();
+}
+
 fn init_com() {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -221,5 +226,171 @@ pub fn set_master_mute(mute: bool) -> bool {
             Some(e) => e.SetMute(mute, std::ptr::null()).is_ok(),
             None => false,
         }
+    }
+}
+
+// ---------------------------------------------------------------- outputs
+// Enumerating playback devices and changing the default one lived only inside
+// micswitch, so the bar could not show a list -- it shelled out to micswitch to
+// flip between two hard-coded names. With a third output in the mix (a Bluetooth
+// headset that comes and goes) a two-way toggle stops making sense, so this
+// moved here and both callers share it.
+
+/// One playback endpoint.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Endpoint {
+    /// Opaque endpoint id, the handle used to make it default.
+    pub id: String,
+    /// e.g. `Altavoces (HyperX Cloud II Wireless)`.
+    pub name: String,
+    /// False for a device that is paired/known but not currently plugged in or
+    /// connected -- Bluetooth headsets sit here while switched off.
+    pub active: bool,
+    /// Groups the endpoints belonging to one physical device. A Bluetooth
+    /// headset exposes several (A2DP playback, hands-free playback, capture)
+    /// and they all share this.
+    pub container: Option<u128>,
+}
+
+// IPolicyConfig is how the OS's own sound flyout changes the default device.
+// It is undocumented and has no published header; the CLSID/IID below and the
+// vtable layout are the well-known reverse-engineered ones.
+const CLSID_POLICY_CONFIG: windows::core::GUID =
+    windows::core::GUID::from_u128(0x870af99c_171d_4f9e_af0d_e63df40c2bc9);
+const IID_IPOLICY_CONFIG: windows::core::GUID =
+    windows::core::GUID::from_u128(0xf8679f50_850a_41cf_9c72_430f290290c8);
+
+/// Vtable up to the one method we need. SetDefaultEndpoint is slot 13:
+/// IUnknown's 3, then 10 methods we never call.
+#[repr(C)]
+struct PolicyVtbl {
+    query_interface: usize,
+    add_ref: usize,
+    release: unsafe extern "system" fn(*mut core::ffi::c_void) -> u32,
+    _stubs: [usize; 10],
+    set_default_endpoint: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        windows::core::PCWSTR,
+        i32,
+    ) -> windows::core::HRESULT,
+}
+
+unsafe fn endpoint_id(dev: &windows::Win32::Media::Audio::IMMDevice) -> Option<String> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    let p = dev.GetId().ok()?;
+    let s = p.to_string().ok();
+    CoTaskMemFree(Some(p.0 as *const core::ffi::c_void));
+    s
+}
+
+unsafe fn endpoint_name(dev: &windows::Win32::Media::Audio::IMMDevice) -> Option<String> {
+    use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
+    use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
+    use windows::Win32::System::Com::{CoTaskMemFree, STGM_READ};
+    let store = dev.OpenPropertyStore(STGM_READ).ok()?;
+    let pv = store.GetValue(&PKEY_Device_FriendlyName).ok()?;
+    let ws = PropVariantToStringAlloc(&pv).ok()?;
+    let s = ws.to_string().ok();
+    CoTaskMemFree(Some(ws.0 as *const core::ffi::c_void));
+    s
+}
+
+unsafe fn endpoint_container(dev: &windows::Win32::Media::Audio::IMMDevice) -> Option<u128> {
+    use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_ContainerId;
+    use windows::Win32::System::Com::STGM_READ;
+    let store = dev.OpenPropertyStore(STGM_READ).ok()?;
+    let pv = store.GetValue(&PKEY_Device_ContainerId).ok()?;
+    // VT_CLSID: the payload is a pointer to a GUID.
+    let raw = pv.as_raw();
+    let g = raw.Anonymous.Anonymous.Anonymous.puuid;
+    if g.is_null() {
+        return None;
+    }
+    let g = *g;
+    // No to_u128 on this GUID type; pack the fields ourselves. Only used as a
+    // grouping key, so any injective encoding will do.
+    let mut k: u128 = ((g.data1 as u128) << 96) | ((g.data2 as u128) << 80) | ((g.data3 as u128) << 64);
+    for (i, b) in g.data4.iter().enumerate() {
+        k |= (*b as u128) << (56 - i * 8);
+    }
+    Some(k)
+}
+
+/// Playback endpoints. `include_inactive` also returns devices that are known
+/// but not currently connected -- which is the whole point for Bluetooth, since
+/// a headset that is switched off must still be listed so it can be woken up.
+pub fn outputs(include_inactive: bool) -> Vec<Endpoint> {
+    use windows::Win32::Media::Audio::{
+        DEVICE_STATEMASK_ALL, DEVICE_STATE_ACTIVE, IMMDeviceEnumerator, MMDeviceEnumerator,
+    };
+    init_com();
+    let mut out = Vec::new();
+    unsafe {
+        let Ok(en) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+        else {
+            return out;
+        };
+        let mask = if include_inactive {
+            windows::Win32::Media::Audio::DEVICE_STATE(DEVICE_STATEMASK_ALL)
+        } else {
+            DEVICE_STATE_ACTIVE
+        };
+        let Ok(coll) = en.EnumAudioEndpoints(eRender, mask) else {
+            return out;
+        };
+        for i in 0..coll.GetCount().unwrap_or(0) {
+            let Ok(dev) = coll.Item(i) else { continue };
+            let (Some(id), Some(name)) = (endpoint_id(&dev), endpoint_name(&dev)) else {
+                continue;
+            };
+            out.push(Endpoint {
+                id,
+                name,
+                active: dev.GetState().map(|st| st == DEVICE_STATE_ACTIVE).unwrap_or(false),
+                container: endpoint_container(&dev),
+            });
+        }
+    }
+    out
+}
+
+/// Endpoint id of the current default playback device.
+pub fn current_output_id() -> Option<String> {
+    use windows::Win32::Media::Audio::{IMMDeviceEnumerator, MMDeviceEnumerator};
+    init_com();
+    unsafe {
+        let en: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+        let dev = en.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
+        endpoint_id(&dev)
+    }
+}
+
+/// Make `id` the default playback device for all three roles. Setting only the
+/// console role leaves communications apps pointed at the old device.
+pub fn set_default_output(id: &str) -> bool {
+    use windows::core::{Interface, PCWSTR};
+    use windows::Win32::System::Com::CoCreateInstance;
+    init_com();
+    unsafe {
+        let Ok(unk) = CoCreateInstance::<_, windows::core::IUnknown>(
+            &CLSID_POLICY_CONFIG,
+            None,
+            CLSCTX_ALL,
+        ) else {
+            return false;
+        };
+        let mut pc: *mut core::ffi::c_void = std::ptr::null_mut();
+        if unk.query(&IID_IPOLICY_CONFIG, &mut pc).is_err() || pc.is_null() {
+            return false;
+        }
+        let vtbl = *(pc as *const *const PolicyVtbl);
+        let wide: Vec<u16> = id.encode_utf16().chain(Some(0)).collect();
+        let mut ok = true;
+        for role in [0i32, 1, 2] {
+            ok &= ((*vtbl).set_default_endpoint)(pc, PCWSTR(wide.as_ptr()), role).is_ok();
+        }
+        ((*vtbl).release)(pc);
+        ok
     }
 }
