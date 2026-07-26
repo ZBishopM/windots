@@ -55,12 +55,9 @@ Start-Sleep -Seconds 3
 
 Focus 1  # end on the primary workspace
 
-# Hide the Windows taskbar and KEEP it hidden. --watch stays resident because a
-# one-shot hide does not survive: Explorer owns the auto-hide reveal and re-shows
-# the window whenever the pointer touches the screen edge, so within seconds the
-# bar was back to sliding in on hover. Win+Shift+B still toggles it back when
-# something needs the tray (the watcher honours that).
-Start-Process (Join-Path $Rice.Dev 'taskbar.exe') -ArgumentList '--watch' -WindowStyle Hidden
+# The Windows taskbar is hidden by taskbar.exe --watch, which the SUPERVISOR
+# owns (see its component table). It used to be started here too, so at login
+# both could fire and leave two watchers fighting over the same window.
 
 # Once at login: has GlazeWM's animation PR #1392 merged yet? Toast if so (fail-silent).
 Start-Process pwsh -ArgumentList '-NoProfile', '-WindowStyle', 'Hidden', '-File', "$env:USERPROFILE\.config\glazewm-animcheck.ps1" -WindowStyle Hidden
