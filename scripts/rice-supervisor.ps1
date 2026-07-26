@@ -70,6 +70,12 @@ $Components = @(
     # longer binds those keys -- if this dies, workspace switching dies with it.
     @{ Name = 'ws-slide'; Check = 'Process'; Match = 'ws-slide'
        Path = { Get-RiceExe 'ws-slide.exe' } }
+
+    # Keeps the Windows taskbar hidden. Explorer re-shows it on every hover, so
+    # this has to stay resident; if it dies the taskbar creeps back on its own.
+    # It honours the marker file, so Win+Shift+B still wins over it.
+    @{ Name = 'taskbar'; Check = 'Process'; Match = 'taskbar'
+       Path = { Get-RiceExe 'taskbar.exe' }; Args = { @('--watch') } }
 )
 
 # One bar per monitor, each with its own single-instance mutex keyed by --x.
