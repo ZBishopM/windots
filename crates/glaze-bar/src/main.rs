@@ -82,6 +82,7 @@ extern "system" {
 #[cfg(windows)]
 extern "system" {
     fn SetWindowRgn(hwnd: isize, rgn: isize, redraw: i32) -> i32;
+    fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
 }
 
 /// Clip the window to the bar strip plus an optional bubble.
@@ -103,7 +104,14 @@ unsafe fn set_window_shape(hwnd: isize, width: i32, bar_h: i32, bubble: Option<(
         }
         _ => {}
     }
-    SetWindowRgn(hwnd, strip, 1);
+    // redraw = FALSE. With TRUE, Windows repaints the whole window frame as part
+    // of applying the region, and that repaint briefly exposes the non-client
+    // area -- a full-width light title bar flashing across the top of the screen
+    // for one frame. Isolated by clicking: a click on empty bar never flashed, a
+    // click that opened the panel did, and it survived removing the resize, which
+    // left this call as the only thing that changes on open. egui repaints the
+    // client area on the same frame anyway, so nothing is lost.
+    SetWindowRgn(hwnd, strip, 0);
 }
 // Identify OUR bar window by geometry, not by "first visible window of this
 // process". winit/eframe also keep small helper windows alive -- there are two
@@ -206,6 +214,43 @@ unsafe fn should_clickthrough(my: isize) -> bool {
         None => false,
     }
 }
+/// Take the native frame off for good. See the note at the call site: the
+/// styles survive with_decorations(false) and flash during resizes.
+#[cfg(windows)]
+unsafe fn strip_native_frame(hwnd: isize) {
+    const WS_CAPTION: isize = 0x00C0_0000;
+    const WS_THICKFRAME: isize = 0x0004_0000;
+    const WS_SYSMENU: isize = 0x0008_0000;
+    const WS_MINIMIZEBOX: isize = 0x0002_0000;
+    const WS_MAXIMIZEBOX: isize = 0x0001_0000;
+    const GWL_STYLE: i32 = -16;
+    const UNWANTED: isize = WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+    let cur = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    if cur & UNWANTED == 0 {
+        return;
+    }
+    SetWindowLongPtrW(hwnd, GWL_STYLE, cur & !UNWANTED);
+    // SWP_FRAMECHANGED, or Windows keeps using the old non-client metrics.
+    const SWP: u32 = 0x0002 | 0x0001 | 0x0004 | 0x0020 | 0x0010; // NOMOVE NOSIZE NOZORDER FRAMECHANGED NOACTIVATE
+    SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP);
+    // DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED.
+    const DWMWA_NCRENDERING_POLICY: u32 = 2;
+    const DWMNCRP_DISABLED: i32 = 1;
+    let policy = DWMNCRP_DISABLED;
+    DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_NCRENDERING_POLICY,
+        &policy as *const i32 as *const core::ffi::c_void,
+        core::mem::size_of::<i32>() as u32,
+    );
+}
+
+#[cfg(windows)]
+#[link(name = "dwmapi")]
+extern "system" {
+    fn DwmSetWindowAttribute(hwnd: isize, attr: u32, val: *const core::ffi::c_void, len: u32) -> i32;
+}
+
 #[cfg(windows)]
 unsafe fn set_clickthrough(hwnd: isize, on: bool) {
     const GWL_EXSTYLE: i32 = -20;
@@ -955,22 +1000,9 @@ impl BarApp {
             }
         }
 
+        // No background here: the island above draws one continuous rounded
+        // shape that already covers this area.
         let p = ui.painter().with_clip_rect(rect.expand(10.0));
-        let round = egui::Rounding::same(20.0);
-        for i in 1..=6u8 {
-            let o = i as f32;
-            p.rect_filled(
-                rect.translate(egui::vec2(0.0, o * 0.9)).expand(-o * 0.4),
-                round,
-                egui::Color32::from_rgba_unmultiplied(6, 4, 3, (30 - i as i32 * 4).max(0) as u8),
-            );
-        }
-        p.rect_filled(rect, round, ISL_SURFACE);
-        p.rect_stroke(
-            rect.shrink(0.5),
-            round,
-            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(ISL_HI.r(), ISL_HI.g(), ISL_HI.b(), 120)),
-        );
 
         // Hold the contents back until the bubble is most of the way open, so
         // nothing renders squashed while the spring is still travelling.
@@ -1354,6 +1386,9 @@ impl eframe::App for BarApp {
                 // being applied to anything.
                 self.hwnd = find_own_window(self.x, self.width as i32);
                 if self.hwnd != 0 {
+                    // Cheap no-op once done, but re-asserted because eframe can
+                    // recreate the window under us.
+                    unsafe { strip_native_frame(self.hwnd) };
                     let want = unsafe { should_clickthrough(self.hwnd) };
                     self.clickthrough = want;
                     // Assert the style unconditionally rather than only on a
@@ -1421,6 +1456,7 @@ impl eframe::App for BarApp {
         // Precomputed before the lock: calling a &self method inside the render
         // closure would force a whole-struct borrow and clash with `s`.
         let panel_rest_h = self.panel_target_h();
+        let panel_w_now = self.panel_width();
         let bar_strip_h = self.bar_h();
         let s = self.shared.lock().unwrap();
         // Translucent bar (live-adjustable) so the desktop / a borderless game shows through.
@@ -1619,8 +1655,7 @@ impl eframe::App for BarApp {
                 // Anchor the left edge to the idle-centred position so the clock stays
                 // put while the pill unfurls rightward.
                 let left = cx - idle_w / 2.0;
-                let rect = egui::Rect::from_min_size(egui::pos2(left, cy - h / 2.0), egui::vec2(self.isl_w, h));
-                let round = egui::Rounding::same(h / 2.0);
+                let pill = egui::Rect::from_min_size(egui::pos2(left, cy - h / 2.0), egui::vec2(self.isl_w, h));
 
                 // ---- vertical panel spring -------------------------------------
                 // Critically damped would just glide; this is deliberately
@@ -1644,8 +1679,29 @@ impl eframe::App for BarApp {
                     }
                 }
 
-                // interactive pill: click to expand/dismiss; when expanded only sense
-                // hover (keeps it open) so the buttons own the clicks (no z-order race).
+                // ---- morph the pill into the panel --------------------------
+                // 0 while closed, 1 once the bubble has reached its resting
+                // height. Everything below interpolates on it, so there is only
+                // ever ONE rounded rectangle on screen: the pill grows into the
+                // big one instead of a second box appearing under it.
+                let morph = (self.panel_h / panel_rest_h.max(1.0)).clamp(0.0, 1.0);
+                let m_w = self.isl_w + (panel_w_now - self.isl_w) * morph;
+                // Centred when open, left-anchored when closed (a notification
+                // still unfurls rightward from the clock).
+                let m_left = pill.left() + ((cx - m_w / 2.0) - pill.left()) * morph;
+                // The panel's own rect starts just under the strip; grow down to
+                // meet it, overshoot included, so the bounce carries the whole shape.
+                let pill_bottom = cy + h / 2.0;
+                let panel_bottom = bar_strip_h - 2.0 + self.panel_h;
+                let m_bottom = pill_bottom + (panel_bottom - pill_bottom) * morph;
+                let rect = egui::Rect::from_min_max(
+                    egui::pos2(m_left, cy - h / 2.0),
+                    egui::pos2(m_left + m_w, m_bottom),
+                );
+                let round = egui::Rounding::same(h / 2.0 + (20.0 - h / 2.0) * morph);
+
+                // click to expand/dismiss; when expanded only sense hover (keeps it
+                // open) so the buttons own the clicks (no z-order race).
                 let pill_sense = if expanded { egui::Sense::hover() } else { egui::Sense::click() };
                 let pill = ui
                     .interact(rect, egui::Id::new("isl-pill"), pill_sense)
@@ -1654,14 +1710,11 @@ impl eframe::App for BarApp {
                     self.isl_interact = now_i;
                 }
 
-                // neumorphic pill: layered soft drop shadow + raised surface + top highlight
+                // neumorphic: layered soft drop shadow + raised surface + top highlight
                 for i in 1..=5u8 {
                     let o = i as f32;
                     ui.painter().rect_filled(
-                        egui::Rect::from_center_size(
-                            egui::pos2(rect.center().x, cy + o * 0.8),
-                            egui::vec2(self.isl_w - o * 0.5, h - o * 0.25),
-                        ),
+                        rect.translate(egui::vec2(0.0, o * 0.8)).expand2(egui::vec2(-o * 0.25, -o * 0.12)),
                         round,
                         egui::Color32::from_rgba_unmultiplied(6, 4, 3, (32 - i as i32 * 5) as u8),
                     );
@@ -1685,9 +1738,28 @@ impl eframe::App for BarApp {
                 // Left edge of the spectrum slot, filled in below; clicking there
                 // means "media", clicking anywhere else on the pill means "controls".
                 let mut spec_x0 = f32::INFINITY;
-                let mut tx = rect.left() + pad;
-                cp.text(egui::pos2(tx, cy), egui::Align2::LEFT_CENTER, &clock, egui::FontId::proportional(14.0), WARM_TEXT);
-                tx += clock_w;
+                // The clock scales with the expansion and slides to the centre of
+                // the open shape, so it reads as the header of the panel rather
+                // than a leftover from the collapsed pill.
+                let clock_fs = 14.0 + 5.0 * morph;
+                let clock_w2 = ui
+                    .painter()
+                    .layout_no_wrap(clock.clone(), egui::FontId::proportional(clock_fs), WARM_TEXT)
+                    .size()
+                    .x;
+                let clock_left = rect.left() + pad;
+                let mut tx = clock_left + ((cx - clock_w2 / 2.0) - clock_left) * morph;
+                cp.text(
+                    egui::pos2(tx, cy),
+                    egui::Align2::LEFT_CENTER,
+                    &clock,
+                    egui::FontId::proportional(clock_fs),
+                    WARM_TEXT,
+                );
+                tx += clock_w2;
+                let fade = |c: egui::Color32| {
+                    egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), ((1.0 - morph) * 255.0) as u8)
+                };
                 if timer_w > 0.0 {
                     let secs = self.timer_left.as_secs();
                     cp.text(
@@ -1695,7 +1767,7 @@ impl eframe::App for BarApp {
                         egui::Align2::LEFT_CENTER,
                         format!("{:02}:{:02}", secs / 60, secs % 60),
                         egui::FontId::proportional(11.5),
-                        col(theme::ACCENT_OK),
+                        fade(col(theme::ACCENT_OK)),
                     );
                     tx += timer_w;
                 }
@@ -1721,7 +1793,7 @@ impl eframe::App for BarApp {
                         // Colour follows the level: amber low, lime at the top, so
                         // it matches the rest of the rice rather than being a
                         // separate palette.
-                        let c = if *v > 0.66 { col(theme::ACCENT_OK) } else { WARM_ACCENT };
+                        let c = fade(if *v > 0.66 { col(theme::ACCENT_OK) } else { WARM_ACCENT });
                         cp.rect_filled(
                             egui::Rect::from_min_max(egui::pos2(x, base - h), egui::pos2(x + bw, base)),
                             egui::Rounding::same(1.5),
@@ -1729,7 +1801,7 @@ impl eframe::App for BarApp {
                         );
                     }
                 }
-                if has_extra {
+                if notif_open {
                     let dx = tx + div_gap / 2.0;
                     cp.line_segment(
                         [egui::pos2(dx, cy - 7.0), egui::pos2(dx, cy + 7.0)],
