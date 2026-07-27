@@ -76,6 +76,18 @@ $Components = @(
     # It honours the marker file, so Win+Shift+B still wins over it.
     @{ Name = 'taskbar'; Check = 'Process'; Match = 'taskbar'
        Path = { Get-RiceExe 'taskbar.exe' }; Args = { @('--watch') } }
+
+    # Redraws every Windows notification with the rice's toast. Supervised, not
+    # a plain Startup shortcut, because the failure mode is silent and total:
+    # Do Not Disturb is what suppresses the stock blue banners, and DND does not
+    # care whether notifyd is alive -- if this dies, notifications stop appearing
+    # ANYWHERE except the Notification Center (Win+N) until it is back. 30s.
+    #
+    # No MaxRestarts on purpose. A cap would eventually give up and leave the
+    # machine permanently silent; notifyd already parks instead of exiting when
+    # its permissions are missing, so it does not respawn-loop.
+    @{ Name = 'notifyd'; Check = 'Process'; Match = 'notifyd'
+       Path = { Get-RiceExe 'notifyd.exe' } }
 )
 
 # One bar per monitor, each with its own single-instance mutex keyed by --x.

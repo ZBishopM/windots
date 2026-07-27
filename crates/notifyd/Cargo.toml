@@ -1,0 +1,24 @@
+[package]
+name = "notifyd"
+version = "0.1.0"
+edition = "2021"
+
+# Draws EVERY Windows notification with the rice's own toast. Needs package
+# identity to work at all -- see dotfiles\notifyd-package. `windows` is pinned to
+# the workspace's 0.58 (rice-common, micswitch and ws-slide are all on it);
+# mixing majors would link two copies of the WinRT metadata.
+[dependencies]
+rice-common = { path = "../rice-common", features = ["event"] }
+windows = { version = "0.58", features = [
+  "Foundation",
+  "Foundation_Collections",
+  "ApplicationModel",
+  "UI_Notifications",
+  "UI_Notifications_Management",
+  "Win32_Foundation",
+  "Win32_Storage_Packaging_Appx",
+  "Win32_System_Com",
+  "Win32_System_SystemInformation",
+] }
+
+# Release profile lives at the workspace root (dev/Cargo.toml).

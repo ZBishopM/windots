@@ -41,7 +41,7 @@ function Shortcut($name, $target, $arguments = '') {
 }
 
 # ---------------------------------------------------------------- 1. dependencies
-Say '1/7  Dependencies'
+Say '1/8  Dependencies'
 if (-not (Get-Command scoop -EA SilentlyContinue)) {
     Ok 'installing scoop...'
     Invoke-RestMethod get.scoop.sh | Invoke-Expression
@@ -75,7 +75,7 @@ if (-not (Get-Command cargo -EA SilentlyContinue)) {
 # Configs are deployed BEFORE the Rust build on purpose: the build is the step
 # most likely to fail on a fresh machine (missing/misresolved toolchain), and a
 # failure there used to abort the installer before a single config was written.
-Say '2/7  Deploy configs'
+Say '2/8  Deploy configs'
 Deploy "$repo\wezterm\.wezterm.lua"                       "$home_\.wezterm.lua"
 Deploy "$repo\config\fastfetch\config.jsonc"              "$home_\.config\fastfetch\config.jsonc"
 Deploy "$repo\config\fastfetch\duck.txt"                  "$home_\.config\fastfetch\duck.txt"
@@ -105,12 +105,20 @@ $ffDirs = @("$env:ProgramFiles\Firefox Developer Edition", "$env:ProgramFiles\Mo
     Where-Object { Test-Path $_ }
 if (-not $ffDirs) { Ok 'no Firefox in Program Files - notification override will be skipped' }
 
+# Vesktop's equivalent. Discord raises its notifications from the renderer's
+# window.Notification, and Vesktop ships Vencord as four prebuilt files in its own
+# data directory with no plugin hook, so the override is an append to three of
+# them. apply.ps1 does the staging (~\.config\vesktop) and the patching itself; it
+# needs no elevation and never restarts Vesktop. Non-fatal on purpose -- Vesktop
+# has to have been launched once before its Vencord files exist to patch.
+try { & "$repo\vesktop\apply.ps1" } catch { Ok "vesktop notification override skipped: $_" }
+
 # ---------------------------------------------------------------- 3. Rust tools
 # One cargo workspace (dev/Cargo.toml) builds every bin -- glaze-bar, cava,
 # sysaudio-loopback, shadowplay-notify, micswitch, ws-slide, shadowplay-wgc --
 # into a single dev/target/release/. The recorder and cava find their sibling
 # sysaudio-loopback.exe there automatically, so there is no copy step.
-Say '3/7  Build Rust tools (cargo workspace)'
+Say '3/8  Build Rust tools (cargo workspace)'
 $dev = "$home_\dev"
 New-Item -ItemType Directory -Force "$dev\crates" | Out-Null
 Copy-Item "$repo\crates\*"   "$dev\crates"      -Recurse -Force
@@ -129,11 +137,11 @@ if (Test-Path (Split-Path $asPersist)) {
 }
 
 # ---------------------------------------------------------------- 4. folders
-Say '4/7  ShadowPlay folders'
+Say '4/8  ShadowPlay folders'
 New-Item -ItemType Directory -Force "$home_\ShadowPlay\buffer", "$home_\ShadowPlay\wgc-buffer", "$home_\ShadowPlay\clips" | Out-Null
 
 # ---------------------------------------------------------------- 5. autostart
-Say '5/7  Autostart'
+Say '5/8  Autostart'
 $scoopApps = "$home_\scoop\apps"
 Shortcut 'GlazeWM'         "$scoopApps\glazewm\current\GlazeWM.exe"
 Shortcut 'AltSnap'         "$scoopApps\altsnap\current\AltSnap.exe"
@@ -146,7 +154,7 @@ Shortcut 'RiceSupervisor'  'wscript.exe' "`"$home_\.config\rice-supervisor.vbs`"
 Shortcut 'RiceAutostart'   'wscript.exe' "`"$home_\.config\rice-autostart.vbs`""
 
 # ---------------------------------------------------------------- 6. registry / env
-Say '6/7  Registry + env tweaks'
+Say '6/8  Registry + env tweaks'
 $tg = 'HKCU:\Keyboard Layout\Toggle'
 if (-not (Test-Path $tg)) { New-Item -Path $tg -Force | Out-Null }
 'Language Hotkey', 'Hotkey', 'Layout Hotkey' | ForEach-Object { Set-ItemProperty $tg -Name $_ -Value '3' -Type String }
@@ -155,8 +163,31 @@ Ok 'Alt+Shift language switch disabled (use Win+Space for lang / Command Palette
 [Environment]::SetEnvironmentVariable('DOTNET_CLI_TELEMETRY_OPTOUT', '1', 'User')
 Ok 'telemetry optout'
 
-# ---------------------------------------------------------------- 7. system tweaks (admin)
-Say '7/7  Firefox AutoConfig + disable unused services + MPO (optional, needs admin)'
+# ---------------------------------------------------------------- 7. notifyd package
+# notifyd redraws every Windows notification with the rice's toast, and to
+# subscribe to the notification listener's change event it needs *package
+# identity*. That comes from a sparse MSIX registered against the folder cargo
+# already built into -- nothing moves, no binary is copied.
+#
+# Staged exactly like the Firefox AutoConfig above and for the same reason: the
+# build and the signing need no admin and happen here, the one elevated part
+# (trusting the self-signed certificate) is folded into step 8's single UAC
+# prompt, and the registration -- which is per-user and needs no admin -- runs
+# right after it. Non-fatal throughout: without the package notifyd still works
+# by polling, just a poll interval slower.
+Say '7/8  notifyd sparse package'
+$npStage = "$home_\.config\notifyd-package"
+Deploy "$repo\notifyd-package\AppxManifest.xml" "$npStage\AppxManifest.xml"
+Deploy "$repo\notifyd-package\build.ps1"        "$npStage\build.ps1"
+$npCer = "$npStage\notifyd-sparse.cer"
+$npOk = $false
+try {
+    & "$npStage\build.ps1" -ExternalLocation "$dev\target\release" -OutDir $npStage
+    $npOk = Test-Path $npCer
+} catch { Ok "notifyd package build skipped: $_" }
+
+# ---------------------------------------------------------------- 8. system tweaks (admin)
+Say '8/8  Firefox AutoConfig + notifyd cert + disable unused services + MPO (optional, needs admin)'
 $svc = 'DiagTrack', 'SysMain', 'DPS', 'Spooler'
 $adminCmd = ($svc | ForEach-Object { "Set-Service $_ -StartupType Disabled -EA SilentlyContinue; Stop-Service $_ -Force -EA SilentlyContinue" }) -join '; '
 # The staged AutoConfig pair, folded into the same elevated call so the installer
@@ -171,13 +202,31 @@ foreach ($d in $ffDirs) {
 # captures a FROZEN frame whenever a hardware-accelerated video plays. Forcing
 # DWM to composite everything fixes it. Takes effect after a reboot.
 $adminCmd += '; reg add "HKLM\SOFTWARE\Microsoft\Windows\Dwm" /v OverlayTestMode /t REG_DWORD /d 5 /f'
+# The sparse package is self-signed, so Windows will not register it until its
+# certificate is trusted machine-wide. TrustedPeople, NOT Root: that is the store
+# MSIX deployment actually consults, and it grants far less than Root does.
+if ($npOk) {
+    $adminCmd += "; Import-Certificate -FilePath '$npCer' -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null"
+}
+$elevated = $false
 try {
     Start-Process pwsh -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile', '-Command', $adminCmd
+    $elevated = $true
     Ok 'services disabled + MPO off (reboot to apply MPO)'
     if ($ffDirs) { Ok 'Firefox AutoConfig installed (restart Firefox)' }
+    if ($npOk) { Ok 'notifyd signing certificate trusted' }
 } catch {
     Ok 'skipped (no elevation) - see README to do it manually'
     if ($ffDirs) { Ok "  Firefox part, run elevated:  $adminCmd" }
+}
+
+# Registration is per-user and needs no admin, but it does need the certificate
+# from the step above, so it can only run once that has actually happened.
+if ($npOk -and $elevated) {
+    try {
+        & "$npStage\build.ps1" -ExternalLocation "$dev\target\release" -OutDir $npStage -Register
+        Ok 'notifyd sparse package registered'
+    } catch { Ok "notifyd registration skipped: $_" }
 }
 
 Write-Host ''
@@ -187,5 +236,13 @@ Write-Host @"
       - Command Palette on Win+Space: install PowerToys, then set its hotkey.
       - Monitor layout: glaze-bar --x/--width in glazewm config.yaml startup_commands
         and the notify position are hard-coded to 1920 + 2560; adjust for your screens.
+      - Turn Do Not Disturb ON (Settings > System > Notifications, or Win+N and the
+        bell). This is what suppresses the stock blue banners; notifyd still receives
+        every notification and redraws it. Not done automatically: it is a visible
+        system-wide setting and it is yours to choose.
+        Note the trade: with DND on and notifyd dead, notifications appear nowhere
+        but the Notification Center. rice-supervisor restarts it within 30s.
+      - Check it:  ~\dev\target\release\notifyd.exe --check
+                   then  cat ~\.config\logs\notifyd.log
 "@ -ForegroundColor DarkGray
 

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Side-by-side ("fusion") manifest embedded into notifyd.exe by build.rs.
+
+  This is the half of the sparse-package story that is easy to miss, and missing
+  it fails in the worst possible way: `Add-AppxPackage -ExternalLocation`
+  succeeds, the package shows up in `Get-AppxPackage`, and the process still has
+  NO identity at runtime. The exe has to point back at the package as well; the
+  registration alone is not enough.
+
+  Every attribute below must match dotfiles\notifyd-package\AppxManifest.xml:
+    packageName   == Identity/@Name
+    publisher     == Identity/@Publisher
+    applicationId == Applications/Application/@Id
+  A mismatch is reported as 0x80073D54, if it is reported at all.
+
+  No trustInfo here on purpose: link.exe writes one for us (/MANIFESTUAC defaults
+  to asInvoker), and two of them in one merged manifest is an error. asInvoker is
+  what we want anyway. notifyd must never run elevated: Windows refuses to
+  deliver COM callbacks into a high integrity level, so an elevated notifyd gets
+  RPC_S_CALL_FAILED (0x800706BE) from the NotificationChanged subscription and
+  silently degrades to polling only.
+-->
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity version="1.0.0.0" name="Rice.Notifyd.notifyd" type="win32" />
+  <msix xmlns="urn:schemas-microsoft-com:msix.v1"
+        publisher="CN=RiceDotfiles"
+        packageName="Rice.Notifyd"
+        applicationId="notifyd" />
+</assembly>

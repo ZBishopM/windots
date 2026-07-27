@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Sparse package ("packaging with external location") for notifyd.
+
+  This MSIX contains nothing but this manifest and three logo PNGs. Its only job
+  is to give C:\...\dev\target\release\notifyd.exe *package identity*, because
+  the userNotificationListener capability can only be declared in an app
+  manifest and Windows only honours a manifest belonging to a registered
+  package. Without identity the listener does not fail loudly: NotificationChanged
+  throws ELEMENT_NOT_FOUND (0x80070490) and GetNotificationsAsync just returns an
+  empty list forever. See crates/notifyd/src/main.rs.
+
+  uap10:AllowExternalContent is what makes that possible without repackaging the
+  rice. The executable stays where cargo builds it, outside the package, and the
+  package is registered against that folder with
+  `Add-AppxPackage -ExternalLocation`. External content is not hashed, so
+  a release build can keep overwriting notifyd.exe without invalidating the
+  registration.
+
+  This file is only half of it. The exe must also embed a side-by-side manifest
+  pointing back here (crates/notifyd/notifyd.exe.manifest); with only one of the
+  two, registration succeeds and the running process still has no identity.
+
+  Publisher MUST equal the signing certificate's Subject byte for byte, or
+  registration fails with CERT_E_UNTRUSTEDROOT / a publisher mismatch.
+  notifyd-package\build.ps1 reads it from this file rather than repeating it.
+
+  (XML comments cannot contain a double hyphen, so the em dashes the rest of this
+  repo writes as "- -" are spelled out here instead.)
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap3 uap10 rescap">
+
+  <!-- neutral, not x64: the package carries no binaries at all. -->
+  <Identity Name="Rice.Notifyd"
+            Publisher="CN=RiceDotfiles"
+            Version="1.0.0.0"
+            ProcessorArchitecture="neutral" />
+
+  <Properties>
+    <DisplayName>rice notifyd</DisplayName>
+    <PublisherDisplayName>rice</PublisherDisplayName>
+    <Logo>Images\StoreLogo.png</Logo>
+    <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
+  </Properties>
+
+  <Dependencies>
+    <!-- 19041 is a floor, not a preference: uap10:AllowExternalContent arrived
+         in Windows 10 2004. -->
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <!--
+      Executable is resolved against the EXTERNAL location, not the package.
+
+      RuntimeBehavior="win32App" rather than the older
+      EntryPoint="windows.fullTrustApplication" (which means
+      RuntimeBehavior="packagedClassicApp"). Two reasons, and the second one is
+      load bearing for a daemon:
+        * win32App skips the registry and filesystem virtualization a packaged
+          classic app gets, so notifyd keeps writing ~\.config\logs\notifyd.log
+          where every other rice tool writes.
+        * packagedClassicApp puts the process under Process Lifecycle
+          Management, which probes the main thread's message pump and kills
+          anything that does not answer. notifyd deliberately has no pump (it is
+          MTA), so PLM would eventually terminate it.
+
+      AppListEntry="none" keeps a daemon out of Start and out of search.
+    -->
+    <Application Id="notifyd"
+                 Executable="notifyd.exe"
+                 uap10:RuntimeBehavior="win32App"
+                 uap10:TrustLevel="mediumIL">
+      <uap:VisualElements
+        DisplayName="rice notifyd"
+        Description="Redraws Windows notifications with the rice's toast"
+        BackgroundColor="transparent"
+        Square150x150Logo="Images\Square150x150Logo.png"
+        Square44x44Logo="Images\Square44x44Logo.png"
+        AppListEntry="none" />
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <!-- Required by any mediumIL app. -->
+    <rescap:Capability Name="runFullTrust" />
+    <!-- Also required specifically for packages with an external location. -->
+    <rescap:Capability Name="unvirtualizedResources" />
+    <!--
+      The whole reason this package exists. uap3, not rescap: it is a
+      general-use capability (SDK AppxManifestTypes.xsd, ST_Capability_Uap_3),
+      so no Store approval is involved. It still cannot be declared anywhere
+      except a package manifest, which is exactly why a sparse package is the
+      only way an unpackaged exe can ever have it.
+    -->
+    <uap3:Capability Name="userNotificationListener" />
+  </Capabilities>
+</Package>

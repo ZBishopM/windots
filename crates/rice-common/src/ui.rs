@@ -31,6 +31,12 @@ pub fn icon_glyph(name: &str) -> &'static str {
         "desktop" => "\u{f108}", // fa-desktop
         "sliders" => "\u{f1de}",
         "bell" => "\u{f0f3}", // fa-bell: web notifications relayed by Firefox's AutoConfig
+        // notifyd redraws every Windows notification, so it needs to say at a
+        // glance what kind of thing pinged. Coarse on purpose -- three buckets
+        // plus the bell, not a glyph per application.
+        "message" => "\u{f075}",  // fa-comment: chat apps
+        "mail" => "\u{f0e0}",     // fa-envelope
+        "calendar" => "\u{f073}", // fa-calendar
         _ => "",
     }
 }
