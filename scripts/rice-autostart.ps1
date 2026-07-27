@@ -28,30 +28,37 @@ function WaitWin($proc, $sec = 15) {
     Start-Sleep -Milliseconds 700  # settle in the workspace
 }
 
-# ws1: Claude (app) + Zed
-Focus 1
-Start-Process 'shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude'; WaitWin 'Claude'
-Start-Process 'C:\Users\obisp\AppData\Local\Programs\Zed\Zed.exe'; WaitWin 'Zed'
+# Launch everything at once. These used to go one at a time, each blocking on
+# WaitWin until its window appeared -- up to 15s apiece plus a settle, so five
+# apps could serialise ~85s of pure waiting at every login.
+#
+# What made that ordering necessary was placement: focus a workspace, start the
+# app, wait for it to land. GlazeWM now does the placing itself (see the
+# `move --workspace` window rules in its config), so order stops mattering and
+# they can all start together. On this hardware they genuinely do run in
+# parallel; the old script was not CPU-bound, it was waiting.
+$parallel = @(
+    @{ Path = 'shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude' }
+    @{ Path = "$env:LOCALAPPDATA\Programs\Zed\Zed.exe" }
+    @{ Path = 'C:\Program Files\Firefox Developer Edition\firefox.exe' }
+    @{ Path = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+       Args = @('--profile-directory=Profile 5') }
+)
+foreach ($a in $parallel) {
+    if ($a.Args) { Start-Process $a.Path -ArgumentList $a.Args -EA SilentlyContinue }
+    else         { Start-Process $a.Path -EA SilentlyContinue }
+}
 
-# ws3: Firefox
-Focus 3
-Start-Process 'C:\Program Files\Firefox Developer Edition\firefox.exe'; WaitWin 'firefox'
-
-# ws4: Vesktop
-Focus 4
-Start-Process 'C:\Users\obisp\scoop\shims\vesktop.exe'; WaitWin 'vesktop'
-
-# ws6: Chrome (BubbleTea profile)
-Focus 6
-Start-Process 'C:\Program Files\Google\Chrome\Application\chrome.exe' -ArgumentList '--profile-directory=Profile 5'; WaitWin 'chrome'
-
-# ws2 + ws5: terminals (wezterm windows appear fast; fixed settle is enough)
+# The terminals stay ordered. Both are wezterm-gui, so a process-name rule cannot
+# tell the `claude` window from the `btop` one, and at launch their titles are not
+# set yet either. They come up fast, so the cost of keeping this sequential is
+# small -- unlike the block above.
 Focus 2
 Start-Process $wez -ArgumentList 'start', '--', 'pwsh', '-NoExit', '-Command', 'claude'
-Start-Sleep -Seconds 3
+Start-Sleep -Seconds 2
 Focus 5
 Start-Process $wez -ArgumentList 'start', '--', 'pwsh', '-NoExit', '-Command', 'btop'
-Start-Sleep -Seconds 3
+Start-Sleep -Seconds 2
 
 Focus 1  # end on the primary workspace
 

@@ -149,6 +149,22 @@ workspaces:
     bind_to_monitor: 1
 
 window_rules:
+  # Placement by rule, not by launch order. rice-autostart used to focus a
+  # workspace, start an app, and block until its window appeared, so the five
+  # startup apps were strictly serialised -- up to 15s of waiting each. With
+  # these rules the WM puts each window where it belongs whenever it turns up,
+  # so they can all be launched at once.
+  - commands: ['move --workspace 1']
+    match:
+      - window_process: { equals: 'Claude' }
+      - window_process: { equals: 'Zed' }
+  - commands: ['move --workspace 3']
+    match:
+      - window_process: { equals: 'firefox' }
+  - commands: ['move --workspace 6']
+    match:
+      - window_process: { equals: 'chrome' }
+
   - commands: ['ignore']
     match:
       # Ignores any Zebar windows.
