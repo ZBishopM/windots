@@ -366,9 +366,22 @@ pub fn current_output_id() -> Option<String> {
     }
 }
 
-/// Make `id` the default playback device for all three roles. Setting only the
-/// console role leaves communications apps pointed at the old device.
-pub fn set_default_output(id: &str) -> bool {
+/// Roles a default device can hold. eConsole and eMultimedia are "where sound
+/// comes out"; eCommunications is what voice apps grab, and it is deliberately
+/// separate -- see `set_default_output`.
+pub const ROLE_CONSOLE: i32 = 0;
+pub const ROLE_MULTIMEDIA: i32 = 1;
+pub const ROLE_COMMUNICATIONS: i32 = 2;
+
+/// Make `id` the default playback device for the given roles.
+///
+/// Splitting the roles matters for Bluetooth headphones. Classic Bluetooth
+/// cannot do stereo playback and a microphone at once: A2DP is output-only, and
+/// the moment anything opens the headset's mic Windows switches the whole device
+/// to hands-free, which is mono and 16kHz, and BOTH directions collapse. Making
+/// a pair of earbuds the communications device is therefore how you quietly
+/// ruin their sound -- the next voice call drags them into hands-free.
+pub fn set_default_output_roles(id: &str, roles: &[i32]) -> bool {
     use windows::core::{Interface, PCWSTR};
     use windows::Win32::System::Com::CoCreateInstance;
     init_com();
@@ -387,10 +400,35 @@ pub fn set_default_output(id: &str) -> bool {
         let vtbl = *(pc as *const *const PolicyVtbl);
         let wide: Vec<u16> = id.encode_utf16().chain(Some(0)).collect();
         let mut ok = true;
-        for role in [0i32, 1, 2] {
+        for &role in roles {
             ok &= ((*vtbl).set_default_endpoint)(pc, PCWSTR(wide.as_ptr()), role).is_ok();
         }
         ((*vtbl).release)(pc);
         ok
+    }
+}
+
+/// All three roles. Only right for a device that is also a sane microphone --
+/// for headphones, prefer `set_default_output_roles` without the
+/// communications role.
+pub fn set_default_output(id: &str) -> bool {
+    set_default_output_roles(id, &[ROLE_CONSOLE, ROLE_MULTIMEDIA, ROLE_COMMUNICATIONS])
+}
+
+/// Friendly name of the default playback device for one specific role. Roles can
+/// and here deliberately do point at different devices.
+pub fn output_name_for_role(role: i32) -> Option<String> {
+    use windows::Win32::Media::Audio::{eCommunications, eMultimedia, IMMDeviceEnumerator, MMDeviceEnumerator};
+    init_com();
+    unsafe {
+        let en: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+        let r = match role {
+            ROLE_MULTIMEDIA => eMultimedia,
+            ROLE_COMMUNICATIONS => eCommunications,
+            _ => eConsole,
+        };
+        let dev = en.GetDefaultAudioEndpoint(eRender, r).ok()?;
+        endpoint_name(&dev)
     }
 }

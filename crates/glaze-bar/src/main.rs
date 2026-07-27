@@ -621,7 +621,17 @@ impl DevCtl {
                         }
                     }
                     DevMsg::Select(id) => {
-                        rice_common::audio::set_default_output(&id);
+                        // Console + multimedia only, NOT communications. Picking
+                        // headphones to listen on must not also hand them the
+                        // voice path: for Bluetooth that forces hands-free mode,
+                        // which is mono 16kHz and wrecks playback too.
+                        rice_common::audio::set_default_output_roles(
+                            &id,
+                            &[
+                                rice_common::audio::ROLE_CONSOLE,
+                                rice_common::audio::ROLE_MULTIMEDIA,
+                            ],
+                        );
                     }
                     DevMsg::Connect(container) => {
                         mark_busy(&out, container, true);
@@ -646,7 +656,13 @@ impl DevCtl {
                                 .find(|d| d.container == container)
                                 .and_then(|d| d.output_id.clone())
                             {
-                                rice_common::audio::set_default_output(&id);
+                                rice_common::audio::set_default_output_roles(
+                                    &id,
+                                    &[
+                                        rice_common::audio::ROLE_CONSOLE,
+                                        rice_common::audio::ROLE_MULTIMEDIA,
+                                    ],
+                                );
                             }
                         }
                     }
