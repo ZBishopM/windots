@@ -22,6 +22,7 @@ members = [
     "crates/appvol",
     "crates/windeco",
     "crates/winkill",
+    "crates/launcher",
     "crates/shadowplay-wgc",
     "crates/notifyd",
 ]

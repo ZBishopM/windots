@@ -1,0 +1,21 @@
+[package]
+name = "launcher"
+version = "0.1.0"
+edition = "2021"
+
+# Application launcher: the Win+Space search box. Replaces PowerToys' Command
+# Palette, which costs 267 MB resident and 59s of cold start at every login --
+# measured, it was the single largest item in this machine's post-boot phase.
+[dependencies]
+rice-common = { path = "../rice-common", features = ["ui", "settings"] }
+eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts"] }
+# Helix's matcher: same scoring as fzf, ~6x faster than skim's fuzzy-matcher,
+# and unlike either it handles non-ASCII and Unicode graphemes correctly.
+nucleo-matcher = "0.3"
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_UI_Shell",
+  "Win32_UI_Shell_Common",
+  "Win32_UI_WindowsAndMessaging",
+] }
