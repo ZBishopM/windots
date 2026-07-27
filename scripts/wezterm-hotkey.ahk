@@ -104,7 +104,7 @@
 }
 
 ; ------------------------------------------------------------
-; Win+Shift+Z -> reload this script.
+; Win+Shift+Z -> panic key: restart AltSnap and reload this script.
 ;
 ; The escape hatch. AHK tracks modifier state itself, and if that ever drifts out
 ; of step with the real keyboard -- it can, and synthetic input makes it more
@@ -114,4 +114,12 @@
 ; Reloading resets that state. Deliberately reachable without the spacebar, and
 ; on Z because GlazeWM already owns lwin+shift+r for its resize binding mode.
 ; ------------------------------------------------------------
-#+z:: Reload
+#+z:: {
+    ; AltSnap goes first: its Hotkeys are 5B 5C, i.e. the Windows key, and it
+    ; tracks that key's state itself. When that tracking desynchronises it keeps
+    ; believing Super is held and swallows ordinary keystrokes -- the spacebar
+    ; among them -- while the OS itself reports no modifier at all. Killing it is
+    ; the fix; the supervisor puts it back within its next tick.
+    ProcessClose('AltSnap.exe')
+    Reload
+}

@@ -214,6 +214,19 @@ resto.
   Claude, Zed) no se puede desde fuera; hay que usar el ajuste de cada app. En
   apps con marco nativo sí se podría quitar `WS_CAPTION`, pendiente de decidir
   si merece la pena.
+- **AltSnap se traga el teclado si le descuadras la tecla Windows**: `Hotkeys=5B 5C`
+  en `AltSnap.ini` hace que su modificador sea LWin/RWin, y AltSnap lleva su
+  **propio** registro de si esa tecla está pulsada. Inyectar pulsaciones
+  sintéticas de Win (`keybd_event`, `SendInput`) puede desincronizarlo: se queda
+  creyendo que Super sigue abajo y a partir de ahí **intercepta teclas normales,
+  la barra espaciadora incluida**, aunque el sistema no vea ningún modificador.
+  Los síntomas son los tres a la vez: no se escriben espacios, `Win+Space` no
+  abre la paleta y `Win+Alt+Space` no llega a GlazeWM. Diagnosticado con un hook
+  propio: 86 pulsaciones de espacio llegaban al SO con `mods=[]`, así que ni
+  teclado ni IME ni modificador atascado de verdad. **Recuperación: `Win+Shift+Z`**
+  (mata AltSnap, que el supervisor relanza, y recarga AHK). Regla para el futuro:
+  **no inyectar Win sintético para probar atajos** — usar IPC o la CLI.
+
 - **`windeco` deja retazos**: se probó lanzándolo desde el supervisor y hubo que
   retirarlo el mismo día. Quitar `WS_CAPTION`/`WS_THICKFRAME` cambia el área
   cliente, y las apps que pintan su propio marco no se enteran: WezTerm
