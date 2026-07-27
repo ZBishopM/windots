@@ -1193,6 +1193,7 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "nucleo-matcher",
+ "raw-window-handle",
  "rice-common",
  "windows 0.58.0",
 ]

@@ -34,24 +34,14 @@
 ; forwards to CmdPal, which listens on Win+Ctrl+Space.
 ; ------------------------------------------------------------
 #Space:: {
-    ; Back on PowerToys' Command Palette. Our own launcher indexes and matches
-    ; correctly -- verified on screen -- but its show path does not work
-    ; reliably: the window will not come up on the hotkey. Until that is fixed
-    ; this stays pointed at something that works.
+    ; Our own launcher. One press opens it, the next closes it -- the launcher
+    ; itself toggles on a named event, so holding Super and tapping Space
+    ; repeatedly works without AHK tracking any state.
     ;
-    ; {Blind} plus Ctrl only. Super is already physically down -- this IS a
-    ; #Space hotkey -- so there is nothing to synthesise. Letting AHK build the
-    ; '#' itself made it emit an LWin up afterwards, after which AHK stopped
-    ; seeing Super as held at all: of four Space taps with Super held down, only
-    ; the FIRST ever reached this handler.
-    wasActive := WinActive('ahk_exe Microsoft.CmdPal.UI.exe')
-    SendInput '{Blind}{Ctrl down}{Space}{Ctrl up}'
-    if wasActive
-        return
-    if WinWait('ahk_exe Microsoft.CmdPal.UI.exe', , 1.5) {
-        if !WinActive('ahk_exe Microsoft.CmdPal.UI.exe')
-            WinActivate('ahk_exe Microsoft.CmdPal.UI.exe')
-    }
+    ; No chord is synthesised. `--show` signals the resident instance and exits.
+    ; Nothing here injects keystrokes, because synthetic Win presses on this
+    ; machine desynchronise AltSnap and it starts swallowing the spacebar.
+    Run('"' . EnvGet('USERPROFILE') . '\dev\target\release\launcher.exe" --show', , 'Hide')
 }
 
 ; ------------------------------------------------------------

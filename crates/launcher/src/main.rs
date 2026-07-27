@@ -31,6 +31,8 @@ const WIDTH: f32 = 620.0;
 
 #[cfg(windows)]
 mod win {
+    use std::sync::atomic::{AtomicIsize, Ordering};
+
     #[link(name = "kernel32")]
     extern "system" {
         pub fn CreateEventW(attrs: isize, manual: i32, initial: i32, name: *const u16) -> isize;
@@ -39,7 +41,108 @@ mod win {
         pub fn WaitForSingleObject(h: isize, ms: u32) -> u32;
         pub fn CloseHandle(h: isize) -> i32;
     }
+    #[link(name = "user32")]
+    extern "system" {
+        pub fn ShowWindow(h: isize, cmd: i32) -> i32;
+        pub fn SetForegroundWindow(h: isize) -> i32;
+        pub fn IsWindowVisible(h: isize) -> i32;
+        pub fn SetWindowPos(h: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, f: u32) -> i32;
+        pub fn GetSystemMetrics(i: i32) -> i32;
+        pub fn AttachThreadInput(from: u32, to: u32, attach: i32) -> i32;
+        pub fn GetWindowThreadProcessId(h: isize, pid: *mut u32) -> u32;
+        pub fn GetForegroundWindow() -> isize;
+        pub fn GetCurrentThreadId() -> u32;
+        pub fn GetWindowRect(h: isize, r: *mut core::ffi::c_void) -> i32;
+    }
+
     pub const EVENT_MODIFY_STATE: u32 = 0x0002;
+    const SW_HIDE: i32 = 0;
+    const SW_SHOW: i32 = 5;
+
+    /// The real HWND, handed over by eframe at creation. Everything else was
+    /// guesswork: FindWindowW on the title never located it, and walking this
+    /// process's windows did not either -- and both failed SILENTLY, which
+    /// turned into a retry loop burning a core.
+    pub static HWND: AtomicIsize = AtomicIsize::new(0);
+
+    pub fn hwnd() -> isize {
+        HWND.load(Ordering::Relaxed)
+    }
+
+    pub fn is_visible() -> bool {
+        let h = hwnd();
+        h != 0 && unsafe { IsWindowVisible(h) != 0 }
+    }
+
+    /// Show centred on the primary monitor and take focus.
+    ///
+    /// SetForegroundWindow alone is not enough: Windows refuses it for a process
+    /// that does not own the foreground, and the box would appear without the
+    /// caret, so typing went to whatever was behind it. Attaching to the current
+    /// foreground thread first is what makes the grant legal.
+    pub fn show(width: f32, height: f32) {
+        let h = hwnd();
+        if h == 0 {
+            return;
+        }
+        unsafe {
+            let sw = GetSystemMetrics(0) as f32;
+            let x = ((sw - width) / 2.0) as i32;
+            const SWP_NOZORDER: u32 = 0x0004;
+            SetWindowPos(h, 0, x, 220, width as i32, height as i32, SWP_NOZORDER);
+            ShowWindow(h, SW_SHOW);
+
+            let fg = GetForegroundWindow();
+            let mut other_pid = 0u32;
+            let other = GetWindowThreadProcessId(fg, &mut other_pid);
+            let me = GetCurrentThreadId();
+            if other != 0 && other != me {
+                AttachThreadInput(other, me, 1);
+                SetForegroundWindow(h);
+                AttachThreadInput(other, me, 0);
+            } else {
+                SetForegroundWindow(h);
+            }
+        }
+    }
+
+    /// "Hidden" means parked off-screen, NOT ShowWindow(SW_HIDE).
+    ///
+    /// Hiding it outright cost a full core: with no visible surface there is
+    /// nothing for SwapBuffers to sync to, so the GL loop free-runs. Measured --
+    /// one winit thread Running continuously while update() ran once in twelve
+    /// seconds, so the spin was below our code entirely. glaze-bar, same stack,
+    /// idles at 0.15% because its window is always visible and vsync paces it.
+    ///
+    /// Off-screen keeps the window real and paced, and the user cannot see it.
+    pub fn hide() {
+        let h = hwnd();
+        if h == 0 {
+            return;
+        }
+        unsafe {
+            const SWP_NOZORDER: u32 = 0x0004;
+            const SWP_NOACTIVATE: u32 = 0x0010;
+            const SWP_NOSIZE: u32 = 0x0001;
+            SetWindowPos(h, 0, -30000, -30000, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+        }
+    }
+
+    /// Off-screen windows still receive frames, so the waiter thread only has to
+    /// nudge egui -- no ShowWindow needed. Kept as a named no-op so the call
+    /// site keeps reading as "wake the loop".
+    pub fn wake() {}
+
+    /// Is the window somewhere the user can actually see?
+    pub fn on_screen() -> bool {
+        let h = hwnd();
+        if h == 0 {
+            return false;
+        }
+        let mut r = [0i32; 4];
+        unsafe { GetWindowRect(h, r.as_mut_ptr() as *mut _) };
+        r[0] > -10000
+    }
 
     pub fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -69,15 +172,16 @@ struct App {
     hits: Vec<(usize, u32)>,
     selected: usize,
     visible: bool,
-    show_event: isize,
-    /// Set the frame after becoming visible, so focus lands in the box without
-    /// being stolen back every frame afterwards.
-    focus_next: bool,
-    idle_frames: u32,
+    /// Set by the waiter thread when the hotkey fires.
+    pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// When it last opened, for the focus grace period.
+    opened_at: Option<std::time::Instant>,
+    idle: u32,
+    started: bool,
 }
 
 impl App {
-    fn new(entries: Vec<Entry>, show_event: isize) -> Self {
+    fn new(entries: Vec<Entry>, pending: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
         let mut s = Self {
             entries,
             matcher: Matcher::new(Config::DEFAULT),
@@ -85,9 +189,10 @@ impl App {
             hits: Vec::new(),
             selected: 0,
             visible: false,
-            show_event,
-            focus_next: false,
-            idle_frames: 0,
+            pending,
+            opened_at: None,
+            idle: 0,
+            started: false,
         };
         s.refilter();
         s
@@ -127,26 +232,44 @@ impl App {
     }
 
     fn launch(&mut self, elevated: bool) {
-        let Some(&(i, _)) = self.hits.get(self.selected) else { return };
-        match &self.entries[i].action {
-            Action::Shortcut(p) => open_via_shell(&p.to_string_lossy(), elevated),
-            // A packaged app goes through the shell by AUMID; there is no exe to
-            // run. It also cannot be elevated -- Windows has no way to launch a
-            // packaged app as administrator -- so the flag is ignored here
-            // rather than silently starting it unelevated as if it had worked.
-            Action::Aumid(id) => open_via_shell(&format!("shell:AppsFolder\\{id}"), false),
+        if let Some(&(i, _)) = self.hits.get(self.selected) {
+            match &self.entries[i].action {
+                Action::Shortcut(p) => open_via_shell(&p.to_string_lossy(), elevated),
+                // A packaged app cannot be elevated -- Windows has no mechanism
+                // for it -- so the flag is ignored rather than quietly starting
+                // it unelevated as though it had worked.
+                Action::Aumid(id) => open_via_shell(&format!("shell:AppsFolder\\{id}"), false),
+            }
         }
-        self.hide();
+        self.close();
     }
 
-    fn hide(&mut self) {
-        self.visible = false;
+    fn open(&mut self, ctx: &egui::Context) {
+        // Always a blank box. Reopening onto the last query is never what you
+        // want: you press the hotkey to search for something new.
         self.query.clear();
         self.refilter();
+        self.visible = true;
+        self.opened_at = Some(std::time::Instant::now());
+        let rows = self.hits.len().max(1) as f32;
+        #[cfg(windows)]
+        win::show(WIDTH, INPUT_H + rows * ROW_H + 16.0);
+        ctx.request_repaint();
+    }
+
+    fn close(&mut self) {
+        self.visible = false;
+        // Discard what was typed here rather than in open(), so nothing is left
+        // sitting in memory while hidden.
+        self.query.clear();
+        self.refilter();
+        #[cfg(windows)]
+        {
+            win::hide();
+        }
     }
 }
 
-/// Width and height of the primary monitor.
 fn primary_size() -> (f32, f32) {
     #[cfg(windows)]
     unsafe {
@@ -202,44 +325,60 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _f: &mut eframe::Frame) {
-        // The hotkey sets a named event rather than synthesising input. On this
-        // machine synthetic Win presses desynchronise AltSnap and it starts
-        // eating the spacebar, so nothing here may depend on sending keys.
-        #[cfg(windows)]
-        if !self.visible && unsafe { win::WaitForSingleObject(self.show_event, 0) } == 0 {
-            self.visible = true;
-            self.focus_next = true;
-            // Position it explicitly: with none set, Windows put it on whichever
-            // monitor it liked -- it opened off on the second screen.
-            let (mw, _mh) = primary_size();
-            let rows = self.hits.len().max(1) as f32;
-            let h = INPUT_H + rows * ROW_H + 16.0;
-            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
-                (mw - WIDTH) / 2.0,
-                220.0,
-            )));
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(WIDTH, h)));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        // Hide here rather than at creation: eframe presents a frame after the
+        // window is built, and that present is what makes it visible, so a hide
+        // in the constructor is undone immediately.
+
+        // One signal = one toggle. The hotkey sets a named event; a thread
+        // blocked on it flips this and wakes us. Nothing polls, and nothing
+        // synthesises keystrokes -- synthetic Win presses desynchronise AltSnap
+        // on this machine and it starts swallowing the spacebar.
+        if self.pending.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            if self.visible {
+                self.close();
+            } else {
+                self.open(ctx);
+            }
         }
 
         if !self.visible {
-            // Hand the working set back while hidden. An egui/glow process sits
-            // near 150 MB otherwise -- the bar reads as 7 MB for exactly this
-            // reason. This is hidden almost all the time, so the pages cost
-            // nothing to fault back in on the rare open.
-            self.idle_frames = self.idle_frames.wrapping_add(1);
-            if self.idle_frames % 200 == 0 {
+            self.idle = self.idle.wrapping_add(1);
+            if self.idle % 40 == 0 {
                 rice_common::win::trim_ram();
             }
-            // Often enough that opening feels instant, rarely enough to be free.
-            ctx.request_repaint_after(std::time::Duration::from_millis(60));
+            // Self-correcting rather than a one-shot hide at startup: eframe
+            // presents a frame after building the window, and that present is
+            // what puts it on screen -- after any hide we do in the first
+            // update. Parking it whenever it is on screen while we consider
+            // ourselves closed settles it without guessing at frame counts.
+            #[cfg(windows)]
+            if win::on_screen() {
+                win::hide();
+            }
+            // Explicitly ask for nothing for a long time. Returning with NO
+            // repaint request at all leaves eframe's control flow on Poll, and
+            // winit then spins its event loop -- measured, one thread Running
+            // with a full core burned while the window was hidden and update()
+            // ran once in twelve seconds. A far-future wake puts it on Wait.
+            ctx.request_repaint_after(std::time::Duration::from_secs(3600));
+            return;
+        }
+
+        // Closing on focus loss is what makes it feel like a launcher rather
+        // than a window. The grace period matters: focus does not arrive on the
+        // frame the window appears, so checking immediately closed it before it
+        // was ever seen.
+        let settled = self
+            .opened_at
+            .map(|t| t.elapsed() > std::time::Duration::from_millis(250))
+            .unwrap_or(true);
+        if settled && !ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
+            self.close();
             return;
         }
 
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.hide();
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.close();
             return;
         }
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
@@ -249,16 +388,10 @@ impl eframe::App for App {
             self.selected = self.selected.saturating_sub(1);
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-            // Ctrl+Enter elevates, which is the convention everywhere else.
-            let ctrl = ctx.input(|i| i.modifiers.ctrl);
-            self.launch(ctrl);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            let admin = ctx.input(|i| i.modifiers.ctrl);
+            self.launch(admin);
             return;
         }
-
-        let rows = self.hits.len().max(1);
-        let want_h = INPUT_H + rows as f32 * ROW_H + 16.0;
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(WIDTH, want_h)));
 
         egui::CentralPanel::default()
             .frame(
@@ -272,11 +405,12 @@ impl eframe::App for App {
                     .desired_width(f32::INFINITY)
                     .frame(false)
                     .font(egui::FontId::proportional(20.0))
-                    .hint_text("buscar...");
+                    .hint_text("buscar aplicaciones...");
                 let r = ui.add(te);
-                if self.focus_next {
+                // Keep the caret until focus has actually settled, or the first
+                // characters typed go nowhere.
+                if !settled {
                     r.request_focus();
-                    self.focus_next = false;
                 }
                 if r.changed() {
                     self.refilter();
@@ -291,12 +425,7 @@ impl eframe::App for App {
                         ui.painter().rect_filled(
                             rect,
                             egui::Rounding::same(8.0),
-                            egui::Color32::from_rgba_unmultiplied(
-                                accent.r(),
-                                accent.g(),
-                                accent.b(),
-                                40,
-                            ),
+                            egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 40),
                         );
                     }
                     ui.painter().text(
@@ -306,7 +435,7 @@ impl eframe::App for App {
                         egui::FontId::proportional(15.0),
                         if row == self.selected { col(theme::TEXT) } else { col(theme::SUBTEXT) },
                     );
-                    if row == self.selected && matches!(e.action, Action::Shortcut(_)) {
+                    if row == self.selected {
                         ui.painter().text(
                             egui::pos2(rect.right() - 10.0, rect.center().y),
                             egui::Align2::RIGHT_CENTER,
@@ -315,19 +444,14 @@ impl eframe::App for App {
                             col(theme::SUBTEXT),
                         );
                     }
-                    if matches!(e.action, Action::Aumid(_)) {
-                        ui.painter().text(
-                            egui::pos2(rect.right() - 10.0, rect.center().y),
-                            egui::Align2::RIGHT_CENTER,
-                            "store",
-                            egui::FontId::proportional(11.0),
-                            col(theme::SUBTEXT),
-                        );
-                    }
                 }
             });
 
-        ctx.request_repaint();
+        // Only repaint while open, and only while focus is still settling or
+        // something is animating -- an idle open window does not need frames.
+        if !settled {
+            ctx.request_repaint();
+        }
     }
 }
 
@@ -336,7 +460,7 @@ fn main() -> eframe::Result<()> {
     #[cfg(windows)]
     if args.iter().any(|a| a == "--show") {
         // Signal the resident instance and exit. If there is none, fall through
-        // and become it, so the very first hotkey press still opens something.
+        // and become it, so the first hotkey press still opens something.
         if signal_show() {
             return Ok(());
         }
@@ -346,15 +470,16 @@ fn main() -> eframe::Result<()> {
     #[cfg(windows)]
     let show_event = unsafe {
         let name = win::wide(SHOW_EVENT);
-        // Auto-reset: the wait consumes it, so one signal is exactly one open.
+        // Auto-reset: the wait consumes it, so one signal is exactly one toggle.
         win::CreateEventW(0, 0, 0, name.as_ptr())
     };
     #[cfg(not(windows))]
     let show_event = 0isize;
 
-    // Index before the window exists. It takes about a second for 519 entries
-    // here, and doing it lazily would mean the first open shows an empty list.
+    // Index before the window exists: about a second for 500-odd entries here,
+    // and doing it lazily would mean the first open shows an empty list.
     let entries = index::build();
+    let pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -373,7 +498,37 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| {
             rice_common::ui::load_nerd_font(&cc.egui_ctx);
-            Ok(Box::new(App::new(entries, show_event)))
+            #[cfg(windows)]
+            {
+                // The HWND, straight from eframe. Guessing at it cost most of a
+                // debugging session: by title and by process walk, both silent
+                // failures that became retry loops.
+                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                if let Ok(h) = cc.window_handle() {
+                    if let RawWindowHandle::Win32(w) = h.as_raw() {
+                        win::HWND.store(
+                            isize::from(w.hwnd),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
+                }
+                let p = pending.clone();
+                let ctx = cc.egui_ctx.clone();
+                std::thread::spawn(move || loop {
+                    // INFINITE: this thread costs nothing until the hotkey fires.
+                    let r = unsafe { win::WaitForSingleObject(show_event, u32::MAX) };
+                    if r != 0 {
+                        // A bad handle would return instantly forever; sleeping
+                        // keeps that from becoming a spin loop.
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        continue;
+                    }
+                    p.store(true, std::sync::atomic::Ordering::Relaxed);
+                    win::wake();
+                    ctx.request_repaint();
+                });
+            }
+            Ok(Box::new(App::new(entries, pending)))
         }),
     )
 }
