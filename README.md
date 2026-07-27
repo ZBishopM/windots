@@ -227,14 +227,25 @@ resto.
   (mata AltSnap, que el supervisor relanza, y recarga AHK). Regla para el futuro:
   **no inyectar Win sintético para probar atajos** — usar IPC o la CLI.
 
-- **`windeco` deja retazos**: se probó lanzándolo desde el supervisor y hubo que
-  retirarlo el mismo día. Quitar `WS_CAPTION`/`WS_THICKFRAME` cambia el área
-  cliente, y las apps que pintan su propio marco no se enteran: WezTerm
-  (`window_decorations = 'RESIZE'`) y Firefox siguieron dibujando con el offset
-  viejo y dejaron trozos de su barra de pestañas por la pantalla. Son justo las
-  apps a las que no puede ayudar. El crate sigue en el árbol pero **no lo lanza
-  nadie**. Si se retoma, hace falta forzar un `WM_SIZE` real en cada ventana
-  tocada (redimensionar un píxel y devolverla); `wm-redraw` de GlazeWM no basta.
+- **`windeco` deja retazos y su restauración no es fiable**: se probó lanzándolo
+  desde el supervisor y hubo que retirarlo el mismo día. Quitar
+  `WS_CAPTION`/`WS_THICKFRAME` cambia el área cliente, y las apps que pintan su
+  propio marco no se enteran: WezTerm (`window_decorations = 'RESIZE'`) y Firefox
+  siguieron dibujando con el offset viejo y dejaron trozos de su barra de
+  pestañas por la pantalla. El crate sigue en el árbol pero **no lo lanza nadie**.
+
+  Peor: `--restore` **dejó a Vesktop sin marco durante horas**. El motivo fue un
+  diagnóstico equivocado — di por hecho que "las apps Electron no tienen
+  `WS_CAPTION`" y por eso no la conté como alterada. **Es falso**: medido, Discord
+  (`0x14C70000`) y Legcord (`0x14C70000`) sí lo llevan, y Vesktop se había quedado
+  en `0x160B0000`, sin `CAPTION` ni `THICKFRAME`, o sea sin botones de ventana.
+  La forma correcta de comprobarlo es **comparar contra otra app de la misma
+  familia**, no razonar sobre qué "suelen" hacer.
+
+  Si se retoma: los estilos de ventana **no persisten**, así que reiniciar la app
+  siempre los devuelve. En caliente hay que volver a poner los bits y forzar un
+  `WM_SIZE` real (redimensionar un píxel y devolverla); `wm-redraw` de GlazeWM no
+  basta.
 - **Exportar clips en AV1** para compartirlos más pequeños.
 - **Pomatez** (pomodoro en Electron) → temporizador en la isla.
 - **Click-through con LoL en borderless**: NO resuelto. El mecanismo funciona y
