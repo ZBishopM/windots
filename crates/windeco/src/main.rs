@@ -1,5 +1,7 @@
-// Background daemon: no console.
-#![windows_subsystem = "windows"]
+// Background daemon, but --list has to be able to print. Attaching to the
+// parent's console when there is one keeps both: no window when the supervisor
+// starts it, real output when a person runs it.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 //! Strips window decorations, and optionally refuses to let windows minimise.
 //!
@@ -50,6 +52,7 @@ extern "system" {
     fn IsWindow(h: isize) -> i32;
     fn GetWindowRect(h: isize, r: *mut Rect) -> i32;
     fn GetClassNameW(h: isize, buf: *mut u16, n: i32) -> i32;
+    fn GetWindowTextW(h: isize, buf: *mut u16, n: i32) -> i32;
     fn GetWindowThreadProcessId(h: isize, pid: *mut u32) -> u32;
     fn EnumWindows(cb: extern "system" fn(isize, isize) -> i32, l: isize) -> i32;
     fn ShowWindow(h: isize, cmd: i32) -> i32;
@@ -148,8 +151,11 @@ fn skip(h: isize) -> bool {
     )
 }
 
+/// Strip the frame. `no_minimize` additionally fights windows that minimise
+/// themselves; the buttons are removed either way, because a bar with no
+/// caption still leaves a system menu on Alt+Space otherwise.
 fn undecorate(h: isize, no_minimize: bool) {
-    if skip(h) {
+    if skip(h) || !allowed(h) {
         return;
     }
     unsafe {
@@ -163,18 +169,70 @@ fn undecorate(h: isize, no_minimize: bool) {
             let map = g.get_or_insert_with(HashMap::new);
             map.entry(h).or_insert(cur);
         }
-        let mut next = cur & !(WS_CAPTION | WS_THICKFRAME);
+        let mut next = cur & !(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
         if no_minimize {
-            next &= !(WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU);
+            next &= !WS_SYSMENU;
         }
         SetWindowLongPtrW(h, GWL_STYLE, next);
-        // SWP_FRAMECHANGED is required: without it Windows keeps drawing the old
-        // non-client area until something else forces a recalculation.
-        SetWindowPos(h, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE);
+        relayout(h);
     }
 }
 
+/// Make the window recalculate its frame AND its contents.
+///
+/// SWP_FRAMECHANGED alone is not enough, and that is what made the first attempt
+/// at this leave debris all over the screen. It tells Windows to recompute the
+/// non-client area, but an application that draws its own chrome inside the
+/// client area -- WezTerm with `window_decorations = 'RESIZE'`, Firefox, every
+/// Electron app -- never finds out its client rect moved, so it keeps rendering
+/// at the old offset and its old tab bar stays painted where it was. GlazeWM's
+/// wm-redraw does not fix it either; it was tried.
+///
+/// A real size change does, because it delivers WM_SIZE and the app relayouts.
+/// One pixel down and back is invisible and costs a single extra frame.
+unsafe fn relayout(h: isize) {
+    const SWP: u32 = SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE;
+    let mut r = Rect::default();
+    if GetWindowRect(h, &mut r) == 0 {
+        SetWindowPos(h, 0, 0, 0, 0, 0, SWP | SWP_NOSIZE);
+        return;
+    }
+    let (w, ht) = (r.right - r.left, r.bottom - r.top);
+    SetWindowPos(h, 0, 0, 0, w, ht - 1, SWP);
+    SetWindowPos(h, 0, 0, 0, w, ht, SWP);
+}
+
 static NO_MINIMIZE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `--only <substring>`: act on matching executables only. This tool's failure
+/// mode is mangling an application someone is using, so being able to try it on
+/// one first is worth the flag.
+static ONLY: Mutex<Option<String>> = Mutex::new(None);
+
+fn allowed(h: isize) -> bool {
+    match ONLY.lock().unwrap().as_deref() {
+        Some(pat) => proc_of(h).contains(pat),
+        None => true,
+    }
+}
+
+extern "system" fn list_cb(h: isize, _l: isize) -> i32 {
+    if !skip(h) {
+        let cur = unsafe { GetWindowLongPtrW(h, GWL_STYLE) };
+        let bare = cur & (WS_CAPTION | WS_THICKFRAME) == 0;
+        let mut buf = [0u16; 120];
+        let n = unsafe { GetWindowTextW(h, buf.as_mut_ptr(), buf.len() as i32) };
+        let title = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+        println!(
+            "{:<10} {:<22} 0x{:08X}  {}",
+            if bare { "already" } else { "STRIP" },
+            proc_of(h),
+            cur,
+            title
+        );
+    }
+    1
+}
 
 extern "system" fn enum_cb(h: isize, _l: isize) -> i32 {
     undecorate(h, NO_MINIMIZE.load(std::sync::atomic::Ordering::Relaxed));
@@ -228,7 +286,7 @@ fn restore() {
         }
         unsafe {
             SetWindowLongPtrW(h, GWL_STYLE, s);
-            SetWindowPos(h, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE);
+            relayout(h);
         }
     }
     let _ = std::fs::remove_file(state_path());
@@ -237,12 +295,32 @@ fn restore() {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let has = |f: &str| args.iter().any(|a| a == f);
+    #[cfg(windows)]
+    unsafe {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn AttachConsole(pid: u32) -> i32;
+        }
+        AttachConsole(u32::MAX); // ATTACH_PARENT_PROCESS; fails harmlessly if none
+    }
 
     if has("--restore") {
         restore();
         return;
     }
+    // --list changes nothing: it names every window that WOULD be stripped, and
+    // the ones already bare. Worth having, because the failure mode of this tool
+    // is "it silently mangled an application you were using".
+    if has("--list") {
+        unsafe { EnumWindows(list_cb, 0) };
+        return;
+    }
     NO_MINIMIZE.store(has("--no-minimize"), std::sync::atomic::Ordering::Relaxed);
+    if let Some(i) = args.iter().position(|a| a == "--only") {
+        if let Some(v) = args.get(i + 1) {
+            *ONLY.lock().unwrap() = Some(v.to_lowercase());
+        }
+    }
 
     // First pass over what is already open.
     unsafe { EnumWindows(enum_cb, 0) };
