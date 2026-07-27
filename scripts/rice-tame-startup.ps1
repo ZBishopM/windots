@@ -36,6 +36,19 @@ $tasks = @(
 $services = @(
     @{ Name = 'OVRService'; Why = 'Oculus / Meta Horizon Link - ~286 MB entre sus 3 procesos' }
     @{ Name = 'MySQL80';    Why = 'MySQL - ~427 MB, arrancalo cuando desarrolles' }
+
+    # Servicios de actualizacion que arrancan con Windows y no hacen nada mas.
+    # Cada aplicacion sigue pudiendo buscar actualizaciones cuando la abres; lo
+    # que se quita es que un demonio residente lo haga por su cuenta.
+    @{ Name = 'EaseUS UPDATE SERVICE';                   Why = 'actualizador de EaseUS' }
+    @{ Name = 'Flixmate.UpdateService';                  Why = 'actualizador de Flixmate' }
+    @{ Name = 'LGHUBUpdaterService';                     Why = 'actualizador de LG Hub' }
+    @{ Name = 'GoogleUpdaterService152.0.7933.0';        Why = 'actualizador de Google' }
+    @{ Name = 'GoogleUpdaterInternalService152.0.7933.0'; Why = 'actualizador de Google (interno)' }
+    @{ Name = 'gupdate';                                 Why = 'Google Update (heredado)' }
+    @{ Name = 'edgeupdate';                              Why = 'actualizador de Edge' }
+    @{ Name = 'Bonjour Service';                         Why = 'descubrimiento de red de Apple' }
+    @{ Name = 'CodeMeter.exe';                           Why = 'licencias Wibu - OJO si usas software CAD/DAW que lo pida' }
 )
 
 Write-Host "=== tareas ==="
