@@ -9,7 +9,8 @@
   "clickthrough_apps": ["league of legends", "valorant"],
 
   "launcher": {
-    "index_store_apps": false
+    "index_store_apps": false,
+    "index_files": true
   },
 
   "animation": {

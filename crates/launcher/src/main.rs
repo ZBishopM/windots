@@ -14,6 +14,7 @@
 //!   launcher            run the resident instance
 //!   launcher --show     tell the resident instance to open (what the hotkey does)
 
+mod files;
 mod index;
 
 use eframe::egui;
@@ -106,6 +107,25 @@ mod win {
         }
     }
 
+    /// Resize in place: same position, same z-order, same focus.
+    ///
+    /// File results land after the box is already open and being typed into, so
+    /// it has to grow. Going through `show()` for that would re-centre it and
+    /// re-take the foreground on every batch.
+    pub fn resize(width: f32, height: f32) {
+        let h = hwnd();
+        if h == 0 {
+            return;
+        }
+        unsafe {
+            const SWP_NOMOVE: u32 = 0x0002;
+            const SWP_NOZORDER: u32 = 0x0004;
+            const SWP_NOACTIVATE: u32 = 0x0010;
+            SetWindowPos(h, 0, 0, 0, width as i32, height as i32,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+
     /// "Hidden" means parked off-screen, NOT ShowWindow(SW_HIDE).
     ///
     /// Hiding it outright cost a full core: with no visible surface there is
@@ -165,6 +185,13 @@ fn signal_show() -> bool {
     }
 }
 
+/// How many application rows to leave room for once files are also showing.
+///
+/// Applications go first because they are what the box is for most of the time,
+/// but letting a query like "s" fill all nine rows with applications would hide
+/// the file results entirely.
+const APP_ROWS: usize = 4;
+
 struct App {
     entries: Vec<Entry>,
     matcher: Matcher,
@@ -178,10 +205,25 @@ struct App {
     opened_at: Option<std::time::Instant>,
     idle: u32,
     started: bool,
+    /// `None` when `launcher.index_files` is off, in which case nothing is
+    /// walked and nothing is held in memory.
+    files: Option<files::FileIndex>,
+    file_hits: Vec<files::FileHit>,
+    /// Rows the window was last sized for. File results arrive after the window
+    /// is already open, so it has to grow to fit them.
+    sized_rows: usize,
 }
 
 impl App {
-    fn new(entries: Vec<Entry>, pending: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+    fn new(
+        entries: Vec<Entry>,
+        pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        ctx: &egui::Context,
+    ) -> Self {
+        let files = rice_common::settings::Settings::live().launcher.index_files.then(|| {
+            let ctx = ctx.clone();
+            files::FileIndex::new(std::sync::Arc::new(move || ctx.request_repaint()))
+        });
         let mut s = Self {
             entries,
             matcher: Matcher::new(Config::DEFAULT),
@@ -193,9 +235,27 @@ impl App {
             opened_at: None,
             idle: 0,
             started: false,
+            files,
+            file_hits: Vec::new(),
+            sized_rows: 0,
         };
         s.refilter();
         s
+    }
+
+    /// Application rows on screen.
+    fn app_shown(&self) -> usize {
+        let cap = if self.file_hits.is_empty() { MAX_ROWS } else { APP_ROWS };
+        self.hits.len().min(cap)
+    }
+
+    /// File rows on screen: whatever the applications left over.
+    fn file_shown(&self) -> usize {
+        self.file_hits.len().min(MAX_ROWS - self.app_shown())
+    }
+
+    fn rows(&self) -> usize {
+        self.app_shown() + self.file_shown()
     }
 
     fn refilter(&mut self) {
@@ -231,15 +291,36 @@ impl App {
         self.hits = scored;
     }
 
+    /// Everything that has to happen when the typed text changes.
+    ///
+    /// The file search is fired and forgotten: it runs on its own thread and
+    /// asks for a repaint when it has an answer. Waiting for it here would mean
+    /// dropping a frame on every keystroke, since a full sweep of two million
+    /// entries is tens of milliseconds.
+    fn on_query_changed(&mut self) {
+        self.refilter();
+        if let Some(f) = &self.files {
+            f.search(&self.query, MAX_ROWS);
+        }
+        self.file_hits.clear();
+    }
+
     fn launch(&mut self, elevated: bool) {
-        if let Some(&(i, _)) = self.hits.get(self.selected) {
-            match &self.entries[i].action {
-                Action::Shortcut(p) => open_via_shell(&p.to_string_lossy(), elevated),
-                // A packaged app cannot be elevated -- Windows has no mechanism
-                // for it -- so the flag is ignored rather than quietly starting
-                // it unelevated as though it had worked.
-                Action::Aumid(id) => open_via_shell(&format!("shell:AppsFolder\\{id}"), false),
+        let apps = self.app_shown();
+        if self.selected < apps {
+            if let Some(&(i, _)) = self.hits.get(self.selected) {
+                match &self.entries[i].action {
+                    Action::Shortcut(p) => open_via_shell(&p.to_string_lossy(), elevated),
+                    // A packaged app cannot be elevated -- Windows has no
+                    // mechanism for it -- so the flag is ignored rather than
+                    // quietly starting it unelevated as though it had worked.
+                    Action::Aumid(id) => open_via_shell(&format!("shell:AppsFolder\\{id}"), false),
+                }
             }
+        } else if let Some(h) = self.file_hits.get(self.selected - apps) {
+            // A folder opens in Explorer and a file in whatever owns it, which
+            // is the same call: the shell decides from the target.
+            open_via_shell(&h.path, elevated);
         }
         self.close();
     }
@@ -248,12 +329,12 @@ impl App {
         // Always a blank box. Reopening onto the last query is never what you
         // want: you press the hotkey to search for something new.
         self.query.clear();
-        self.refilter();
+        self.on_query_changed();
         self.visible = true;
         self.opened_at = Some(std::time::Instant::now());
-        let rows = self.hits.len().max(1) as f32;
+        self.sized_rows = self.rows().max(1);
         #[cfg(windows)]
-        win::show(WIDTH, INPUT_H + rows * ROW_H + 16.0);
+        win::show(WIDTH, Self::height_for(self.sized_rows));
         ctx.request_repaint();
     }
 
@@ -262,11 +343,31 @@ impl App {
         // Discard what was typed here rather than in open(), so nothing is left
         // sitting in memory while hidden.
         self.query.clear();
-        self.refilter();
+        self.on_query_changed();
         #[cfg(windows)]
         {
             win::hide();
         }
+    }
+
+    fn height_for(rows: usize) -> f32 {
+        INPUT_H + rows.max(1) as f32 * ROW_H + 16.0
+    }
+
+    /// Fit the window to the rows it currently has, without touching where it is
+    /// or who has focus.
+    ///
+    /// Growing must NOT go through `show()`: that re-centres and re-takes the
+    /// foreground, so every batch of file results arriving would yank focus
+    /// again mid-typing.
+    fn refit(&mut self) {
+        let rows = self.rows().max(1);
+        if rows == self.sized_rows {
+            return;
+        }
+        self.sized_rows = rows;
+        #[cfg(windows)]
+        win::resize(WIDTH, Self::height_for(rows));
     }
 }
 
@@ -377,12 +478,21 @@ impl eframe::App for App {
             return;
         }
 
+        // The file search publishes from its own thread and asks for a repaint;
+        // this is where those results are picked up. Cheap: at most nine rows.
+        if let Some(f) = &self.files {
+            if !self.query.trim().is_empty() {
+                self.file_hits = f.results();
+            }
+        }
+        self.refit();
+
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.close();
             return;
         }
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-            self.selected = (self.selected + 1).min(self.hits.len().saturating_sub(1));
+            self.selected = (self.selected + 1).min(self.rows().saturating_sub(1));
         }
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
             self.selected = self.selected.saturating_sub(1);
@@ -413,37 +523,71 @@ impl eframe::App for App {
                     r.request_focus();
                 }
                 if r.changed() {
-                    self.refilter();
+                    self.on_query_changed();
                 }
                 ui.add_space(6.0);
 
                 let accent = col(theme::ACCENT);
-                for (row, &(i, _)) in self.hits.iter().enumerate() {
-                    let e = &self.entries[i];
+                let apps = self.app_shown();
+                let files_n = self.file_shown();
+
+                // One closure for both kinds of row so the highlight, the
+                // padding and the trailing hint cannot drift apart -- two copies
+                // of this in an earlier screen is exactly how the island's close
+                // logic ended up resetting three of seven flags.
+                let mut row = |ui: &mut egui::Ui, n: usize, name: &str, trail: &str, dim: bool| {
                     let rect = ui.allocate_space(egui::vec2(ui.available_width(), ROW_H - 4.0)).1;
-                    if row == self.selected {
+                    let on = n == self.selected;
+                    if on {
                         ui.painter().rect_filled(
                             rect,
                             egui::Rounding::same(8.0),
-                            egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 40),
+                            egui::Color32::from_rgba_unmultiplied(
+                                accent.r(), accent.g(), accent.b(), 40,
+                            ),
                         );
                     }
-                    ui.painter().text(
-                        egui::pos2(rect.left() + 10.0, rect.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        &e.name,
-                        egui::FontId::proportional(15.0),
-                        if row == self.selected { col(theme::TEXT) } else { col(theme::SUBTEXT) },
-                    );
-                    if row == self.selected {
+                    let name_col = if on {
+                        col(theme::TEXT)
+                    } else if dim {
+                        col(theme::SUBTEXT)
+                    } else {
+                        col(theme::TEXT)
+                    };
+                    let w = ui
+                        .painter()
+                        .text(
+                            egui::pos2(rect.left() + 10.0, rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            name,
+                            egui::FontId::proportional(15.0),
+                            name_col,
+                        )
+                        .width();
+                    if !trail.is_empty() {
+                        // The folder goes after the name, greyed. It is what
+                        // tells four files called main.rs apart, so it is not
+                        // decoration -- but it must never outshout the name.
                         ui.painter().text(
-                            egui::pos2(rect.right() - 10.0, rect.center().y),
-                            egui::Align2::RIGHT_CENTER,
-                            "ctrl+enter = admin",
-                            egui::FontId::proportional(11.0),
+                            egui::pos2(rect.left() + 20.0 + w, rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            trail,
+                            egui::FontId::proportional(12.0),
                             col(theme::SUBTEXT),
                         );
                     }
+                };
+
+                for (n, &(i, _)) in self.hits.iter().take(apps).enumerate() {
+                    let e = &self.entries[i];
+                    row(ui, n, &e.name, "", false);
+                }
+                for (k, h) in self.file_hits.iter().take(files_n).enumerate() {
+                    // The name is already the tail of the path; showing the
+                    // folder alone keeps the row from repeating itself.
+                    let folder = h.path.strip_suffix(&h.name).unwrap_or(&h.path);
+                    let folder = folder.trim_end_matches('\\');
+                    row(ui, apps + k, &h.name, folder, true);
                 }
             });
 
@@ -455,8 +599,97 @@ impl eframe::App for App {
     }
 }
 
+/// `--bench-index`: walk, then write timings to a file and exit.
+///
+/// A file rather than stdout because this is a `windows_subsystem = "windows"`
+/// binary -- it has no console to print to, and giving it one just for a
+/// measurement would change what is being measured.
+fn bench_index(out: &str) {
+    let t0 = std::time::Instant::now();
+    let idx = files::FileIndex::start_now(std::sync::Arc::new(|| {}));
+    let mut last = 0usize;
+    let mut log = String::new();
+    while idx.scanning() {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let n = idx.len();
+        log.push_str(&format!(
+            "{:6.2}s  {:>9} entradas  (+{})\n",
+            t0.elapsed().as_secs_f32(),
+            n,
+            n - last
+        ));
+        last = n;
+    }
+    log.push_str(&format!(
+        "\nrecorrido completo: {:.2}s, {} entradas\n",
+        t0.elapsed().as_secs_f32(),
+        idx.len()
+    ));
+
+    // Dos vueltas: la primera con las cachés frías, la segunda es lo que siente
+    // el usuario al teclear la segunda letra.
+    for q in ["s", "sy", "main.rs", "mnrs", "rice.json", "glazewm.exe", "carpeta"] {
+        let mut best = f32::MAX;
+        let mut hits = Vec::new();
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            idx.search(q, 9);
+            // La búsqueda va en su propio hilo; aquí se espera a que publique
+            // los de ESTA consulta. Esperar a "hay algo" devolvía los de la
+            // anterior al instante y daba 0.0 ms en todas.
+            while !idx.settled() && t.elapsed().as_millis() < 5000 {
+                std::thread::yield_now();
+            }
+            hits = idx.results();
+            best = best.min(t.elapsed().as_secs_f32() * 1000.0);
+        }
+        log.push_str(&format!("\nbuscar {q:?}: {best:.1} ms, {} mostrados\n", hits.len()));
+        for h in hits.iter().take(4) {
+            log.push_str(&format!("    {}\n", h.path));
+        }
+    }
+    log.push_str(&format!("\nRSS: {} MB\n", rss_mb()));
+    let _ = std::fs::write(out, log);
+}
+
+fn rss_mb() -> u64 {
+    #[cfg(windows)]
+    unsafe {
+        #[link(name = "psapi")]
+        extern "system" {
+            fn GetProcessMemoryInfo(p: isize, c: *mut u8, cb: u32) -> i32;
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentProcess() -> isize;
+        }
+        // PROCESS_MEMORY_COUNTERS: cb, PageFaultCount, then five SIZE_T of which
+        // WorkingSetSize is the second.
+        let mut buf = [0u8; 80];
+        if GetProcessMemoryInfo(GetCurrentProcess(), buf.as_mut_ptr(), 80) != 0 {
+            let ws = usize::from_ne_bytes(buf[16..24].try_into().unwrap());
+            return (ws / 1024 / 1024) as u64;
+        }
+        0
+    }
+    #[cfg(not(windows))]
+    0
+}
+
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--bench-floor") {
+        let (n, s) = files::bench_floor();
+        let _ = std::fs::write(
+            args.get(i + 1).map(|s| s.as_str()).unwrap_or("floor.txt"),
+            format!("suelo del recorrido: {n} entradas en {s:.2}s\nRSS: {} MB\n", rss_mb()),
+        );
+        return Ok(());
+    }
+    if let Some(i) = args.iter().position(|a| a == "--bench-index") {
+        bench_index(args.get(i + 1).map(|s| s.as_str()).unwrap_or("bench.txt"));
+        return Ok(());
+    }
     #[cfg(windows)]
     if args.iter().any(|a| a == "--show") {
         // Signal the resident instance and exit. If there is none, fall through
@@ -528,7 +761,7 @@ fn main() -> eframe::Result<()> {
                     ctx.request_repaint();
                 });
             }
-            Ok(Box::new(App::new(entries, pending)))
+            Ok(Box::new(App::new(entries, pending, &cc.egui_ctx)))
         }),
     )
 }

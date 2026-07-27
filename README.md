@@ -50,6 +50,22 @@ Cierra sesión y vuelve a entrar (o reinicia) para que arranque todo.
 | **ws-slide** | Animación de deslizamiento al cambiar de workspace. **Es dueño de SUPER+1..9** (GlazeWM ya no los bindea), así que si muere, el cambio de workspace deja de funcionar hasta que el supervisor lo reviva | binario en `~/dev/target/release/` |
 | **rice-supervisor** | Watchdog: revive cualquier componente que muera (<60s). Tabla de componentes + log en `~/.config/logs/` | `~/.config/rice-supervisor.ps1` |
 | **cava** | Visualizador de espectro de audio en terminal (FFT, 165fps) | binario en `~/dev/target/release/`, comando `cava` |
+| **launcher** | El buscador de `Win+Space`: aplicaciones + archivos, difuso, `Ctrl+Enter` abre como administrador. Índice de archivos propio (ver abajo) | `~/dev/crates/launcher` |
+
+#### Por qué el índice de archivos es propio
+
+Las tres opciones se midieron en esta máquina antes de elegir; el razonamiento largo
+está en la cabecera de `crates/launcher/src/files.rs`.
+
+| Opción | Por qué no / por qué sí |
+|---|---|
+| **Índice de Windows** (WSearch, `Search.CollatorDSO`) | Descartado. Tiene ~196k elementos de los ~2,17M que hay: excluye `AppData`, todos los dotfolders y **D: entero**. Cuesta 218 MB residentes. Y **no tiene infijos** — `LIKE '%x%'` son 133-206 ms frente a 4-9 ms de un prefijo — así que un buscador difuso no puede montarse encima. Además devuelve rutas localizadas (`C:\Usuarios\…`) que no existen en disco. |
+| **Everything por IPC** | Descartado por dependencia, no por técnica: el IPC es fácil (`WM_COPYDATA` sobre `EVERYTHING_TASKBAR_NOTIFICATION`, o el crate `everything-ipc`). Pero leer la MFT **exige administrador**, por eso instala un servicio; sin él degrada a escanear directorios, que es justo lo que hacemos nosotros. |
+| **Propio** ✅ | Recorrido paralelo en memoria, sin admin ni servicio ni terceros. **2.169.925 entradas en 7,5 s**, ~117 MB, búsquedas de **11-45 ms**, 0,00% de CPU en reposo. Se mantiene al día con `ReadDirectoryChangesW`. Cobertura ajustable en `launcher.file_roots` / `file_skip`. |
+
+Como esto cubre el 100% del disco y WSearch el 12%, se puede apagar el servicio
+`WSearch` y recuperar sus 218 MB — a cambio de perder la búsqueda del menú Inicio y
+la del Explorador, que siguen dependiendo de él.
 
 ### Configuración y sincronización
 
@@ -91,11 +107,12 @@ la pantalla y ningún hook lo intercepta); cycle-focus en `SUPER+Shift+Space` po
 
 ## Pasos manuales
 
-- **Command Palette en Win+Space**: instala **PowerToys**, activa *Command Palette*.
-  Windows dispara el cambio de idioma en `Win+Space` aunque el *low-level hotkey* esté
-  activo, así que: pon el atajo de CmdPal en **`Win+Ctrl+Space`**, y el `wezterm-hotkey.ahk`
-  reenvía `Win+Space` → `Win+Ctrl+Space` (bloqueando el cambio de idioma). Alternativa:
-  cualquier launcher.
+- **Buscador en Win+Space**: no hay paso manual. Es `crates/launcher`, lo arranca el
+  supervisor y `wezterm-hotkey.ahk` le manda `--show`. Sustituye a la *Command Palette*
+  de PowerToys, que costaba **267 MB residentes y 59 s de arranque en frío** — medido,
+  era la partida más grande del post-inicio. Ojo con `Win+Space`: Windows también lo usa
+  para cambiar de idioma, así que el cambio de idioma se movió a `Ctrl+Alt+Shift+Space`
+  (`Ctrl+Alt+Space` no vale: en teclado español es `AltGr+Space`).
 - **Layout de monitores**: las posiciones están **hardcodeadas a 1920 (principal) + 2560
   (secundario)**. Ajusta a tus pantallas:
   - `~/.glzr/glazewm/config.yaml` → `startup_commands`: los `--x`/`--width` de las 2 barras.

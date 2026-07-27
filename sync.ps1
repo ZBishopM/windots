@@ -20,6 +20,10 @@ $home_ = $env:USERPROFILE
 # directions; install.ps1's deploy list mirrors it.
 $Map = [ordered]@{
     'wezterm\.wezterm.lua'                       = "$home_\.wezterm.lua"
+    # These two were in the repo but not in this map, so every edit to the live
+    # rice.json drifted away from the committed copy without anything noticing.
+    'config\rice.json'                           = "$home_\.config\rice.json"
+    'config\rice.schema.json'                    = "$home_\.config\rice.schema.json"
     'config\glazewm\config.yaml'                 = "$home_\.glzr\glazewm\config.yaml"
     'config\fastfetch\config.jsonc'              = "$home_\.config\fastfetch\config.jsonc"
     'config\fastfetch\duck.txt'                  = "$home_\.config\fastfetch\duck.txt"

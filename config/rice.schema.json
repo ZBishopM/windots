@@ -47,6 +47,28 @@
           "type": "boolean",
           "default": false,
           "description": "Include Store/UWP apps in the index. Off by default: they drag in a long tail that is not really applications (settings pages, help links, 'Visit <vendor>' web shortcuts), and each can only be started indirectly through its AUMID, which also means it can never be launched elevated. The cost of leaving them out is real: anything shipping ONLY as a packaged app becomes unfindable, which on this machine includes Claude and Windows Terminal."
+        },
+        "index_files": {
+          "type": "boolean",
+          "default": true,
+          "description": "Search files as well as applications. The launcher builds its own index rather than using the Windows Search service: WSearch costs 218 MB, covers ~196k of this machine's ~2.17M entries (it excludes AppData, every dotfolder and all of D:), and has no infix matching, so a fuzzy launcher cannot sit on it. Off means nothing is walked and nothing is held."
+        },
+        "file_roots": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "What the file index covers. Empty means every fixed drive, which includes the profile via C:. Spell roots out to NARROW the index, e.g. [\"C:\\\\Users\\\\obisp\", \"D:\\\\\"]."
+        },
+        "file_skip": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["\\node_modules", "\\.git", "\\.rustup", "\\.cargo\\registry", "\\.vscode\\extensions", "\\appdata\\local\\temp", "\\$recycle.bin"],
+          "description": "Directory paths the walk refuses to descend into, matched as case-insensitive suffixes of the full path -- '\\node_modules' catches it at any depth, '\\.cargo\\registry' only the one below .cargo. The defaults are 500,079 of the profile's 1,394,364 entries on this machine. Add '\\windows' and '\\program files' here to trade findability for about 30 MB."
+        },
+        "file_limit": {
+          "type": "integer",
+          "default": 4000000,
+          "description": "Ceiling on indexed entries, not a target. Exists so a network drive or a runaway junction cannot turn the index into an out-of-memory bug."
         }
       }
     },

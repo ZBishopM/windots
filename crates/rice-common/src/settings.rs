@@ -16,6 +16,56 @@ use crate::config::config_path;
 pub const FILE: &str = "rice.json";
 // ---------------------------------------------------------------- launcher
 fn d_index_store() -> bool { false }
+fn d_index_files() -> bool { true }
+
+/// Empty means "the user profile plus every fixed drive", worked out at runtime.
+/// Spelling them out here is for narrowing the index, not widening it.
+fn d_file_roots() -> Vec<String> { Vec::new() }
+
+/// Directory paths the walk refuses to descend into, matched as case-insensitive
+/// suffixes of the directory's full path -- so `\node_modules` catches it at any
+/// depth while `\.cargo\registry` catches only the one below `.cargo`.
+///
+/// These are not arbitrary. Counted on this machine, they are 500,079 of the
+/// 1,394,364 entries under the profile: 182,390 in node_modules, 96,078 in
+/// vscode extensions, 67,166 in .rustup, 64,613 in AppData\Local\Microsoft and
+/// 53,789 in the cargo registry. None of it is a file anyone searches for by
+/// name, and all of it would be paid for in RAM on every keystroke.
+fn d_file_skip() -> Vec<String> {
+    [
+        r"\node_modules",
+        r"\.git",
+        r"\.rustup",
+        r"\.cargo\registry",
+        r"\.nuget",
+        r"\.gradle",
+        r"\.m2",
+        r"\.vscode\extensions",
+        r"\.vscode-insiders\extensions",
+        r"\__pycache__",
+        r"\.venv",
+        r"\node_modules.bin",
+        r"\target\debug",
+        r"\target\release",
+        r"\appdata\local\temp",
+        r"\appdata\local\packages",
+        r"\appdata\local\microsoft",
+        r"\appdata\locallow",
+        r"\$recycle.bin",
+        r"\system volume information",
+        r"\windows\winsxs",
+        r"\windows\servicing",
+        r"\windows\assembly",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// A ceiling, not a target. Reached only if the roots are much larger than this
+/// machine's ~1.7M entries; it exists so a network drive or a runaway junction
+/// cannot turn the index into an out-of-memory bug.
+fn d_file_limit() -> usize { 4_000_000 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Launcher {
@@ -30,11 +80,33 @@ pub struct Launcher {
     /// app becomes unfindable. Here that includes Claude and Windows Terminal.
     #[serde(default = "d_index_store")]
     pub index_store_apps: bool,
+
+    /// Search files, not just applications.
+    #[serde(default = "d_index_files")]
+    pub index_files: bool,
+
+    /// What the file index covers. Empty = profile + every fixed drive.
+    #[serde(default = "d_file_roots")]
+    pub file_roots: Vec<String>,
+
+    /// Path suffixes the walk will not descend into.
+    #[serde(default = "d_file_skip")]
+    pub file_skip: Vec<String>,
+
+    /// Hard cap on indexed entries.
+    #[serde(default = "d_file_limit")]
+    pub file_limit: usize,
 }
 
 impl Default for Launcher {
     fn default() -> Self {
-        Self { index_store_apps: d_index_store() }
+        Self {
+            index_store_apps: d_index_store(),
+            index_files: d_index_files(),
+            file_roots: d_file_roots(),
+            file_skip: d_file_skip(),
+            file_limit: d_file_limit(),
+        }
     }
 }
 

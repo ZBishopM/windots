@@ -11,7 +11,15 @@ rice-common = { path = "../rice-common", features = ["ui", "settings"] }
 eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts"] }
 # Helix's matcher: same scoring as fzf, ~6x faster than skim's fuzzy-matcher,
 # and unlike either it handles non-ASCII and Unicode graphemes correctly.
+#
+#
+# The matcher only, NOT the `nucleo` picker built on top of it. The picker was
+# tried first as the file index's store and matcher: it walked this machine's
+# 2,169,925 entries in 131 s using 266 MB, against 19 s and 10 MB for the bare
+# walk -- roughly 118 bytes of bookkeeping per entry. files.rs stores entries
+# itself (12 bytes plus the name) and fans the matching out by hand.
 nucleo-matcher = "0.3"
+
 # Misma version que usa eframe 0.29: es como se obtiene el HWND real en vez de
 # adivinarlo. Dos intentos de encontrarlo a mano (por titulo y recorriendo las
 # ventanas del proceso) fallaron en silencio y cada uno acabo en un bucle.
