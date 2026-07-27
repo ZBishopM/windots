@@ -49,12 +49,12 @@ $Components = @(
        Path = { "$($Rice.ScoopApps)\autohotkey\current\v2\AutoHotkey64.exe" }
        Args = { @("$($Rice.Config)\wezterm-hotkey.ahk") } }
 
-    # The Win+Space search box. Resident on purpose: a launcher that has to start
-    # before it can search is one you stop using -- but resident here is a few MB
-    # trimmed, not the 267 MB PowerToys' Command Palette held, and it starts in
-    # about a second instead of the 59s CmdPal spent at every login.
-    @{ Name = 'launcher'; Check = 'Process'; Match = 'launcher'
-       Path = { Get-RiceExe 'launcher.exe' } }
+    # PowerToys Command Palette. Expensive (267 MB, 59s at login) and the reason
+    # crates/launcher exists, but our replacement cannot yet raise its own window
+    # on the hotkey, so this is what is actually bound to Win+Space.
+    @{ Name = 'cmdpal'; Check = 'Process'; Match = 'Microsoft.CmdPal.UI'
+       Path = { 'shell:AppsFolder\Microsoft.CommandPalette_8wekyb3d8bbwe!App' }
+       MaxRestarts = 5 }
 
     # dwindle: fibonacci layout (a child of GlazeWM, so it dies on a GlazeWM
     # restart). Checked by its own mutex rather than a WMI command-line match.

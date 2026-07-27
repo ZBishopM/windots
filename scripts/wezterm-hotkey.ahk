@@ -34,14 +34,24 @@
 ; forwards to CmdPal, which listens on Win+Ctrl+Space.
 ; ------------------------------------------------------------
 #Space:: {
-    ; Our own launcher, not PowerToys' Command Palette. CmdPal cost 267 MB
-    ; resident and 59 seconds of cold start at every login -- measured, the
-    ; single largest item in this machine's post-boot phase.
+    ; Back on PowerToys' Command Palette. Our own launcher indexes and matches
+    ; correctly -- verified on screen -- but its show path does not work
+    ; reliably: the window will not come up on the hotkey. Until that is fixed
+    ; this stays pointed at something that works.
     ;
-    ; No chord is synthesised here. The launcher waits on a named event and
-    ; `--show` sets it, so opening never depends on injecting keystrokes -- which
-    ; on this machine desynchronises AltSnap and it starts eating the spacebar.
-    Run('"' . EnvGet('USERPROFILE') . '\dev\target\release\launcher.exe" --show', , 'Hide')
+    ; {Blind} plus Ctrl only. Super is already physically down -- this IS a
+    ; #Space hotkey -- so there is nothing to synthesise. Letting AHK build the
+    ; '#' itself made it emit an LWin up afterwards, after which AHK stopped
+    ; seeing Super as held at all: of four Space taps with Super held down, only
+    ; the FIRST ever reached this handler.
+    wasActive := WinActive('ahk_exe Microsoft.CmdPal.UI.exe')
+    SendInput '{Blind}{Ctrl down}{Space}{Ctrl up}'
+    if wasActive
+        return
+    if WinWait('ahk_exe Microsoft.CmdPal.UI.exe', , 1.5) {
+        if !WinActive('ahk_exe Microsoft.CmdPal.UI.exe')
+            WinActivate('ahk_exe Microsoft.CmdPal.UI.exe')
+    }
 }
 
 ; ------------------------------------------------------------
