@@ -97,6 +97,7 @@ fn default_animation() -> Animation { Animation::default() }
 fn default_bar_height() -> i32 { 34 }
 fn default_mics() -> Vec<String> { vec!["hyperx".into(), "snowball".into()] }
 fn default_outputs() -> Vec<String> { vec!["hyperx".into(), "vg270".into(), "airpods".into()] }
+fn default_notification_style() -> String { "toast".into() }
 fn default_ipc() -> String { "ws://127.0.0.1:6123".into() }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -124,6 +125,15 @@ pub struct Settings {
     /// anything here, so a newly paired headset shows up without editing this.
     #[serde(default = "default_outputs")]
     pub outputs: Vec<String>,
+
+    /// How notifyd surfaces a Windows notification: `toast` (a popup, the direct
+    /// replacement for the Windows banner), `island` (inline in the bar, quieter),
+    /// or `both`.
+    ///
+    /// It used to do both unconditionally, which meant every notification arrived
+    /// twice -- and three times counting the Windows banner underneath.
+    #[serde(default = "default_notification_style")]
+    pub notification_style: String,
 
     #[serde(default = "default_ipc")]
     pub ipc_url: String,
@@ -153,6 +163,7 @@ impl Default for Settings {
             bar_height: default_bar_height(),
             mics: default_mics(),
             outputs: default_outputs(),
+            notification_style: default_notification_style(),
             ipc_url: default_ipc(),
             clickthrough_apps: default_clickthrough(),
             animation: Animation::default(),

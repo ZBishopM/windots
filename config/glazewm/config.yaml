@@ -285,8 +285,16 @@ keybindings:
     bindings: ['lwin+m']
 
   # Close focused window. SUPER+Q (either Win key) plus the original Alt+Shift+Q.
+  # This is a REQUEST (WM_CLOSE): the app may show "save changes?", minimise to
+  # tray, or ignore it. That is the right default.
   - commands: ['close']
-    bindings: ['lwin+q', 'rwin+q', 'lwin+shift+q']
+    bindings: ['lwin+q', 'rwin+q']
+
+  # Force-kill the focused window's process, for when the app has stopped
+  # listening. Unsaved work is lost with no prompt, which is why it is NOT on
+  # Super+Q. winkill refuses to touch explorer, the WM or our own overlays.
+  - commands: ['shell-exec C:/Users/obisp/dev/target/release/winkill.exe']
+    bindings: ['lwin+shift+q']
 
   # Kill GlazeWM process safely.
   - commands: ['wm-exit']

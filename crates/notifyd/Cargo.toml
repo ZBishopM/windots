@@ -8,7 +8,7 @@ edition = "2021"
 # the workspace's 0.58 (rice-common, micswitch and ws-slide are all on it);
 # mixing majors would link two copies of the WinRT metadata.
 [dependencies]
-rice-common = { path = "../rice-common", features = ["event"] }
+rice-common = { path = "../rice-common", features = ["event", "settings"] }
 windows = { version = "0.58", features = [
   "Foundation",
   "Foundation_Collections",

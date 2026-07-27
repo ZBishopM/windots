@@ -1,0 +1,9 @@
+[package]
+name = "winkill"
+version = "0.1.0"
+edition = "2021"
+
+# Force-kill the focused window's process. Pure Win32 via raw externs; nothing
+# from rice-common, so it stays a few KB and can never fail to start because a
+# shared feature moved.
+[dependencies]

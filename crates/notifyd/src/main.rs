@@ -319,8 +319,20 @@ fn extract(n: &UserNotification) -> Option<Toast> {
 /// runs on its own thread precisely so the wait cannot stall the scan loop or a
 /// WinRT callback.
 fn show(t: &Toast, hold: f32) {
+    // One surface by default, not two. Publishing the island event AND popping a
+    // toast for the same notification meant it arrived twice over -- three times
+    // with the Windows banner still drawn underneath.
+    let style = rice_common::settings::Settings::live().notification_style.to_lowercase();
+    let want_island = style == "island" || style == "both";
+    let want_toast = style != "island";
+
     let ev = IslandEvent::new(t.icon, &t.title, &t.body, &hex(theme::ACCENT));
-    let _ = ev.publish();
+    if want_island {
+        let _ = ev.publish();
+    }
+    if !want_toast {
+        return;
+    }
 
     let exe = win::sibling_exe("shadowplay-notify.exe");
     let mut argv = ev.to_notify_args();
@@ -589,6 +601,34 @@ fn run_check(tx: &Sender<Toast>, pending: &AtomicUsize) {
     let mut seen = Seen::new();
     let n = scan(&listener, &mut seen, tx, pending, true).unwrap_or(0);
     log(&format!("--check visible: {n} notification(s)"));
+
+    // Name every app currently holding a notification. Without this the only
+    // answer to "why didn't my app get intercepted?" is a number, and the two
+    // possible causes look identical from outside: the app is missing because it
+    // never used the Windows notification system at all (it drew its own
+    // window), or it is there and something downstream dropped it.
+    if let Ok(list) = listener
+        .GetNotificationsAsync(NotificationKinds::Toast)
+        .and_then(|op| op.get())
+    {
+        for i in 0..list.Size().unwrap_or(0) {
+            let Ok(un) = list.GetAt(i) else { continue };
+            let app = un
+                .AppInfo()
+                .and_then(|a| a.DisplayInfo())
+                .and_then(|d| d.DisplayName())
+                .map(|h| h.to_string())
+                .unwrap_or_else(|_| "(sin nombre)".into());
+            let id = un.Id().unwrap_or(0);
+            // Include the first line of text: plenty of apps register no display
+            // name, and "(sin nombre)" on its own identifies nothing.
+            let t = extract(&un)
+                .map(|x| format!("{} / {}", x.title, x.body))
+                .unwrap_or_else(|| "(sin texto)".into());
+            let t: String = t.chars().take(60).collect();
+            log(&format!("--check   app id={id}: {app} | {t}"));
+        }
+    }
     log(&format!("--check do-not-disturb: {}", dnd_state()));
 
     let ok = identity.is_some() && access == Access::Allowed;

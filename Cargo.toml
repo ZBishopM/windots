@@ -21,6 +21,7 @@ members = [
     "crates/taskbar",
     "crates/appvol",
     "crates/windeco",
+    "crates/winkill",
     "crates/shadowplay-wgc",
     "crates/notifyd",
 ]
