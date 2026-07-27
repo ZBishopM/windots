@@ -556,6 +556,10 @@ struct DevRow {
 
 enum DevMsg {
     Refresh,
+    /// Look for nearby devices that are not paired yet.
+    Scan,
+    /// Pair with one of them, by WinRT device id.
+    Pair(String),
     /// Make this endpoint the default output.
     Select(String),
     /// Connect a Bluetooth device, then make it default once it is really up.
@@ -569,17 +573,53 @@ enum DevMsg {
 struct DevCtl {
     tx: std::sync::mpsc::Sender<DevMsg>,
     state: Arc<Mutex<Vec<DevRow>>>,
+    /// Nearby unpaired devices, and whether a scan is running. A scan takes
+    /// ~22s (Windows runs a full inquiry and only answers at the end), so the
+    /// UI has to say so rather than looking frozen.
+    pairable: Arc<Mutex<(bool, Vec<rice_common::bluetooth::Pairable>)>>,
 }
 
 impl DevCtl {
     fn new(ctx: egui::Context) -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<DevMsg>();
         let state: Arc<Mutex<Vec<DevRow>>> = Arc::new(Mutex::new(Vec::new()));
+        let pairable: Arc<Mutex<(bool, Vec<rice_common::bluetooth::Pairable>)>> =
+            Arc::new(Mutex::new((false, Vec::new())));
         let out = state.clone();
+        let pair_out = pairable.clone();
         std::thread::spawn(move || {
             while let Ok(msg) = rx.recv() {
                 match msg {
                     DevMsg::Refresh => {}
+                    DevMsg::Scan => {
+                        pair_out.lock().unwrap().0 = true;
+                        ctx.request_repaint();
+                        let found = rice_common::bluetooth::scan_pairable();
+                        *pair_out.lock().unwrap() = (false, found);
+                    }
+                    DevMsg::Pair(id) => {
+                        pair_out.lock().unwrap().0 = true;
+                        ctx.request_repaint();
+                        let res = rice_common::bluetooth::pair(&id);
+                        // Drop it from the pairable list either way: on success
+                        // it is now a normal device and appears in the rows
+                        // below, on failure a stale entry would just invite
+                        // another doomed attempt.
+                        {
+                            let mut g = pair_out.lock().unwrap();
+                            g.0 = false;
+                            g.1.retain(|p| p.id != id);
+                        }
+                        if let Err(e) = res {
+                            let ev = rice_common::event::IslandEvent::new(
+                                "warn",
+                                "Bluetooth",
+                                &e,
+                                "#d08770",
+                            );
+                            let _ = ev.publish();
+                        }
+                    }
                     DevMsg::Select(id) => {
                         rice_common::audio::set_default_output(&id);
                     }
@@ -625,10 +665,20 @@ impl DevCtl {
                 ctx.request_repaint();
             }
         });
-        Self { tx, state }
+        Self { tx, state, pairable }
     }
     fn refresh(&self) {
         let _ = self.tx.send(DevMsg::Refresh);
+    }
+    fn scan(&self) {
+        let _ = self.tx.send(DevMsg::Scan);
+    }
+    fn pair(&self, id: String) {
+        let _ = self.tx.send(DevMsg::Pair(id));
+    }
+    /// (scanning, nearby unpaired devices)
+    fn pairable(&self) -> (bool, Vec<rice_common::bluetooth::Pairable>) {
+        self.pairable.lock().unwrap().clone()
     }
     fn rows(&self) -> Vec<DevRow> {
         self.state.lock().unwrap().clone()
@@ -1131,9 +1181,12 @@ impl BarApp {
             4 => 132.0,
             5 => 138.0,
             6 => {
-                // One row per device, plus the header line.
+                // One row per device, plus the header, the scan control, and any
+                // nearby devices found.
+                let (scanning, near) = self.dev_ctl.pairable();
                 let n = self.dev_ctl.rows().len().max(1) as f32;
-                (n * 38.0 + 34.0).min(230.0)
+                let extra = if scanning || !near.is_empty() { near.len() as f32 * 34.0 + 30.0 } else { 0.0 };
+                (n * 38.0 + 34.0 + 30.0 + extra).min(260.0)
             }
             _ => (ACTIONS.len() as f32 / 3.0).ceil() * 52.0 + 22.0,
         }
@@ -1659,6 +1712,82 @@ impl BarApp {
                 }
             }
             y += 38.0;
+        }
+
+        // ---- pairing ------------------------------------------------------
+        // Connecting and pairing are different things: everything above is a
+        // device Windows already knows, and an unpaired one has no audio
+        // endpoint at all, so it cannot appear there however close it is.
+        let (scanning, near) = self.dev_ctl.pairable();
+        let scan_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + 12.0, y),
+            egui::vec2(rect.width() - 24.0, 26.0),
+        );
+        let scan_resp = ui
+            .interact(scan_rect, egui::Id::new("dev-scan"), egui::Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if scan_resp.hovered() {
+            self.isl_interact = now;
+        }
+        let label = if scanning { "Buscando..." } else { "+ Emparejar" };
+        p.text(
+            egui::pos2(scan_rect.center().x, scan_rect.center().y),
+            egui::Align2::CENTER_CENTER,
+            label,
+            egui::FontId::proportional(11.5),
+            if scanning { WARM_SUB } else { WARM_ACCENT },
+        );
+        if scan_resp.clicked() && !scanning {
+            // A scan blocks for ~22s, so keep the panel from timing out under it.
+            self.isl_interact = now;
+            self.dev_ctl.scan();
+        }
+        if scanning {
+            // The panel's own idle timeout would close it mid-scan otherwise.
+            self.isl_interact = now;
+        }
+        y += 30.0;
+
+        for (i, n) in near.iter().enumerate() {
+            let r_rect = egui::Rect::from_min_size(
+                egui::pos2(rect.left() + 12.0, y),
+                egui::vec2(rect.width() - 24.0, 28.0),
+            );
+            let resp = ui
+                .interact(r_rect, egui::Id::new(("pairable", i)), egui::Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if resp.hovered() {
+                self.isl_interact = now;
+                p.rect_filled(
+                    r_rect,
+                    egui::Rounding::same(8.0),
+                    egui::Color32::from_rgba_unmultiplied(
+                        WARM_ACCENT.r(),
+                        WARM_ACCENT.g(),
+                        WARM_ACCENT.b(),
+                        24,
+                    ),
+                );
+            }
+            p.text(
+                egui::pos2(r_rect.left() + 16.0, r_rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                &n.name,
+                egui::FontId::proportional(12.0),
+                WARM_SUB,
+            );
+            draw_icon(
+                p,
+                egui::pos2(r_rect.right() - 14.0, r_rect.center().y),
+                "\u{f067}", // fa-plus
+                10.0,
+                WARM_ACCENT,
+            );
+            if resp.clicked() {
+                self.isl_interact = now;
+                self.dev_ctl.pair(n.id.clone());
+            }
+            y += 34.0;
         }
     }
 

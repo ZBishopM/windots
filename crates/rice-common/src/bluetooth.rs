@@ -267,3 +267,140 @@ pub fn wait_connected(container: u128, timeout: std::time::Duration) -> bool {
     }
     false
 }
+
+// ---------------------------------------------------------------- pairing
+// Everything above deals with devices Windows already knows. Pairing is the
+// separate, one-time handshake, and it needs WinRT rather than Core Audio: an
+// unpaired device has no audio endpoint yet, so there is nothing for the
+// enumeration above to find.
+
+use windows::core::HSTRING;
+use windows::Devices::Enumeration::{
+    DeviceInformation, DeviceInformationKind, DevicePairingKinds, DevicePairingResultStatus,
+    DeviceUnpairingResultStatus,
+};
+
+/// A nearby device that is not paired yet.
+#[derive(Clone, Debug)]
+pub struct Pairable {
+    /// Opaque WinRT device id, what `pair` takes.
+    pub id: String,
+    pub name: String,
+}
+
+/// AQS for association endpoints that are NOT paired, over both Bluetooth
+/// transports: classic BR/EDR and LE. AirPods advertise as classic; plenty of
+/// other things are LE only, and a single-protocol query silently misses them.
+const AQS_UNPAIRED: &str = concat!(
+    "System.Devices.Aep.ProtocolId:=\"{e0cbf06c-cd8b-4647-bb8a-263b43f0f974}\"",
+    " OR System.Devices.Aep.ProtocolId:=\"{bb7bb05e-5972-42b5-94fc-76eaa7084d49}\"",
+);
+
+/// Nearby devices available to pair.
+///
+/// Blocking and SLOW: measured at ~22s on this radio, because FindAllAsync runs
+/// a full inquiry and only returns once it has finished. Call it from a worker
+/// and show progress; there is no way to shorten it short of a DeviceWatcher,
+/// which streams results but needs an event loop to pump.
+pub fn scan_pairable() -> Vec<Pairable> {
+    let mut out = Vec::new();
+    unsafe {
+        // FindAllAsync rather than a DeviceWatcher: a watcher would need an event
+        // loop and a way to marshal callbacks back, and this already runs on its
+        // own thread where blocking is fine.
+        let Ok(op) = DeviceInformation::FindAllAsyncWithKindAqsFilterAndAdditionalProperties(
+            &HSTRING::from(AQS_UNPAIRED),
+            None,
+            DeviceInformationKind::AssociationEndpoint,
+        ) else {
+            return out;
+        };
+        // No sleep before this: get() already blocks for the whole inquiry.
+        let Ok(coll) = op.get() else { return out };
+        for i in 0..coll.Size().unwrap_or(0) {
+            let Ok(info) = coll.GetAt(i) else { continue };
+            let paired = info
+                .Pairing()
+                .and_then(|p| p.IsPaired())
+                .unwrap_or(false);
+            if paired {
+                continue;
+            }
+            let name = info.Name().map(|n| n.to_string()).unwrap_or_default();
+            // Unnamed entries are beacons and stray peripherals; nothing a person
+            // could recognise in a list.
+            if name.trim().is_empty() {
+                continue;
+            }
+            let Ok(id) = info.Id() else { continue };
+            out.push(Pairable { id: id.to_string(), name });
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.dedup_by(|a, b| a.id == b.id);
+    out
+}
+
+/// Pair with a device found by `scan_pairable`.
+///
+/// Uses ConfirmOnly, which is the "just works" association model headphones use.
+/// A device that insists on a PIN will fail here rather than silently hang
+/// waiting for input we have nowhere to display.
+pub fn pair(id: &str) -> Result<(), String> {
+    unsafe {
+        let info = DeviceInformation::CreateFromIdAsync(&HSTRING::from(id))
+            .and_then(|op| op.get())
+            .map_err(|e| format!("device not found: {e}"))?;
+        let custom = info
+            .Pairing()
+            .and_then(|p| p.Custom())
+            .map_err(|e| format!("no pairing interface: {e}"))?;
+
+        // ConfirmOnly needs a PairingRequested handler that accepts, or the
+        // attempt just times out -- the "Accept" is not implicit.
+        let token = custom
+            .PairingRequested(&windows::Foundation::TypedEventHandler::new(
+                |_sender, args: &Option<windows::Devices::Enumeration::DevicePairingRequestedEventArgs>| {
+                    if let Some(a) = args.as_ref() {
+                        let _ = a.Accept();
+                    }
+                    Ok(())
+                },
+            ))
+            .map_err(|e| format!("cannot hook pairing: {e}"))?;
+
+        let res = custom
+            .PairAsync(DevicePairingKinds::ConfirmOnly)
+            .and_then(|op| op.get());
+        let _ = custom.RemovePairingRequested(token);
+
+        let res = res.map_err(|e| format!("pairing failed: {e}"))?;
+        match res.Status() {
+            Ok(DevicePairingResultStatus::Paired)
+            | Ok(DevicePairingResultStatus::AlreadyPaired) => Ok(()),
+            Ok(other) => Err(format!("{other:?}")),
+            Err(e) => Err(format!("{e}")),
+        }
+    }
+}
+
+/// Forget a device. Its audio endpoints disappear with it, so the row vanishes
+/// from the device list rather than going offline.
+pub fn unpair(id: &str) -> Result<(), String> {
+    unsafe {
+        let info = DeviceInformation::CreateFromIdAsync(&HSTRING::from(id))
+            .and_then(|op| op.get())
+            .map_err(|e| format!("device not found: {e}"))?;
+        let res = info
+            .Pairing()
+            .and_then(|p| p.UnpairAsync())
+            .and_then(|op| op.get())
+            .map_err(|e| format!("unpair failed: {e}"))?;
+        match res.Status() {
+            Ok(DeviceUnpairingResultStatus::Unpaired)
+            | Ok(DeviceUnpairingResultStatus::AlreadyUnpaired) => Ok(()),
+            Ok(other) => Err(format!("{other:?}")),
+            Err(e) => Err(format!("{e}")),
+        }
+    }
+}

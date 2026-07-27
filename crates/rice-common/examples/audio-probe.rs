@@ -32,4 +32,18 @@ fn main() {
             d.output_id
         );
     }
+
+    println!("
+== nearby, not paired ==");
+    let t = std::time::Instant::now();
+    let found = rice_common::bluetooth::scan_pairable();
+    println!("  scan took {:?}", t.elapsed());
+    if found.is_empty() {
+        println!("  (nothing advertising)");
+    }
+    for f in found {
+        println!("  {}   id={}", f.name, f.id);
+    }
 }
+
+// Appended: pairing scan. Slow by nature -- a Bluetooth inquiry takes seconds.
