@@ -79,7 +79,12 @@
 ; language on to the Chinese IME and every keystroke after that came out as
 ; pinyin, with no obvious way back. This is the deliberate replacement.
 ; ------------------------------------------------------------
-^!Space:: PostMessage(0x0050, 2, 0, , 'A')   ; WM_INPUTLANGCHANGEREQUEST, FORWARD
+; Ctrl+Alt+Shift, NOT Ctrl+Alt. On a Spanish layout Ctrl+Alt IS AltGr, which is
+; pressed constantly for @ # [ ] { } \ -- so Ctrl+Alt+Space was one stray AltGr
+; away from silently cycling the input language, and landing on the Japanese or
+; Chinese IME turns the spacebar into a conversion key that stops typing spaces
+; at all. Requiring Shift as well puts it out of accidental reach.
+^!+Space:: PostMessage(0x0050, 2, 0, , 'A')   ; WM_INPUTLANGCHANGEREQUEST, FORWARD
 
 ; ------------------------------------------------------------
 ; Win+Shift+B -> show/hide the Windows taskbar.
@@ -97,3 +102,16 @@
     ; Save runs the concat then pops the custom Rust notification itself.
     Run('pwsh -NoProfile -WindowStyle Hidden -File "C:\Users\obisp\.config\shadowplay-wgc-save.ps1"', , 'Hide')
 }
+
+; ------------------------------------------------------------
+; Win+Shift+Z -> reload this script.
+;
+; The escape hatch. AHK tracks modifier state itself, and if that ever drifts out
+; of step with the real keyboard -- it can, and synthetic input makes it more
+; likely -- the script believes Super is held, every bare Space matches #Space
+; above, and the hook swallows it before any application sees it. The keyboard
+; then looks broken: no spaces, no Win+Space, no Win+Alt+Space reaching GlazeWM.
+; Reloading resets that state. Deliberately reachable without the spacebar, and
+; on Z because GlazeWM already owns lwin+shift+r for its resize binding mode.
+; ------------------------------------------------------------
+#+z:: Reload
