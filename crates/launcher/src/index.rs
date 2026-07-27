@@ -115,9 +115,21 @@ fn packaged() -> Vec<Entry> {
 }
 
 /// Everything the launcher can start, de-duplicated.
+///
+/// Store/UWP apps are OFF by default: `launcher.index_store_apps` in rice.json
+/// turns them back on. They bring in a long tail of things that are not really
+/// applications -- settings pages, help links, "Visit <vendor>" web shortcuts --
+/// and every one of them has to be launched indirectly through its AUMID, which
+/// also means they cannot be started elevated.
+///
+/// The cost of leaving them out is real and worth stating: an app that ships
+/// ONLY as a packaged app then cannot be found here at all. On this machine that
+/// includes Claude and Windows Terminal.
 pub fn build() -> Vec<Entry> {
     let mut all = shortcuts();
-    all.extend(packaged());
+    if rice_common::settings::Settings::live().launcher.index_store_apps {
+        all.extend(packaged());
+    }
     // A packaged app often ALSO has a Start Menu shortcut; showing both is just
     // two identical rows with different launch paths.
     all.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));

@@ -14,6 +14,32 @@ use serde::{Deserialize, Serialize};
 use crate::config::config_path;
 
 pub const FILE: &str = "rice.json";
+// ---------------------------------------------------------------- launcher
+fn d_index_store() -> bool { false }
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Launcher {
+    /// Include Store/UWP apps in the search index.
+    ///
+    /// Off by default. They drag in a long tail that is not really applications
+    /// -- settings pages, help links, "Visit <vendor>" web shortcuts -- and each
+    /// can only be started indirectly through its AUMID, which also means it can
+    /// never be launched elevated.
+    ///
+    /// Turning it off has a real cost: anything that ships ONLY as a packaged
+    /// app becomes unfindable. Here that includes Claude and Windows Terminal.
+    #[serde(default = "d_index_store")]
+    pub index_store_apps: bool,
+}
+
+impl Default for Launcher {
+    fn default() -> Self {
+        Self { index_store_apps: d_index_store() }
+    }
+}
+
+fn default_launcher() -> Launcher { Launcher::default() }
+
 // ---------------------------------------------------------------- animation
 // Everything the desktop's motion is made of, in one place. These were literals
 // scattered through glaze-bar's render loop, which meant a rebuild to try a
@@ -151,6 +177,10 @@ pub struct Settings {
     /// Motion tuning. Edit and save; the bar picks it up on the next frame.
     #[serde(default = "default_animation")]
     pub animation: Animation,
+
+    /// Win+Space search box.
+    #[serde(default = "default_launcher")]
+    pub launcher: Launcher,
 }
 
 fn default_clickthrough() -> Vec<String> {
@@ -167,6 +197,7 @@ impl Default for Settings {
             ipc_url: default_ipc(),
             clickthrough_apps: default_clickthrough(),
             animation: Animation::default(),
+            launcher: Launcher::default(),
         }
     }
 }

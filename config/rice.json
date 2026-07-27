@@ -8,6 +8,10 @@
   "outputs": ["hyperx", "vg270", "airpods"],
   "clickthrough_apps": ["league of legends", "valorant"],
 
+  "launcher": {
+    "index_store_apps": false
+  },
+
   "animation": {
     "spring_stiffness": 300.0,
     "spring_damping": 23.0,

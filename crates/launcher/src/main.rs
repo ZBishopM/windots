@@ -126,13 +126,15 @@ impl App {
         self.hits = scored;
     }
 
-    fn launch(&mut self) {
+    fn launch(&mut self, elevated: bool) {
         let Some(&(i, _)) = self.hits.get(self.selected) else { return };
         match &self.entries[i].action {
-            Action::Shortcut(p) => open_via_shell(&p.to_string_lossy()),
-            // A packaged app is started through the shell, not CreateProcess:
-            // an AUMID is not a path and there is no exe to run.
-            Action::Aumid(id) => open_via_shell(&format!("shell:AppsFolder\\{id}")),
+            Action::Shortcut(p) => open_via_shell(&p.to_string_lossy(), elevated),
+            // A packaged app goes through the shell by AUMID; there is no exe to
+            // run. It also cannot be elevated -- Windows has no way to launch a
+            // packaged app as administrator -- so the flag is ignored here
+            // rather than silently starting it unelevated as if it had worked.
+            Action::Aumid(id) => open_via_shell(&format!("shell:AppsFolder\\{id}"), false),
         }
         self.hide();
     }
@@ -158,20 +160,40 @@ fn primary_size() -> (f32, f32) {
     (1920.0, 1080.0)
 }
 
-fn open_via_shell(target: &str) {
+/// Start something, optionally elevated.
+///
+/// ShellExecuteW rather than CreateProcess: it resolves .lnk files with their
+/// arguments and working directory intact, and its "runas" verb is the only way
+/// to ask for elevation -- that is what raises the UAC prompt. It also does not
+/// make the launcher the parent of what it starts, so closing this window can
+/// never take the launched application with it.
+fn open_via_shell(target: &str, elevated: bool) {
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // `explorer.exe <target>` resolves shortcuts and AppsFolder ids alike,
-        // and detaches, so the launcher never becomes the parent of what it
-        // starts -- closing the launcher must not take the app with it.
-        let _ = std::process::Command::new("explorer.exe")
-            .arg(target)
-            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-            .spawn();
+    unsafe {
+        #[link(name = "shell32")]
+        extern "system" {
+            fn ShellExecuteW(
+                hwnd: isize,
+                verb: *const u16,
+                file: *const u16,
+                params: *const u16,
+                dir: *const u16,
+                show: i32,
+            ) -> isize;
+        }
+        let verb: Vec<u16> = if elevated { "runas\0".encode_utf16().collect() } else { "open\0".encode_utf16().collect() };
+        let file: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
+        ShellExecuteW(
+            0,
+            verb.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, // SW_SHOWNORMAL
+        );
     }
     #[cfg(not(windows))]
-    let _ = target;
+    let _ = (target, elevated);
 }
 
 impl eframe::App for App {
@@ -227,7 +249,9 @@ impl eframe::App for App {
             self.selected = self.selected.saturating_sub(1);
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-            self.launch();
+            // Ctrl+Enter elevates, which is the convention everywhere else.
+            let ctrl = ctx.input(|i| i.modifiers.ctrl);
+            self.launch(ctrl);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             return;
         }
@@ -282,6 +306,15 @@ impl eframe::App for App {
                         egui::FontId::proportional(15.0),
                         if row == self.selected { col(theme::TEXT) } else { col(theme::SUBTEXT) },
                     );
+                    if row == self.selected && matches!(e.action, Action::Shortcut(_)) {
+                        ui.painter().text(
+                            egui::pos2(rect.right() - 10.0, rect.center().y),
+                            egui::Align2::RIGHT_CENTER,
+                            "ctrl+enter = admin",
+                            egui::FontId::proportional(11.0),
+                            col(theme::SUBTEXT),
+                        );
+                    }
                     if matches!(e.action, Action::Aumid(_)) {
                         ui.painter().text(
                             egui::pos2(rect.right() - 10.0, rect.center().y),

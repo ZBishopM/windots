@@ -38,6 +38,19 @@
       "description": "Executables that make the bar click-through while focused, matched case-insensitively. The geometric test covers true fullscreen; borderless games that sit a few pixels short of the monitor rect slip past it, so those need naming here."
     },
 
+    "launcher": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Win+Space search box.",
+      "properties": {
+        "index_store_apps": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include Store/UWP apps in the index. Off by default: they drag in a long tail that is not really applications (settings pages, help links, 'Visit <vendor>' web shortcuts), and each can only be started indirectly through its AUMID, which also means it can never be launched elevated. The cost of leaving them out is real: anything shipping ONLY as a packaged app becomes unfindable, which on this machine includes Claude and Windows Terminal."
+        }
+      }
+    },
+
     "animation": {
       "type": "object",
       "additionalProperties": false,
