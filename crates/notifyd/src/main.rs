@@ -66,7 +66,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender, SyncSender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -747,8 +747,19 @@ fn main() {
         // Woken by the event, or by the poll timeout. Either way the same
         // de-dup decides what is new, so an event that never fires costs only
         // latency and an event that fires twice costs nothing.
-        if let Ok(id) = wake_rx.recv_timeout(poll) {
-            scan_one(&listener, id, &mut seen, &tx, &pending);
+        match wake_rx.recv_timeout(poll) {
+            Ok(id) => scan_one(&listener, id, &mut seen, &tx, &pending),
+            Err(RecvTimeoutError::Timeout) => {}
+            // Disconnected must NOT fall through to the scan below. Nothing
+            // holds the sender when NotificationChanged fails to register --
+            // which is exactly what happens without package identity -- and
+            // recv_timeout then returns instantly rather than waiting, so the
+            // loop span at full speed. Measured: this process was the single
+            // largest CPU consumer on the machine at 4.7%, more than Firefox
+            // entire, while a scan itself costs 26ms and the interval is 2s.
+            Err(RecvTimeoutError::Disconnected) => {
+                std::thread::sleep(poll);
+            }
         }
         scan(&listener, &mut seen, &tx, &pending, false);
 
