@@ -75,6 +75,15 @@ pub fn builtin() -> Vec<Entry> {
         // Va por wezterm porque el script pregunta: enseña la lista, espera un
         // número y luego una confirmación. Lanzarlo con ShellExecuteW a secas lo
         // dejaría sin ningún sitio donde escribir la respuesta.
+        // cava vive en dev\\target\\release, que el indice de archivos excluye a
+        // proposito (file_skip) y que tampoco esta en el PATH: sin esta entrada
+        // es inalcanzable desde la barra. Necesita terminal, asi que via wezterm.
+        (
+            "Cava (visualizador de audio)",
+            r"%ProgramFiles%\WezTerm\wezterm-gui.exe",
+            r"start -- %USERPROFILE%\dev\target\release\cava.exe",
+            "cava visualizador espectro audio musica",
+        ),
         (
             "Desinstalar aplicaciones",
             r"%ProgramFiles%\WezTerm\wezterm-gui.exe",
@@ -84,7 +93,8 @@ pub fn builtin() -> Vec<Entry> {
         ("Recargar la configuración de GlazeWM", "glazewm.exe", "command wm-reload-config", "glazewm reload recargar wm"),
     ];
 
-    LIST.iter()
+    let mut out: Vec<Entry> = LIST
+        .iter()
         .map(|(name, target, args, keys)| Entry {
             name: (*name).to_string(),
             keywords: (*keys).to_string(),
@@ -93,7 +103,28 @@ pub fn builtin() -> Vec<Entry> {
                 args: expand(args),
             },
         })
-        .collect()
+        .collect();
+
+    // Steam no deja NINGUN .lnk en el menu Inicio (su carpeta solo trae un .url
+    // de soporte), asi que el indice de accesos directos no puede verlo y era
+    // inencontrable desde la barra. Se sondea donde suele estar; la primera
+    // ruta que exista gana.
+    for cand in [
+        r"D:\Steam\steam.exe",
+        r"C:\Program Files (x86)\Steam\steam.exe",
+        r"C:\Program Files\Steam\steam.exe",
+        r"F:\Steam\steam.exe",
+    ] {
+        if std::fs::metadata(cand).is_ok() {
+            out.push(Entry {
+                name: "Steam".to_string(),
+                keywords: "steam juegos games valve".to_string(),
+                action: Action::Command { target: cand.to_string(), args: String::new() },
+            });
+            break;
+        }
+    }
+    out
 }
 
 /// Sustituye `%VAR%`. `shell:` y `ms-settings:` los resuelve el propio shell,
