@@ -102,4 +102,53 @@ end
 config.window_background_opacity = op
 wezterm.add_to_config_reload_watch_list(term_op_file)
 
+-- ------------------------------------------------------- rueda del raton
+-- El problema, y por que hacen falta estos bindings:
+--
+-- Una aplicacion de terminal que activa "mouse reporting" -- Claude Code, vim,
+-- btop, lazygit -- le pide a la terminal que le REENVIE los eventos del raton
+-- en vez de interpretarlos. wezterm obedece, asi que la rueda deja de mover el
+-- scrollback y se la come la aplicacion. Desde fuera parece que la barra de
+-- desplazamiento no funciona; en realidad esta funcionando la aplicacion.
+--
+-- `mouse_reporting = true` en un binding significa "aplicame TAMBIEN cuando la
+-- aplicacion esta capturando el raton", y es la unica forma de recuperar la
+-- rueda sin renunciar al raton dentro de esas aplicaciones.
+--
+-- Reparto:
+--   rueda sola   -> la aplicacion, si la quiere (comportamiento normal)
+--   SHIFT+rueda  -> scrollback SIEMPRE, capture quien capture
+--   CTRL+SHIFT   -> saltos de pagina, para recorrer mucho de golpe
+config.mouse_bindings = {
+  {
+    event = { Down = { streak = 1, button = { WheelUp = 1 } } },
+    mods = 'SHIFT',
+    action = act.ScrollByLine(-5),
+    mouse_reporting = true,
+  },
+  {
+    event = { Down = { streak = 1, button = { WheelDown = 1 } } },
+    mods = 'SHIFT',
+    action = act.ScrollByLine(5),
+    mouse_reporting = true,
+  },
+  {
+    event = { Down = { streak = 1, button = { WheelUp = 1 } } },
+    mods = 'CTRL|SHIFT',
+    action = act.ScrollByPage(-1),
+    mouse_reporting = true,
+  },
+  {
+    event = { Down = { streak = 1, button = { WheelDown = 1 } } },
+    mods = 'CTRL|SHIFT',
+    action = act.ScrollByPage(1),
+    mouse_reporting = true,
+  },
+}
+
+-- Cuantas lineas manda la rueda a una aplicacion de pantalla alternativa que NO
+-- pide el raton (less, man, git log). Por defecto 3; 5 se siente como el resto
+-- del escritorio.
+config.alternate_buffer_wheel_scroll_speed = 5
+
 return config
