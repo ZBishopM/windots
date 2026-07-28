@@ -34,6 +34,26 @@ if ($Undo) {
     Write-Host '   servicio Parsec: Manual, parado'
 }
 
+# --- 1b. G HUB -----------------------------------------------------------
+# Quitarle el arranque no bastó. Medido después: LGHUBUpdaterService estaba en
+# Running pese a tener arranque Manual, y es quien vuelve a levantar
+# lghub_system_tray.exe, que a su vez levanta lghub_agent.exe. El interruptor de
+# "Aplicaciones de inicio" no lo ve porque no pasa por ahí.
+#
+# El G502 guarda DPI, botones e iluminación en el propio ratón, así que apagar
+# esto no cambia cómo se comporta. Sólo hay que volver a abrir G HUB a mano para
+# CAMBIAR un perfil, y entonces el servicio arranca solo.
+Write-Host '== G HUB =='
+if ($Undo) {
+    Set-Service LGHUBUpdaterService -StartupType Manual
+    Write-Host '   LGHUBUpdaterService: Manual'
+} else {
+    Stop-Service LGHUBUpdaterService -Force -EA SilentlyContinue
+    Set-Service LGHUBUpdaterService -StartupType Disabled
+    Get-Process lghub, lghub_agent, lghub_system_tray, lghub_updater -EA SilentlyContinue | Stop-Process -Force
+    Write-Host '   LGHUBUpdaterService: Deshabilitado, y procesos cerrados'
+}
+
 # --- 2. Icono de Seguridad de Windows ------------------------------------
 # Solo el ICONO de la bandeja. Defender, su servicio y sus analisis siguen
 # exactamente igual: esto no toca la proteccion, toca el icono.
