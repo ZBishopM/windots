@@ -52,6 +52,15 @@ pub fn builtin() -> Vec<Entry> {
         // Las del propio escritorio. Editar rice.json es lo que más se hace de
         // todo esto, y hasta ahora había que ir a buscarlo.
         ("Editar rice.json", "notepad.exe", r"%USERPROFILE%\.config\rice.json", "rice config configuracion json"),
+        // Va por wezterm porque el script pregunta: enseña la lista, espera un
+        // número y luego una confirmación. Lanzarlo con ShellExecuteW a secas lo
+        // dejaría sin ningún sitio donde escribir la respuesta.
+        (
+            "Desinstalar aplicaciones",
+            r"%ProgramFiles%\WezTerm\wezterm-gui.exe",
+            r"start -- pwsh -NoLogo -NoExit -File %USERPROFILE%\.config\rice-uninstall.ps1 -Size",
+            "uninstall desinstalar quitar borrar programas apps remove",
+        ),
         ("Recargar la configuración de GlazeWM", "glazewm.exe", "command wm-reload-config", "glazewm reload recargar wm"),
     ];
 

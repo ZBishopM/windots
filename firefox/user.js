@@ -17,15 +17,25 @@
 
 // ---------------------------------------------------------------- procesos
 
-// El único cambio grande. Fission da un proceso por sitio distinto y no tiene
-// tope: 20 dominios abiertos son 19 procesos, cada uno con su heap, su JIT y su
-// coste base. La estrategia 2 ("IsolateHighValue") conserva el aislamiento para
-// los sitios que importan -- aquellos donde hay sesión iniciada, credenciales
-// guardadas o permisos COOP -- y comparte proceso para el resto.
+// PROBADO Y DESCARTADO: fission.webContentIsolationStrategy = 2.
 //
-// Muy preferible a apagar Fission (`fission.autostart=false`), que quitaría la
-// protección contra ataques tipo Spectre en TODOS los sitios. Eso no se toca.
-user_pref("fission.webContentIsolationStrategy", 2);
+// Sobre el papel era el cambio grande. La estrategia 2 ("IsolateHighValue")
+// mantiene proceso propio para los sitios con sesión iniciada, credenciales
+// guardadas o permisos COOP, y comparte proceso para el resto.
+//
+// Medido con ella puesta: 13 procesos de contenido para 11 dominios. MÁS
+// procesos que sitios, es decir, cero consolidación. La razón es que casi todo
+// lo que se tiene abierto aquí -- Gmail, Calendar, Drive, GitHub, WhatsApp --
+// es exactamente lo que la estrategia 2 considera "de valor" y sigue aislando.
+//
+// Se vuelve al valor por defecto (1, aislar todo): rebajar el aislamiento a
+// cambio de una mejora que no se puede medir es un mal trato. Si algún día el
+// uso cambia a mucha navegación sin sesión, vuelve a merecer la pena probarla.
+//
+// Se escribe el 1 EXPLÍCITAMENTE en vez de borrar la línea. Borrar una entrada
+// de user.js no deshace nada: el valor ya está guardado en prefs.js y se queda
+// ahí. Para volver atrás hay que asignar el valor por defecto a mano.
+user_pref("fission.webContentIsolationStrategy", 1);
 
 // Procesos por sitio. Con 4, un solo sitio con varios subdominios puede abrir
 // cuatro. Con 2 sigue habiendo paralelismo y aislamiento.

@@ -472,12 +472,20 @@ impl App {
         let pat = Pattern::parse(&self.query, CaseMatching::Ignore, Normalization::Smart);
         let mut scored: Vec<(usize, u32)> = Vec::new();
         for (i, e) in self.entries.iter().enumerate() {
+            // Curated commands edge out applications on an equal match. There
+            // are two dozen of them and every one was written on purpose, while
+            // the Start Menu is full of near-misses that happen to share a word:
+            // typing "desinstalar" matched six vendor "Desinstalar <producto>"
+            // stubs before it reached our own uninstaller. Deliberately smaller
+            // than the name-hit bonus below, so an application matched by NAME
+            // still beats a command matched only by keyword.
+            let curated = if matches!(e.action, Action::Command { .. }) { 40 } else { 0 };
             let mut buf = Vec::new();
             let hay = nucleo_matcher::Utf32Str::new(&e.name, &mut buf);
             if let Some(s) = pat.score(hay, &mut self.matcher) {
                 // A hit on the name always outranks one on the folder, or
                 // typing "mozilla" would rank a stray helper above Firefox.
-                scored.push((i, s + 100));
+                scored.push((i, s + 100 + curated));
                 continue;
             }
             if e.keywords.is_empty() {
@@ -486,7 +494,7 @@ impl App {
             let mut b2 = Vec::new();
             let hay = nucleo_matcher::Utf32Str::new(&e.keywords, &mut b2);
             if let Some(s) = pat.score(hay, &mut self.matcher) {
-                scored.push((i, s));
+                scored.push((i, s + curated));
             }
         }
         scored.sort_by(|a, b| b.1.cmp(&a.1));
