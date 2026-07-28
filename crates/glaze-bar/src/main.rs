@@ -1948,6 +1948,18 @@ impl eframe::App for BarApp {
                     // Cheap no-op once done, but re-asserted because eframe can
                     // recreate the window under us.
                     unsafe { strip_native_frame(self.hwnd) };
+                    // Re-assert TOPMOST too. The style bit survives an explorer
+                    // restart but the z-band ordering does not: measured, a bar
+                    // with WS_EX_TOPMOST still set sat UNDER a plain Firefox
+                    // window after explorer came back, and the panic hotkey
+                    // (which only touches AltSnap and the AHK script) could not
+                    // help. One idempotent SetWindowPos per tick fixes it for
+                    // good.
+                    unsafe {
+                        const HWND_TOPMOST: isize = -1;
+                        const SWP: u32 = 0x0001 | 0x0002 | 0x0010; // NOSIZE NOMOVE NOACTIVATE
+                        SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP);
+                    }
                     let want = unsafe { should_clickthrough(self.hwnd) };
                     if want != self.clickthrough {
                         // Solo al cambiar: registrarlo dos veces por segundo

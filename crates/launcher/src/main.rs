@@ -524,7 +524,9 @@ impl App {
             self.run_row.as_ref().map(|r| (r.target.clone(), r.args.clone(), elevated))
         } else if self.selected - run < apps {
             self.hits.get(self.selected - run).map(|&(i, _)| match &self.entries[i].action {
-                Action::Shortcut(p) => (p.to_string_lossy().into_owned(), String::new(), elevated),
+                Action::Shortcut { target, args, .. } => {
+                    (target.to_string_lossy().into_owned(), args.clone(), elevated)
+                }
                 // A packaged app cannot be elevated -- Windows has no mechanism
                 // for it -- so the flag is ignored rather than quietly starting
                 // it unelevated as though it had worked.
@@ -797,8 +799,8 @@ impl eframe::App for App {
         }
         for &(i, _) in self.hits.iter().take(apps_n) {
             let id = match &self.entries[i].action {
-                Action::Shortcut(p) => {
-                    let s = p.to_string_lossy().into_owned();
+                Action::Shortcut { target, .. } => {
+                    let s = target.to_string_lossy().into_owned();
                     self.icons.get(ctx, &s, &s, icons::REAL)
                 }
                 // Un AUMID no es una ruta y el shell no le saca icono por aqui.

@@ -58,8 +58,13 @@ $Components = @(
 
     # dwindle: fibonacci layout (a child of GlazeWM, so it dies on a GlazeWM
     # restart). Checked by its own mutex rather than a WMI command-line match.
+    # Ruta COMPLETA a pwsh, no 'pwsh' a secas: Start-RiceComponent valida con
+    # Test-Path, que mira el sistema de archivos y no el PATH, asi que el nombre
+    # suelto fallaba siempre con "missing binary" y dwindle se quedaba muerto
+    # tras cada reinicio de GlazeWM (que mata a su hijo). Descubierto porque el
+    # log lo repetia en cada tick.
     @{ Name = 'dwindle'; Check = 'Mutex'; Match = 'Global\glazewm-dwindle-ps'
-       Path = { 'pwsh' }
+       Path = { (Get-Command pwsh -ErrorAction SilentlyContinue).Source ?? "$env:ProgramFiles\PowerShell\7\pwsh.exe" }
        Args = { @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
                   '-File', "$($Rice.Config)\glazewm-dwindle.ps1") } }
 

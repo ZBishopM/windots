@@ -29,6 +29,8 @@
 //! seconds. --watch re-asserts the hide whenever Explorer reveals it.
 
 #[cfg(windows)]
+mod appbar;
+#[cfg(windows)]
 mod tray;
 
 #[cfg(windows)]
@@ -287,6 +289,12 @@ fn main() {
     if !watch {
         return;
     }
+
+    // Cada monitor sin barra de tareas recibe su propia reserva de 48px, para
+    // que el outer_gap.bottom negativo de GlazeWM (que compensa la reserva del
+    // primario) no empuje las ventanas fuera de pantalla en los demas. Ver
+    // appbar.rs para la cadena completa de porques.
+    appbar::reserve_secondary_strips();
 
     // Read the tray and publish it for the bar.
     //
