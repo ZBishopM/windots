@@ -34,7 +34,8 @@ $Map = [ordered]@{
 foreach ($f in 'glazewm-dwindle.ps1', 'glazewm-animcheck.ps1', 'wezterm-hotkey.ahk',
                'shadowplay-record.ps1', 'shadowplay-record.vbs', 'shadowplay-wgc-save.ps1',
                'shadowplay-wgc.vbs', 'rice-supervisor.ps1', 'rice-supervisor.vbs',
-               'rice-autostart.ps1', 'rice-autostart.vbs', 'rice-tray-promote.ps1') {
+               'rice-autostart.ps1', 'rice-autostart.vbs', 'rice-tray-promote.ps1',
+               'rice-trim-background.ps1') {
     $Map["scripts\$f"] = "$home_\.config\$f"
 }
 foreach ($f in Get-ChildItem "$home_\.config\lib\*.ps1" -EA SilentlyContinue) {
