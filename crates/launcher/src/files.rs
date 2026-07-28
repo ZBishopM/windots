@@ -340,6 +340,16 @@ impl FileIndex {
                     walk_all(&cfg, &store, &dirs, &count);
                     dirs.write().unwrap().build_index();
                     scanning.store(false, Ordering::Release);
+                    // Hand the walk's peak back to the system, once.
+                    //
+                    // The arenas are already shrunk to fit, but the heap does not
+                    // return freed pages on its own: measured, the process sat at
+                    // 223 MB after a walk whose result is ~117 MB. The rest was
+                    // the job stack, the lowercased paths and the buckets the
+                    // directory map grew through. The periodic trim in the UI
+                    // loop cannot do this -- it only runs on idle frames, and an
+                    // idle launcher asks for one an hour.
+                    rice_common::win::trim_ram();
                     // Los vigilantes sólo tienen sentido sobre un árbol ya
                     // recorrido: antes, los avisos hablarían de directorios cuyo
                     // id todavía no existe.
