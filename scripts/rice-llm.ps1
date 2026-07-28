@@ -23,10 +23,26 @@
 #    por PCIe y la generacion cayo a 2 tok/s. De ahi `--parallel 1`.
 #
 # 2. El optimo que da llama-bench NO es el optimo del servidor. El banco no
-#    reserva el contexto completo, asi que dijo que lo mejor era --n-cpu-moe 18
-#    (36,3 tok/s). Al arrancar el servidor con 32k de contexto, 18 no cabe. El
-#    valor que funciona de verdad aqui es 24: deja ~1,7 GB de VRAM libres y da
-#    19 tok/s medidos de punta a punta.
+#    reserva el contexto completo ni compite con el navegador por la VRAM, asi
+#    que dijo que lo mejor era --n-cpu-moe 18. Con el servidor real, 18 no cabe.
+#
+# 3. LA GRANDE: --no-mmap. Sin ella, los tensores que van a la CPU se quedan
+#    MAPEADOS desde el archivo de 16,85 GB en disco en vez de cargarse en RAM.
+#    Cada token que toca un experto es un fallo de pagina contra el disco. El
+#    propio llama.cpp lo avisa al cargar:
+#
+#      tensor overrides to CPU are used with mmap enabled
+#      - consider using --no-mmap for better performance
+#
+#    Medido en esta maquina, con el navegador abierto comiendose la cache de
+#    archivos: 1,2 tok/s con mmap, 23,4 tok/s sin ella. Diecinueve veces. Se
+#    paga en el arranque -- 112 s leyendo el modelo entero de disco en vez de
+#    50 -- y esa es toda la contrapartida.
+#
+#    Por eso tambien el contexto baja de 32k a 16k y --n-cpu-moe sube a 28: con
+#    Firefox abierto la GPU tiene menos sitio del que tenia en las pruebas, y
+#    quedarse sin VRAM devuelve al mismo agujero por otra via (CUDA se desborda
+#    a memoria compartida por PCIe).
 #
 # Y una nota de uso: Qwen3.6 es un modelo de RAZONAMIENTO. La respuesta llega en
 # `reasoning_content` mientras piensa y en `content` al final. Con pocos tokens
@@ -39,7 +55,7 @@ param(
     [switch]$Status,
     [switch]$Chat,
     [int]$CpuMoe = 0,
-    [int]$Ctx = 32768,
+    [int]$Ctx = 16384,
     [int]$Port = 8080
 )
 
@@ -103,7 +119,8 @@ if ($Tune) {
     $best = $null; $bestTps = 0
     foreach ($n in 34, 28, 26, 24, 22, 20) {
         Write-Host ("`n--- n-cpu-moe = $n ---")
-        $out = & $bench -m $model -ngl 99 --n-cpu-moe $n -t 6 -p 256 -n 64 -r 2 2>&1
+        # --no-mmap tambien aqui, o el banco mide otra cosa que el servidor.
+        $out = & $bench -m $model -ngl 99 --n-cpu-moe $n --no-mmap -t 6 -p 256 -n 64 -r 2 2>&1
         $line = $out | Select-String 'tg\d+|tg ' | Select-Object -Last 1
         $tps = 0.0
         if ($out -join "`n" -match '\|\s*tg\d+\s*\|\s*([\d.]+)') { $tps = [double]$Matches[1] }
@@ -136,6 +153,7 @@ $args = @(
     '--n-cpu-moe', $CpuMoe,   # ...menos los expertos de las primeras N, que van a RAM
     '-c', $Ctx,
     '--parallel', '1',        # UNA ranura, no cuatro
+    '--no-mmap',              # OBLIGATORIO aqui; ver la nota 3 de arriba
     '-fa', 'on',              # flash attention: menos VRAM de KV y mas rapido
     '-t', '6',                # 6 nucleos fisicos; poner 12 con HT suele ir PEOR
     '--host', '127.0.0.1',    # solo local, nada expuesto a la red
