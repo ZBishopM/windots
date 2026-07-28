@@ -246,6 +246,16 @@ pub struct Settings {
     #[serde(default = "default_clickthrough")]
     pub clickthrough_apps: Vec<String>,
 
+    /// Hide the bar entirely while a fullscreen application covers its monitor.
+    ///
+    /// The bar used to only become click-through there: still drawn, still on
+    /// top of the game, just not clickable. Notifications are the exception --
+    /// the island still appears over a game, because the point of a notification
+    /// is to be seen. Anything else (workspaces, clock, metrics) is noise over
+    /// something running fullscreen.
+    #[serde(default = "default_hide_on_fs")]
+    pub hide_bar_on_fullscreen: bool,
+
     /// Motion tuning. Edit and save; the bar picks it up on the next frame.
     #[serde(default = "default_animation")]
     pub animation: Animation,
@@ -254,6 +264,8 @@ pub struct Settings {
     #[serde(default = "default_launcher")]
     pub launcher: Launcher,
 }
+
+fn default_hide_on_fs() -> bool { true }
 
 fn default_clickthrough() -> Vec<String> {
     vec!["league of legends".into(), "valorant".into()]
@@ -268,6 +280,7 @@ impl Default for Settings {
             notification_style: default_notification_style(),
             ipc_url: default_ipc(),
             clickthrough_apps: default_clickthrough(),
+            hide_bar_on_fullscreen: default_hide_on_fs(),
             animation: Animation::default(),
             launcher: Launcher::default(),
         }

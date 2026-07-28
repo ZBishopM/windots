@@ -25,6 +25,14 @@ use rice_common::theme;
 use rice_common::ui::col;
 
 const SHOW_EVENT: &str = "Global\\rice-launcher-show";
+
+/// How long the accepted row stays lit before the box disappears.
+///
+/// It is an acknowledgement, not an animation. Pressing Enter used to produce
+/// nothing at all on screen for as long as the launch took, and the launch takes
+/// a while (see `launch_async`), so the box just sat there looking frozen.
+const FLASH_MS: u64 = 110;
+
 const MAX_ROWS: usize = 9;
 const ROW_H: f32 = 34.0;
 const INPUT_H: f32 = 46.0;
@@ -209,6 +217,10 @@ struct App {
     /// walked and nothing is held in memory.
     files: Option<files::FileIndex>,
     file_hits: Vec<files::FileHit>,
+    /// Set when Enter was accepted. The chosen row stays lit for [`FLASH_MS`],
+    /// then the box closes. Without it the only sign anything happened was the
+    /// application's own window, seconds later.
+    flash: Option<std::time::Instant>,
     /// Rows the window was last sized for. File results arrive after the window
     /// is already open, so it has to grow to fit them.
     sized_rows: usize,
@@ -237,6 +249,7 @@ impl App {
             started: false,
             files,
             file_hits: Vec::new(),
+            flash: None,
             sized_rows: 0,
         };
         s.refilter();
@@ -307,22 +320,27 @@ impl App {
 
     fn launch(&mut self, elevated: bool) {
         let apps = self.app_shown();
-        if self.selected < apps {
-            if let Some(&(i, _)) = self.hits.get(self.selected) {
-                match &self.entries[i].action {
-                    Action::Shortcut(p) => open_via_shell(&p.to_string_lossy(), elevated),
-                    // A packaged app cannot be elevated -- Windows has no
-                    // mechanism for it -- so the flag is ignored rather than
-                    // quietly starting it unelevated as though it had worked.
-                    Action::Aumid(id) => open_via_shell(&format!("shell:AppsFolder\\{id}"), false),
-                }
-            }
-        } else if let Some(h) = self.file_hits.get(self.selected - apps) {
-            // A folder opens in Explorer and a file in whatever owns it, which
-            // is the same call: the shell decides from the target.
-            open_via_shell(&h.path, elevated);
-        }
-        self.close();
+        let target = if self.selected < apps {
+            self.hits.get(self.selected).map(|&(i, _)| match &self.entries[i].action {
+                Action::Shortcut(p) => (p.to_string_lossy().into_owned(), elevated),
+                // A packaged app cannot be elevated -- Windows has no mechanism
+                // for it -- so the flag is ignored rather than quietly starting
+                // it unelevated as though it had worked.
+                Action::Aumid(id) => (format!("shell:AppsFolder\\{id}"), false),
+            })
+        } else {
+            // A folder opens in Explorer and a file in whatever owns it: the
+            // same call either way, since the shell decides from the target.
+            self.file_hits.get(self.selected - apps).map(|h| (h.path.clone(), elevated))
+        };
+        let Some((target, elevated)) = target else {
+            self.close();
+            return;
+        };
+        launch_async(target, elevated);
+        // Deliberately NOT closing yet. The lit row is the only acknowledgement
+        // the keypress gets, and the application's own window is seconds away.
+        self.flash = Some(std::time::Instant::now());
     }
 
     fn open(&mut self, ctx: &egui::Context) {
@@ -330,6 +348,7 @@ impl App {
         // want: you press the hotkey to search for something new.
         self.query.clear();
         self.on_query_changed();
+        self.flash = None;
         self.visible = true;
         self.opened_at = Some(std::time::Instant::now());
         self.sized_rows = self.rows().max(1);
@@ -340,6 +359,7 @@ impl App {
 
     fn close(&mut self) {
         self.visible = false;
+        self.flash = None;
         // Discard what was typed here rather than in open(), so nothing is left
         // sitting in memory while hidden.
         self.query.clear();
@@ -382,6 +402,23 @@ fn primary_size() -> (f32, f32) {
     }
     #[cfg(not(windows))]
     (1920.0, 1080.0)
+}
+
+/// Start something without blocking the interface.
+///
+/// Measured on this machine, `ShellExecuteW` takes **440-930 ms** on a warm
+/// cache and **over 5 seconds** cold. It ran on the UI thread, before the window
+/// was hidden, so the search box stayed on screen frozen for exactly that long
+/// after Enter -- which is the whole of "no feedback, and it feels slow".
+///
+/// A thread per launch rather than a worker queue: `ShellExecuteW` goes through
+/// arbitrary shell extensions, and one that decides to block would put every
+/// later launch behind it. Spawning costs microseconds next to half a second.
+fn launch_async(target: String, elevated: bool) {
+    std::thread::Builder::new()
+        .name("shell-exec".into())
+        .spawn(move || open_via_shell(&target, elevated))
+        .ok();
 }
 
 /// Start something, optionally elevated.
@@ -465,6 +502,20 @@ impl eframe::App for App {
             return;
         }
 
+        // A launch was accepted: hold the lit row, then go. Input is ignored
+        // meanwhile -- further keys would act on a choice already committed.
+        let flashing = match self.flash {
+            Some(t) if t.elapsed() >= std::time::Duration::from_millis(FLASH_MS) => {
+                self.close();
+                return;
+            }
+            Some(_) => {
+                ctx.request_repaint();
+                true
+            }
+            None => false,
+        };
+
         // Closing on focus loss is what makes it feel like a launcher rather
         // than a window. The grace period matters: focus does not arrive on the
         // frame the window appears, so checking immediately closed it before it
@@ -473,7 +524,9 @@ impl eframe::App for App {
             .opened_at
             .map(|t| t.elapsed() > std::time::Duration::from_millis(250))
             .unwrap_or(true);
-        if settled && !ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
+        // ...but not while flashing: the application being started takes the
+        // foreground, and closing on that would swallow the acknowledgement.
+        if settled && !flashing && !ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
             self.close();
             return;
         }
@@ -487,20 +540,21 @@ impl eframe::App for App {
         }
         self.refit();
 
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.close();
-            return;
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-            self.selected = (self.selected + 1).min(self.rows().saturating_sub(1));
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-            self.selected = self.selected.saturating_sub(1);
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-            let admin = ctx.input(|i| i.modifiers.ctrl);
-            self.launch(admin);
-            return;
+        if !flashing {
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.close();
+                return;
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                self.selected = (self.selected + 1).min(self.rows().saturating_sub(1));
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                self.selected = self.selected.saturating_sub(1);
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                let admin = ctx.input(|i| i.modifiers.ctrl);
+                self.launch(admin);
+            }
         }
 
         egui::CentralPanel::default()
@@ -539,11 +593,15 @@ impl eframe::App for App {
                     let rect = ui.allocate_space(egui::vec2(ui.available_width(), ROW_H - 4.0)).1;
                     let on = n == self.selected;
                     if on {
+                        // Same colour, four times the presence: the accepted row
+                        // has to read as a different thing from the merely
+                        // selected one at a glance, in about a tenth of a second.
+                        let a = if flashing { 170 } else { 40 };
                         ui.painter().rect_filled(
                             rect,
                             egui::Rounding::same(8.0),
                             egui::Color32::from_rgba_unmultiplied(
-                                accent.r(), accent.g(), accent.b(), 40,
+                                accent.r(), accent.g(), accent.b(), a,
                             ),
                         );
                     }

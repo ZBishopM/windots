@@ -1968,6 +1968,21 @@ impl eframe::App for BarApp {
             BAR_BG.b(),
             (self.bar_opacity * 255.0) as u8,
         );
+        // A fullscreen application owns the screen. `self.clickthrough` already
+        // says one is covering this monitor -- it is what disarms hit-testing --
+        // so the same answer decides whether anything is drawn at all.
+        //
+        // The window stays alive and keeps rendering: it just renders nothing.
+        // Tearing it down would lose the GL context and the notification would
+        // have nowhere to appear.
+        let hidden = self.clickthrough
+            && rice_common::settings::Settings::live().hide_bar_on_fullscreen;
+        let bar_bg = if hidden { egui::Color32::TRANSPARENT } else { bar_bg };
+        // An open panel would otherwise stay parked over the game, unclickable
+        // (the bar is click-through here) and impossible to dismiss.
+        if hidden && self.isl_expanded {
+            self.want_close = true;
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(10.0, 5.0)))
             .show(ctx, |ui| {
@@ -1998,6 +2013,11 @@ impl eframe::App for BarApp {
                 let dt = (now_i - self.last_frame).as_secs_f32().clamp(0.0, 0.05);
                 self.last_frame = now_i;
 
+                // Workspaces, clock and metrics are the bar. Over a fullscreen
+                // application none of them are worth covering a pixel of it, so
+                // the whole strip is skipped -- but the island block below still
+                // runs, because a notification IS worth covering a pixel of it.
+                if !hidden {
                 ui.allocate_ui_at_rect(full, |ui| {
                 ui.horizontal_centered(|ui| {
                     // ---- left: workspaces (clickable -> focus that workspace) ----
@@ -2100,6 +2120,7 @@ impl eframe::App for BarApp {
                     });
                 });
                 });
+                }
 
                 // ---- center: dynamic island (morphs to show context) ----
                 // pick up a new event; expire an old one after the hold window
@@ -2114,6 +2135,14 @@ impl eframe::App for BarApp {
                         self.isl_notif = None;
                     }
                 }
+
+                // Over a fullscreen application the island appears ONLY to
+                // deliver a notification. The state machine above still runs
+                // either way -- it is what notices a new event and expires an
+                // old one -- so what is gated here is the drawing, not the
+                // knowing.
+                let island_off = hidden && self.isl_notif.is_none();
+                if !island_off {
 
                 // ---- dynamic island: the clock is ALWAYS shown; the pill extends to
                 // the right (bar height unchanged) for quick-actions / notifications ----
@@ -2386,6 +2415,7 @@ impl eframe::App for BarApp {
                 {
                     ctx.request_repaint();
                 }
+                } // if !island_off
             });
         drop(s);
 
