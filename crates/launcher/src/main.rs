@@ -14,7 +14,9 @@
 //!   launcher            run the resident instance
 //!   launcher --show     tell the resident instance to open (what the hotkey does)
 
+mod commands;
 mod files;
+mod icons;
 mod index;
 
 use eframe::egui;
@@ -32,6 +34,9 @@ const SHOW_EVENT: &str = "Global\\rice-launcher-show";
 /// nothing at all on screen for as long as the launch took, and the launch takes
 /// a while (see `launch_async`), so the box just sat there looking frozen.
 const FLASH_MS: u64 = 110;
+
+/// Donde empieza el texto de una fila. Fijo, con icono o sin el.
+const TEXT_X: f32 = 40.0;
 
 const MAX_ROWS: usize = 9;
 const ROW_H: f32 = 34.0;
@@ -318,6 +323,31 @@ fn signal_show() -> bool {
     }
 }
 
+/// Que icono pedir para un resultado de archivo: (clave, ruta, por-extension).
+///
+/// Casi todo va por extension, porque el icono de un `.rs` no depende de que
+/// `.rs` sea y asi dos millones de archivos son un punado de consultas. Las
+/// excepciones son los tipos donde el icono ES la informacion -- un ejecutable
+/// o un acceso directo se reconocen por su icono, no por su extension -- y esos
+/// se piden por ruta.
+fn icon_request(h: &files::FileHit) -> (String, String, u32) {
+    if h.is_dir {
+        return ("dir".into(), "carpeta".into(), icons::DIR);
+    }
+    let ext = h
+        .name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    if matches!(ext.as_str(), "exe" | "lnk" | "msi" | "ico" | "cpl" | "scr") {
+        (h.path.clone(), h.path.clone(), icons::REAL)
+    } else if ext.is_empty() || ext.len() > 8 {
+        ("sin-extension".into(), "archivo".into(), icons::FILE)
+    } else {
+        (format!(".{ext}"), format!("archivo.{ext}"), icons::FILE)
+    }
+}
+
 /// Do we have the keyboard?
 ///
 /// On Windows this asks the OS rather than the toolkit. eframe's
@@ -358,6 +388,13 @@ struct App {
     /// walked and nothing is held in memory.
     files: Option<files::FileIndex>,
     file_hits: Vec<files::FileHit>,
+    icons: icons::Icons,
+    /// Todo lo ejecutable del PATH, recorrido una vez.
+    runner: commands::Runner,
+    /// La fila de "ejecutar esto", si lo escrito da para una. Va la primera
+    /// porque es la más literal de todas: el usuario ha escrito un comando, no
+    /// ha pedido que se adivine nada.
+    run_row: Option<commands::Run>,
     /// Set when Enter was accepted. The chosen row stays lit for [`FLASH_MS`],
     /// then the box closes. Without it the only sign anything happened was the
     /// application's own window, seconds later.
@@ -377,6 +414,10 @@ impl App {
             let ctx = ctx.clone();
             files::FileIndex::new(std::sync::Arc::new(move || ctx.request_repaint()))
         });
+        let icons = {
+            let ctx = ctx.clone();
+            icons::Icons::new(std::sync::Arc::new(move || ctx.request_repaint()))
+        };
         let mut s = Self {
             entries,
             matcher: Matcher::new(Config::DEFAULT),
@@ -389,6 +430,9 @@ impl App {
             idle: 0,
             started: false,
             files,
+            icons,
+            runner: commands::Runner::new(),
+            run_row: None,
             file_hits: Vec::new(),
             flash: None,
             sized_rows: 0,
@@ -397,19 +441,24 @@ impl App {
         s
     }
 
+    /// The run row: zero or one.
+    fn run_n(&self) -> usize {
+        usize::from(self.run_row.is_some())
+    }
+
     /// Application rows on screen.
     fn app_shown(&self) -> usize {
         let cap = if self.file_hits.is_empty() { MAX_ROWS } else { APP_ROWS };
-        self.hits.len().min(cap)
+        self.hits.len().min(cap.saturating_sub(self.run_n()))
     }
 
-    /// File rows on screen: whatever the applications left over.
+    /// File rows on screen: whatever the rest left over.
     fn file_shown(&self) -> usize {
-        self.file_hits.len().min(MAX_ROWS - self.app_shown())
+        self.file_hits.len().min(MAX_ROWS - self.run_n() - self.app_shown())
     }
 
     fn rows(&self) -> usize {
-        self.app_shown() + self.file_shown()
+        self.run_n() + self.app_shown() + self.file_shown()
     }
 
     fn refilter(&mut self) {
@@ -452,6 +501,7 @@ impl App {
     /// dropping a frame on every keystroke, since a full sweep of two million
     /// entries is tens of milliseconds.
     fn on_query_changed(&mut self) {
+        self.run_row = self.runner.offer(&self.query);
         self.refilter();
         if let Some(f) = &self.files {
             f.search(&self.query, MAX_ROWS);
@@ -460,25 +510,31 @@ impl App {
     }
 
     fn launch(&mut self, elevated: bool) {
+        let run = self.run_n();
         let apps = self.app_shown();
-        let target = if self.selected < apps {
-            self.hits.get(self.selected).map(|&(i, _)| match &self.entries[i].action {
-                Action::Shortcut(p) => (p.to_string_lossy().into_owned(), elevated),
+        let target = if run == 1 && self.selected == 0 {
+            self.run_row.as_ref().map(|r| (r.target.clone(), r.args.clone(), elevated))
+        } else if self.selected - run < apps {
+            self.hits.get(self.selected - run).map(|&(i, _)| match &self.entries[i].action {
+                Action::Shortcut(p) => (p.to_string_lossy().into_owned(), String::new(), elevated),
                 // A packaged app cannot be elevated -- Windows has no mechanism
                 // for it -- so the flag is ignored rather than quietly starting
                 // it unelevated as though it had worked.
-                Action::Aumid(id) => (format!("shell:AppsFolder\\{id}"), false),
+                Action::Aumid(id) => (format!("shell:AppsFolder\\{id}"), String::new(), false),
+                Action::Command { target, args } => (target.clone(), args.clone(), elevated),
             })
         } else {
             // A folder opens in Explorer and a file in whatever owns it: the
             // same call either way, since the shell decides from the target.
-            self.file_hits.get(self.selected - apps).map(|h| (h.path.clone(), elevated))
+            self.file_hits
+                .get(self.selected - run - apps)
+                .map(|h| (h.path.clone(), String::new(), elevated))
         };
-        let Some((target, elevated)) = target else {
+        let Some((target, args, elevated)) = target else {
             self.close();
             return;
         };
-        launch_async(target, elevated);
+        launch_async(target, args, elevated);
         // Deliberately NOT closing yet. The lit row is the only acknowledgement
         // the keypress gets, and the application's own window is seconds away.
         self.flash = Some(std::time::Instant::now());
@@ -555,10 +611,10 @@ fn primary_size() -> (f32, f32) {
 /// A thread per launch rather than a worker queue: `ShellExecuteW` goes through
 /// arbitrary shell extensions, and one that decides to block would put every
 /// later launch behind it. Spawning costs microseconds next to half a second.
-fn launch_async(target: String, elevated: bool) {
+fn launch_async(target: String, args: String, elevated: bool) {
     std::thread::Builder::new()
         .name("shell-exec".into())
-        .spawn(move || open_via_shell(&target, elevated))
+        .spawn(move || open_via_shell(&target, &args, elevated))
         .ok();
 }
 
@@ -569,7 +625,7 @@ fn launch_async(target: String, elevated: bool) {
 /// to ask for elevation -- that is what raises the UAC prompt. It also does not
 /// make the launcher the parent of what it starts, so closing this window can
 /// never take the launched application with it.
-fn open_via_shell(target: &str, elevated: bool) {
+fn open_via_shell(target: &str, args: &str, elevated: bool) {
     #[cfg(windows)]
     unsafe {
         #[link(name = "shell32")]
@@ -585,17 +641,18 @@ fn open_via_shell(target: &str, elevated: bool) {
         }
         let verb: Vec<u16> = if elevated { "runas\0".encode_utf16().collect() } else { "open\0".encode_utf16().collect() };
         let file: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
+        let params: Vec<u16> = args.encode_utf16().chain(Some(0)).collect();
         ShellExecuteW(
             0,
             verb.as_ptr(),
             file.as_ptr(),
-            std::ptr::null(),
+            if args.is_empty() { std::ptr::null() } else { params.as_ptr() },
             std::ptr::null(),
             1, // SW_SHOWNORMAL
         );
     }
     #[cfg(not(windows))]
-    let _ = (target, elevated);
+    let _ = (target, args, elevated);
 }
 
 impl eframe::App for App {
@@ -712,6 +769,55 @@ impl eframe::App for App {
             }
         }
 
+        // Los iconos se resuelven ANTES de dibujar. Dentro del cierre no cabe:
+        // pedirlos toma `&mut self.icons` mientras el cierre ya tiene prestado
+        // `self` para leer la fila seleccionada.
+        let run_n = self.run_n();
+        let apps_n = self.app_shown();
+        let files_n = self.file_shown();
+        let mut row_icons: Vec<Option<egui::TextureId>> =
+            Vec::with_capacity(run_n + apps_n + files_n);
+        if let Some(r) = self.run_row.clone() {
+            // El icono del propio ejecutable, cuando el destino es una ruta.
+            // Para `ms-settings:` o una URL no hay nada que sacar.
+            let id = if r.target.contains('\\') {
+                self.icons.get(ctx, &r.target, &r.target, icons::REAL)
+            } else {
+                None
+            };
+            row_icons.push(id);
+        }
+        for &(i, _) in self.hits.iter().take(apps_n) {
+            let id = match &self.entries[i].action {
+                Action::Shortcut(p) => {
+                    let s = p.to_string_lossy().into_owned();
+                    self.icons.get(ctx, &s, &s, icons::REAL)
+                }
+                // Un AUMID no es una ruta y el shell no le saca icono por aqui.
+                Action::Aumid(_) => None,
+                // `rundll32.exe` o `shell:RecycleBinFolder`: el shell resuelve
+                // los dos, pero solo el primero es un archivo con icono. Y hay
+                // que darle la ruta entera -- un nombre suelto lo busca contra
+                // el directorio actual, donde no está.
+                Action::Command { target, .. } => {
+                    let t = if target.contains('\\') {
+                        Some(target.clone())
+                    } else {
+                        self.runner.resolve(target).map(|p| p.to_string_lossy().into_owned())
+                    };
+                    match t {
+                        Some(t) => self.icons.get(ctx, &t, &t, icons::REAL),
+                        None => None,
+                    }
+                }
+            };
+            row_icons.push(id);
+        }
+        for k in 0..files_n {
+            let (key, path, attrs) = icon_request(&self.file_hits[k]);
+            row_icons.push(self.icons.get(ctx, &key, &path, attrs));
+        }
+
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::none()
@@ -737,6 +843,7 @@ impl eframe::App for App {
                 ui.add_space(6.0);
 
                 let accent = col(theme::ACCENT);
+                let run = self.run_n();
                 let apps = self.app_shown();
                 let files_n = self.file_shown();
 
@@ -744,7 +851,12 @@ impl eframe::App for App {
                 // padding and the trailing hint cannot drift apart -- two copies
                 // of this in an earlier screen is exactly how the island's close
                 // logic ended up resetting three of seven flags.
-                let mut row = |ui: &mut egui::Ui, n: usize, name: &str, trail: &str, dim: bool| {
+                let mut row = |ui: &mut egui::Ui,
+                               n: usize,
+                               name: &str,
+                               trail: &str,
+                               dim: bool,
+                               icon: Option<egui::TextureId>| {
                     let rect = ui.allocate_space(egui::vec2(ui.available_width(), ROW_H - 4.0)).1;
                     let on = n == self.selected;
                     if on {
@@ -767,10 +879,24 @@ impl eframe::App for App {
                     } else {
                         col(theme::TEXT)
                     };
+                    if let Some(id) = icon {
+                        ui.painter().image(
+                            id,
+                            egui::Rect::from_center_size(
+                                egui::pos2(rect.left() + 20.0, rect.center().y),
+                                egui::vec2(20.0, 20.0),
+                            ),
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                    }
+                    // El texto arranca siempre en el mismo sitio, haya icono o
+                    // no: si se moviera, las filas bailarian mientras los iconos
+                    // van llegando desde su hilo.
                     let w = ui
                         .painter()
                         .text(
-                            egui::pos2(rect.left() + 10.0, rect.center().y),
+                            egui::pos2(rect.left() + TEXT_X, rect.center().y),
                             egui::Align2::LEFT_CENTER,
                             name,
                             egui::FontId::proportional(15.0),
@@ -782,7 +908,7 @@ impl eframe::App for App {
                         // tells four files called main.rs apart, so it is not
                         // decoration -- but it must never outshout the name.
                         ui.painter().text(
-                            egui::pos2(rect.left() + 20.0 + w, rect.center().y),
+                            egui::pos2(rect.left() + TEXT_X + 10.0 + w, rect.center().y),
                             egui::Align2::LEFT_CENTER,
                             trail,
                             egui::FontId::proportional(12.0),
@@ -791,16 +917,33 @@ impl eframe::App for App {
                     }
                 };
 
+                if let Some(r) = &self.run_row {
+                    row(ui, 0, &r.label, &r.hint, false, row_icons.first().copied().flatten());
+                }
                 for (n, &(i, _)) in self.hits.iter().take(apps).enumerate() {
                     let e = &self.entries[i];
-                    row(ui, n, &e.name, "", false);
+                    let hint = match &e.action {
+                        // Se marca lo que NO es una aplicación, para que una
+                        // fila que apaga el equipo no se confunda con una que
+                        // abre un programa.
+                        Action::Command { .. } => "comando",
+                        _ => "",
+                    };
+                    row(ui, run + n, &e.name, hint, false, row_icons.get(run + n).copied().flatten());
                 }
                 for (k, h) in self.file_hits.iter().take(files_n).enumerate() {
                     // The name is already the tail of the path; showing the
                     // folder alone keeps the row from repeating itself.
                     let folder = h.path.strip_suffix(&h.name).unwrap_or(&h.path);
                     let folder = folder.trim_end_matches('\\');
-                    row(ui, apps + k, &h.name, folder, true);
+                    row(
+                        ui,
+                        run + apps + k,
+                        &h.name,
+                        folder,
+                        true,
+                        row_icons.get(run + apps + k).copied().flatten(),
+                    );
                 }
             });
 

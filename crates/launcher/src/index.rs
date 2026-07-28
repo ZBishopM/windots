@@ -24,6 +24,9 @@ pub enum Action {
     Shortcut(PathBuf),
     /// A packaged app, launched through its AppUserModelID.
     Aumid(String),
+    /// A system action. Anything the shell can already start, spelled out --
+    /// see `commands::builtin`.
+    Command { target: String, args: String },
 }
 
 /// Start Menu shortcuts, user's and machine-wide.
@@ -134,5 +137,9 @@ pub fn build() -> Vec<Entry> {
     // two identical rows with different launch paths.
     all.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     all.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
+    // Commands last, outside the dedup: they are not applications, and one must
+    // not disappear because some installer shipped a shortcut with the same
+    // name. Order does not matter -- the matcher scores, it does not scan.
+    all.extend(crate::commands::builtin());
     all
 }

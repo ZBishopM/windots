@@ -50,7 +50,18 @@ Cierra sesión y vuelve a entrar (o reinicia) para que arranque todo.
 | **ws-slide** | Animación de deslizamiento al cambiar de workspace. **Es dueño de SUPER+1..9** (GlazeWM ya no los bindea), así que si muere, el cambio de workspace deja de funcionar hasta que el supervisor lo reviva | binario en `~/dev/target/release/` |
 | **rice-supervisor** | Watchdog: revive cualquier componente que muera (<60s). Tabla de componentes + log en `~/.config/logs/` | `~/.config/rice-supervisor.ps1` |
 | **cava** | Visualizador de espectro de audio en terminal (FFT, 165fps) | binario en `~/dev/target/release/`, comando `cava` |
-| **launcher** | El buscador de `Win+Space`: aplicaciones + archivos, difuso, `Ctrl+Enter` abre como administrador. Índice de archivos propio (ver abajo) | `~/dev/crates/launcher` |
+| **launcher** | El buscador de `Win+Space`. Busca **aplicaciones**, **archivos** (índice propio, ver abajo) y **comandos**, difuso y con iconos. `Ctrl+Enter` abre como administrador | `~/dev/crates/launcher` |
+
+**Comandos** son tres cosas distintas en la misma lista:
+- **Acciones del sistema** que no tienen acceso directo: bloquear, suspender, apagar, cerrar
+  sesión, administrador de tareas/dispositivos, servicios, `ms-settings:*`, papelera, y dos
+  del rice (`Editar rice.json`, `Recargar la configuración de GlazeWM`). Se buscan en
+  español o en inglés (`lock` encuentra *Bloquear la sesión*).
+- **Ejecutar** cualquier cosa del `PATH`, con argumentos — el reemplazo de `Win+R`. El PATH
+  se recorre **una vez al arrancar**; resolver a mano serían ~120 consultas al disco por
+  tecla pulsada.
+- **Rutas y URLs**: una ruta que existe se abre, y `www.…` o `http…` van al navegador.
+  Prefijo `>` fuerza la ejecución sin comprobar nada.
 
 #### Por qué el índice de archivos es propio
 
