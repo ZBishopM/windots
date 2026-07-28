@@ -52,6 +52,20 @@ pub fn builtin() -> Vec<Entry> {
         // Las del propio escritorio. Editar rice.json es lo que más se hace de
         // todo esto, y hasta ahora había que ir a buscarlo.
         ("Editar rice.json", "notepad.exe", r"%USERPROFILE%\.config\rice.json", "rice config configuracion json"),
+        // El modelo local. Arrancar tarda ~50 s y ocupa 10 GB de VRAM y 15 de
+        // RAM, asi que se enciende y se apaga a mano en vez de dejarlo residente.
+        (
+            "Arrancar el modelo local",
+            "pwsh.exe",
+            r"-NoProfile -File %USERPROFILE%\.config\rice-llm.ps1",
+            "llm ia ai qwen modelo local llama jarvis arrancar",
+        ),
+        (
+            "Parar el modelo local",
+            "pwsh.exe",
+            r"-NoProfile -File %USERPROFILE%\.config\rice-llm.ps1 -Stop",
+            "llm ia ai qwen modelo local llama jarvis parar detener",
+        ),
         // Va por wezterm porque el script pregunta: enseña la lista, espera un
         // número y luego una confirmación. Lanzarlo con ShellExecuteW a secas lo
         // dejaría sin ningún sitio donde escribir la respuesta.

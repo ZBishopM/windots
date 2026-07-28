@@ -13,6 +13,24 @@
 #
 # El reparto: las capas de atencion y los expertos compartidos van a la GPU, y
 # los 256 expertos enrutados a la RAM. Eso es lo que hace `--n-cpu-moe`.
+#
+# DOS TRAMPAS QUE COSTARON MEDIDAS, y por eso estan escritas aqui:
+#
+# 1. llama-server abre CUATRO ranuras por defecto, cada una con el contexto
+#    ENTERO. Con -c 32768 eso son 131072 tokens de cache KV, cuatro veces lo
+#    necesario. Con eso la VRAM se quedo en 127 MiB libres, CUDA empezo a tirar
+#    por PCIe y la generacion cayo a 2 tok/s. De ahi `--parallel 1`.
+#
+# 2. El optimo que da llama-bench NO es el optimo del servidor. El banco no
+#    reserva el contexto completo, asi que dijo que lo mejor era --n-cpu-moe 18
+#    (36,3 tok/s). Al arrancar el servidor con 32k de contexto, 18 no cabe. El
+#    valor que funciona de verdad aqui es 24: deja ~1,7 GB de VRAM libres y da
+#    19 tok/s medidos de punta a punta.
+#
+# Y una nota de uso: Qwen3.6 es un modelo de RAZONAMIENTO. La respuesta llega en
+# `reasoning_content` mientras piensa y en `content` al final. Con pocos tokens
+# de limite se gasta el presupuesto pensando y `content` vuelve VACIO. Dale
+# margen (600+) o te parecera que no responde.
 [CmdletBinding()]
 param(
     [switch]$Tune,
@@ -64,7 +82,7 @@ if ($Tune) {
     Write-Host 'barriendo --n-cpu-moe (cada prueba tarda ~1 min)...'
     Write-Host ('VRAM libre ahora: {0:N0} MB' -f (VramFree))
     $best = $null; $bestTps = 0
-    foreach ($n in 40, 34, 28, 24, 20, 16) {
+    foreach ($n in 34, 28, 26, 24, 22, 20) {
         Write-Host ("`n--- n-cpu-moe = $n ---")
         $out = & $bench -m $model -ngl 99 --n-cpu-moe $n -t 6 -p 256 -n 64 -r 2 2>&1
         $line = $out | Select-String 'tg\d+|tg ' | Select-Object -Last 1
@@ -84,7 +102,7 @@ if ($Tune) {
 # --- arrancar ------------------------------------------------------------
 if (Alive) { Write-Host 'ya esta corriendo. -Stop para pararlo.'; return }
 if ($CpuMoe -eq 0) {
-    $CpuMoe = if (Test-Path $tuned) { [int](Get-Content $tuned) } else { 28 }
+    $CpuMoe = if (Test-Path $tuned) { [int](Get-Content $tuned) } else { 24 }
 }
 
 $args = @(
@@ -93,6 +111,7 @@ $args = @(
     '-ngl', '99',             # todas las capas a la GPU...
     '--n-cpu-moe', $CpuMoe,   # ...menos los expertos de las primeras N, que van a RAM
     '-c', $Ctx,
+    '--parallel', '1',        # UNA ranura, no cuatro
     '-fa', 'on',              # flash attention: menos VRAM de KV y mas rapido
     '-t', '6',                # 6 nucleos fisicos; poner 12 con HT suele ir PEOR
     '--host', '127.0.0.1',    # solo local, nada expuesto a la red
