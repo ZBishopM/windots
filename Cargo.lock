@@ -2388,6 +2388,7 @@ name = "taskbar"
 version = "0.1.0"
 dependencies = [
  "rice-common",
+ "windows 0.58.0",
 ]
 
 [[package]]

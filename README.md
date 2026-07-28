@@ -48,7 +48,41 @@ Cierra sesión y vuelve a entrar (o reinicia) para que arranque todo.
 | **sysaudio-loopback** | Captura audio del sistema o del micro (WASAPI, Rust) | binario en `~/dev/target/release/` |
 | **micswitch** | Alterna el micro por defecto entre los de `rice.json` | binario en `~/dev/target/release/`, comando `mic` |
 | **ws-slide** | Animación de deslizamiento al cambiar de workspace. **Es dueño de SUPER+1..9** (GlazeWM ya no los bindea), así que si muere, el cambio de workspace deja de funcionar hasta que el supervisor lo reviva | binario en `~/dev/target/release/` |
+| **taskbar** | Oculta la barra de tareas de Windows **y lee su bandeja** para que glaze-bar la pinte (ver abajo) | `~/dev/crates/taskbar` |
 | **rice-supervisor** | Watchdog: revive cualquier componente que muera (<60s). Tabla de componentes + log en `~/.config/logs/` | `~/.config/rice-supervisor.ps1` |
+
+#### La bandeja del sistema en nuestra barra
+
+Los iconos de la bandeja (Discord, Tailscale, G HUB…) salen a la derecha de glaze-bar,
+con su tooltip al pasar por encima y clic izquierdo para activarlos. Cómo, y por qué así:
+
+- **No se puede alojar la bandeja.** `Shell_NotifyIcon` manda un `WM_COPYDATA` a la
+  ventana `Shell_TrayWnd`, y sólo puede haber una: la de explorer. Recibir los iconos
+  nosotros sería sustituir el shell entero.
+- **El toolbar clásico ya no existe.** El método de siempre —
+  `Shell_TrayWnd > TrayNotifyWnd > SysPager > ToolbarWindow32` y `TB_GETBUTTON`— está
+  muerto: medido en Windows 11 26200, **`SysPager` y `ToolbarWindow32` devuelven 0**.
+  La bandeja es XAML.
+- **Queda UI Automation**, con una pega: con la barra de tareas en `SW_HIDE` el árbol
+  XAML no se realiza y UIA **no ve ni un hijo**. Necesita estar visible.
+- **Solución: visible pero invisible.** `taskbar` la deja mostrada —para que el XAML
+  exista— con `WS_EX_LAYERED` a alfa 0 (no pinta un píxel) y `WS_EX_TRANSPARENT` (no se
+  come clics). El `ABM_SETSTATE` de auto-ocultar se mantiene, así que el área de trabajo
+  sigue siendo la pantalla entera y GlazeWM no pierde la franja. Si `taskbar` muere, los
+  estilos se quedan puestos: el modo de fallo es que siga sin verse.
+- **Los píxeles** salen de `PrintWindow(PW_RENDERFULLCONTENT)` sobre la propia barra,
+  recortando cada icono. Sin ese flag la captura sale **entera en negro**. El fondo
+  acrílico se descuenta midiendo las esquinas del recorte.
+
+**Iconos ocultos:** Windows guarda la mayoría detrás de *Mostrar iconos ocultos*, y ahí
+UIA no los ve hasta abrir el desplegable. Como la barra de tareas es invisible no puedes
+sacarlos arrastrando, así que:
+
+```powershell
+pwsh -File ~/.config/rice-tray-promote.ps1          # promociona lo que esté corriendo
+pwsh -File ~/.config/rice-tray-promote.ps1 -All     # todo lo que exista en disco
+pwsh -File ~/.config/rice-tray-promote.ps1 -Reset   # todo de vuelta al desplegable
+```
 | **cava** | Visualizador de espectro de audio en terminal (FFT, 165fps) | binario en `~/dev/target/release/`, comando `cava` |
 | **launcher** | El buscador de `Win+Space`. Busca **aplicaciones**, **archivos** (índice propio, ver abajo) y **comandos**, difuso y con iconos. `Ctrl+Enter` abre como administrador | `~/dev/crates/launcher` |
 

@@ -7,3 +7,16 @@ edition = "2021"
 # shared config dir, so --watch and the hotkey agree on where the marker lives.
 [dependencies]
 rice-common = { path = "../rice-common" }
+
+# UI Automation, para leer la bandeja. En esta build de Windows 11 la bandeja es
+# XAML pura -- no hay SysPager ni ToolbarWindow32 que consultar (medido), asi que
+# UIA es la unica via. Los vtables de UIA a mano con externs crudos serian medio
+# millar de lineas de COM; aqui si compensa el crate.
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_System_Variant",
+  "Win32_UI_Accessibility",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_Graphics_Gdi",
+] }

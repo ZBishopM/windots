@@ -29,6 +29,9 @@
 //! seconds. --watch re-asserts the hide whenever Explorer reveals it.
 
 #[cfg(windows)]
+mod tray;
+
+#[cfg(windows)]
 mod win {
     #[repr(C)]
     pub struct Rect {
@@ -72,6 +75,7 @@ mod win {
         pub fn SetWinEventHook(min: u32, max: u32, dll: isize, cb: WinEventProc, pid: u32, tid: u32, flags: u32) -> isize;
         pub fn GetMessageW(msg: *mut Msg, hwnd: isize, a: u32, b: u32) -> i32;
         pub fn DispatchMessageW(msg: *const Msg) -> isize;
+        pub fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
     }
 
     #[link(name = "shell32")]
@@ -143,16 +147,39 @@ mod win {
         }
     }
 
+    /// Hide it, or give it back.
+    ///
+    /// Hiding is NOT `SW_HIDE` any more. The tray has to be readable, and
+    /// measured on this build, a hidden taskbar has no realised XAML tree at all
+    /// -- UI Automation reports zero children, so there is nothing to read. So
+    /// "hidden" now means shown, fully transparent and click-through; see
+    /// `tray::make_invisible`. The user sees exactly the same thing (nothing),
+    /// the work area is still handed back by ABM_SETSTATE, and the tray is
+    /// legible.
     pub fn set_visible(show: bool) {
-        unsafe {
-            for h in taskbars() {
-                ShowWindow(h, if show { SW_SHOW } else { SW_HIDE });
+        for h in taskbars() {
+            if show {
+                crate::tray::make_normal(h);
+                unsafe { ShowWindow(h, SW_SHOW) };
+            } else {
+                crate::tray::make_invisible(h);
             }
         }
     }
 
+    /// Is the taskbar something the user can actually see?
+    ///
+    /// Not `IsWindowVisible`: while hidden our way the window IS visible, just
+    /// at zero alpha. The layered bit is what distinguishes the two.
     pub fn is_visible() -> bool {
-        unsafe { taskbars().first().map(|&h| IsWindowVisible(h) != 0).unwrap_or(true) }
+        const GWL_EXSTYLE: i32 = -20;
+        const WS_EX_LAYERED: isize = 0x0008_0000;
+        unsafe {
+            taskbars()
+                .first()
+                .map(|&h| IsWindowVisible(h) != 0 && GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_LAYERED == 0)
+                .unwrap_or(true)
+        }
     }
 }
 
@@ -174,19 +201,35 @@ extern "system" fn hook_cb(_h: isize, _ev: u32, hwnd: isize, id_object: i32, _id
     if !win::is_taskbar(hwnd) {
         return;
     }
-    if unsafe { win::IsWindowVisible(hwnd) } == 0 {
-        return; // already hidden; nothing to undo
-    }
     if shown_marker().exists() {
         return; // deliberately shown
     }
-    unsafe { win::ShowWindow(hwnd, win::SW_HIDE) };
+    // Re-assert transparency rather than hiding. Explorer re-shows the window
+    // itself as part of the auto-hide reveal, and it can drop the layered alpha
+    // with it, so this has to run on every reveal or the bar flashes back in.
+    tray::make_invisible(hwnd);
 }
 
 #[cfg(windows)]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let has = |f: &str| args.iter().any(|a| a == f);
+
+    // `--click <nombre>`: pulsar un icono de la bandeja. Es un proceso aparte y
+    // no un mensaje al residente porque UIA puede tardar decenas de
+    // milisegundos, y la barra no debe esperar a nadie para pintar el siguiente
+    // fotograma.
+    if let Some(i) = args.iter().position(|a| a == "--click") {
+        if let Some(name) = args.get(i + 1) {
+            if let Some(uia) = tray::Uia::new() {
+                if let Some(&h) = win::taskbars().first() {
+                    tray::make_invisible(h);
+                    uia.invoke(h, name);
+                }
+            }
+        }
+        return;
+    }
 
     let watch = has("--watch");
     let hide = if has("--hide") || watch {
@@ -226,6 +269,40 @@ fn main() {
     if !watch {
         return;
     }
+
+    // Read the tray and publish it for the bar.
+    //
+    // Its own thread, and it never touches the window styles except through
+    // `make_invisible`: a UIA call crosses into Explorer, and a slow or wedged
+    // one must not be able to stall the message loop below that keeps the bar
+    // from flashing back on screen.
+    std::thread::Builder::new()
+        .name("tray".into())
+        .spawn(|| {
+            let Some(uia) = tray::Uia::new() else { return };
+            let mut last = 0u64;
+            loop {
+                if !shown_marker().exists() {
+                    if let Some(&h) = win::taskbars().first() {
+                        // Cheap, idempotent, and the only thing standing between
+                        // the user and a taskbar reappearing.
+                        tray::make_invisible(h);
+                        let items = uia.items(h);
+                        let grabbed = tray::grab(h, &items);
+                        let d = tray::digest(&grabbed);
+                        if d != last {
+                            last = d;
+                            tray::publish(&grabbed);
+                        }
+                    }
+                }
+                // Two seconds: tray icons change on the scale of a program
+                // starting or a notification badge appearing, and every tick
+                // costs a PrintWindow of the whole taskbar.
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        })
+        .ok();
 
     // Stay resident and undo Explorer's reveal. Event-driven rather than polled:
     // LOCATIONCHANGE is what the slide-in animation actually raises, and SHOW

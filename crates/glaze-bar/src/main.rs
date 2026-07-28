@@ -1,5 +1,7 @@
 #![windows_subsystem = "windows"] // no console window
 
+mod tray;
+
 use eframe::egui;
 use serde::Deserialize;
 use std::io::{Read, Write};
@@ -1113,6 +1115,9 @@ struct BarApp {
     hwnd: isize,
     clickthrough: bool,
     last_ct: Instant,
+    /// The notification-area icons, published by `taskbar`. Reading them costs
+    /// nothing here: that process does the Windows side, this one only draws.
+    tray: tray::Tray,
     // live-adjustable translucency (island opacity widget)
     bar_opacity: f32,
     term_opacity: f32,
@@ -1902,6 +1907,13 @@ impl eframe::App for BarApp {
             }
         }
 
+        // Only the primary bar shows the tray: reading it is one stat a second,
+        // but two copies of the notification area on two monitors is not what
+        // anyone means by "the tray".
+        if self.x == 0 {
+            self.tray.poll(ctx);
+        }
+
         let now_tick = Instant::now();
 
         // Pomodoro countdown. Driven off wall-clock deltas rather than a frame
@@ -2087,6 +2099,14 @@ impl eframe::App for BarApp {
                     // ---- right: metrics ----
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(4.0);
+                        // La bandeja va pegada al borde derecho, que es donde
+                        // lleva estando treinta años.
+                        if let Some(name) = self.tray.ui(ui, 18.0) {
+                            tray::click(name.as_str());
+                        }
+                        if !self.tray.is_empty() {
+                            ui.add_space(10.0);
+                        }
                         let dim = egui::Color32::from_rgb(180, 180, 195);
                         if !s.gpu.is_empty() {
                             ui.colored_label(egui::Color32::from_rgb(255, 205, 120), format!("GPU {}", s.gpu));
@@ -2579,6 +2599,7 @@ fn main() -> eframe::Result<()> {
                 ws_ind: None,
                 hwnd: 0,
                 clickthrough: false,
+                tray: tray::Tray::new(),
                 last_ct: Instant::now(),
                 bar_opacity: read_opacity("bar-opacity.txt", 0.78),
                 term_opacity: read_opacity("term-opacity.txt", 0.85),
