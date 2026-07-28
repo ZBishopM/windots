@@ -112,6 +112,52 @@ pub fn make_invisible(hwnd: isize) {
     }
 }
 
+/// El área de trabajo, a pantalla completa.
+///
+/// Con el método anterior la devolvía `ABM_SETSTATE(ABS_AUTOHIDE)`: Windows
+/// recalcula el área al poner la barra en auto-ocultar. Pero medido tras un
+/// reinicio de explorer, **con auto-ocultar el árbol XAML de la bandeja se
+/// desrealiza en cuanto la barra se esconde** -- UIA pasa de 32 botones a 0 --
+/// y sin árbol no hay bandeja que leer. Así que ahora la barra queda SIN
+/// auto-ocultar (XAML siempre vivo) y el área de trabajo se fija aquí a mano.
+///
+/// Explorer la vuelve a estrechar cuando le parece (cambios de resolución, de
+/// DPI, al re-registrar su appbar), así que esto se reafirma en el bucle del
+/// lector: compara y sólo escribe si difiere.
+/// Ancla la barra en su posición revelada.
+///
+/// El área de trabajo la devuelve el auto-ocultar (probado: `SPI_SETWORKAREA`
+/// devuelve TRUE y no cambia nada -- el appbar registrado manda). Pero el
+/// auto-ocultar desliza la ventana a y=1078, un filo de 2 px, y **ahí es donde
+/// el XAML se desrealiza** y UIA se queda sin árbol. Medido: deslizada, 0
+/// botones; en su sitio, 32.
+///
+/// Así que auto-ocultar para el área, y esto para deshacer el deslizamiento:
+/// la ventana anclada en pantalla (y = alto - barra), a alfa 0. Explorer la
+/// vuelve a deslizar cuando quiere; el gancho de LOCATIONCHANGE y el bucle del
+/// lector la devuelven. La guarda de "solo si difiere" evita que nuestro propio
+/// SetWindowPos realimente el gancho en bucle.
+pub fn pin_revealed(hwnd: isize) {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetSystemMetrics(i: i32) -> i32;
+        fn SetWindowPos(h: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, f: u32) -> i32;
+    }
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    unsafe {
+        let mut r = RECT::default();
+        if GetWindowRect(HWND(hwnd as *mut _), &mut r).is_err() {
+            return;
+        }
+        let want_top = GetSystemMetrics(1) - (r.bottom - r.top);
+        if r.top != want_top {
+            SetWindowPos(hwnd, 0, r.left, want_top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+}
+
 /// Deshace lo anterior: opaca y otra vez clicable.
 pub fn make_normal(hwnd: isize) {
     use windows::Win32::UI::WindowsAndMessaging::{

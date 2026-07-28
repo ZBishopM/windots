@@ -208,6 +208,7 @@ extern "system" fn hook_cb(_h: isize, _ev: u32, hwnd: isize, id_object: i32, _id
     // itself as part of the auto-hide reveal, and it can drop the layered alpha
     // with it, so this has to run on every reveal or the bar flashes back in.
     tray::make_invisible(hwnd);
+    tray::pin_revealed(hwnd);
 }
 
 #[cfg(windows)]
@@ -251,15 +252,32 @@ fn main() {
     }
 
     if hide {
-        win::set_autohide(true); // reclaim the work area first...
-        // ...then take the window off screen. Explorer handles the auto-hide
-        // transition asynchronously and re-shows the bar as part of it, so an
-        // immediate SW_HIDE gets undone. Let it settle, hide, and assert it once
-        // more in case the slide animation was still running.
-        std::thread::sleep(std::time::Duration::from_millis(350));
-        win::set_visible(false);
+        // NO auto-hide. It was how the work area came back, but measured after
+        // an explorer restart, auto-hide is what de-realises the tray's XAML
+        // tree the moment the bar slides away -- UIA drops from 32 buttons to
+        // zero, and an unrealised tray cannot be read. The bar stays shown (at
+        // zero alpha, click-through) so the XAML lives, and the work area is
+        // forced to the full screen by hand instead.
+        // SIN auto-ocultar, y esta vez es definitivo. Todo lo demas se probo y
+        // fallo, en este orden:
+        //   - autohide: devuelve el area de trabajo, pero desrealiza el arbol
+        //     XAML de la bandeja en cuanto la barra se desliza (32 botones -> 0)
+        //     y entonces no hay bandeja que leer.
+        //   - autohide + anclar la ventana en su posicion revelada: el arbol
+        //     sigue muerto; la desrealizacion va por el estado interno del
+        //     auto-ocultar, no por la posicion.
+        //   - SPI_SETWORKAREA a mano: devuelve TRUE y no cambia nada; el appbar
+        //     registrado de explorer manda sobre el area.
+        //   - ABM_REMOVE del appbar de explorer: tampoco libera el area.
+        // Conclusion: la reserva de 48px es inamovible mientras la barra este
+        // realizada, y realizada tiene que estar. Los 48px los compensa GlazeWM
+        // con outer_gap.bottom = -28px (ver su config.yaml).
+        win::set_autohide(false);
         std::thread::sleep(std::time::Duration::from_millis(250));
         win::set_visible(false);
+        if let Some(&h) = win::taskbars().first() {
+            tray::pin_revealed(h);
+        }
     } else {
         win::set_autohide(false);
         std::thread::sleep(std::time::Duration::from_millis(250));
@@ -287,6 +305,7 @@ fn main() {
                         // Cheap, idempotent, and the only thing standing between
                         // the user and a taskbar reappearing.
                         tray::make_invisible(h);
+                        tray::pin_revealed(h);
                         let items = uia.items(h);
                         let grabbed = tray::grab(h, &items);
                         let d = tray::digest(&grabbed);

@@ -56,7 +56,15 @@ gaps:
   outer_gap:
     top: '42px'
     right: '20px'
-    bottom: '20px'
+    # -28 y no 20: GlazeWM tila dentro del AREA DE TRABAJO, y la barra de tareas
+    # de Windows -- aunque invisible -- mantiene reservados 48px abajo. Ya no se
+    # puede auto-ocultar para recuperarlos: con auto-ocultar el arbol XAML de la
+    # bandeja se desrealiza y la barra no puede leer los iconos (ver
+    # crates/taskbar/src/tray.rs). Asi que la reserva se compensa aqui:
+    # 1032 - (-28) = 1060 = 1080 - 20, el mismo margen visual de siempre.
+    # Si algun dia la reserva desaparece, esto hara que las ventanas se salgan
+    # 28px por abajo: volver a '20px'.
+    bottom: '-28px'
     left: '20px'
 
 window_effects:

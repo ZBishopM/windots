@@ -48,11 +48,20 @@ function Resolve-TrayPath([string]$p) {
     return $p
 }
 
+# Lo que nunca se promociona: la infraestructura del propio rice. Su icono no
+# dice nada que la barra no diga ya, y estaba saliendo en la bandeja.
+$riceExe = 'glazewm|AutoHotkey64|wezterm|altsnap|glaze-bar|launcher|notifyd|taskbar|ws-slide|micswitch|windeco|shadowplay|PowerToys|CmdPal'
+
 $changed = 0
 foreach ($sub in Get-ChildItem $key) {
     $props = Get-ItemProperty $sub.PSPath
     $want = 0
-    if (-not $Reset) {
+    $exe0 = [string]$props.ExecutablePath
+    $tip0 = [string]$props.InitialTooltip
+    if (($exe0 -match $riceExe) -or ($tip0 -match '\.ahk$|GlazeWM|wezterm')) {
+        # del rice: se fuerza a 0 y no entra en la logica de abajo
+    }
+    elseif (-not $Reset) {
         $exe = Resolve-TrayPath $props.ExecutablePath
         if ($exe -and (Test-Path -LiteralPath $exe)) {
             if ($All) {
