@@ -49,6 +49,7 @@ extern "system" {
     fn GetMonitorInfoW(mon: isize, mi: *mut MonInfo) -> i32;
     fn GetWindowLongPtrW(hwnd: isize, idx: i32) -> isize;
     fn SetWindowLongPtrW(hwnd: isize, idx: i32, new: isize) -> isize;
+    fn GetClassNameW(hwnd: isize, buf: *mut u16, n: i32) -> i32;
 }
 #[cfg(windows)]
 extern "system" {
@@ -158,6 +159,37 @@ fn find_own_window(x: i32, width: i32) -> isize {
     unsafe { EnumWindows(find_cb, &mut ctx as *mut FindCtx as isize) };
     ctx.found
 }
+/// Class name of a window, for deciding what it is rather than guessing.
+#[cfg(windows)]
+unsafe fn class_of(hwnd: isize) -> String {
+    let mut buf = [0u16; 128];
+    let n = GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+    String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+
+/// Windows that cover the monitor but are NOT an application taking the screen.
+///
+/// The desktop is the one that matters. `Progman` (and the `WorkerW` that
+/// wallpaper tools slide behind it) is a window the size of the monitor, so a
+/// plain click on empty desktop -- the bare strip at the bottom where the
+/// taskbar used to be -- made the geometric test say "fullscreen" and the bar
+/// hid itself. Explorer's own bar is listed for the same reason: it is now kept
+/// realised at zero alpha so the tray can be read, and it must not count as an
+/// application either.
+#[cfg(windows)]
+fn is_shell_surface(class: &str) -> bool {
+    matches!(
+        class,
+        // Progman y WorkerW son el escritorio; SysListView32 es su rejilla de
+        // iconos, que toma el foco cuando se selecciona algo en el escritorio.
+        "Progman" | "WorkerW" | "SysListView32"
+        // La barra de tareas de Windows. Ahora se queda realizada a alfa cero
+        // para poder leer la bandeja (ver crates/taskbar/src/tray.rs), asi que
+        // puede aparecer como ventana enfocada sin que nadie la vea.
+            | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+    )
+}
+
 #[cfg(windows)]
 unsafe fn fullscreen_on_monitor(my: isize) -> bool {
     let mon = MonitorFromWindow(my, 2 /* NEAREST */);
@@ -172,6 +204,9 @@ unsafe fn fullscreen_on_monitor(my: isize) -> bool {
     }
     let fg = GetForegroundWindow();
     if fg == 0 || fg == my {
+        return false;
+    }
+    if is_shell_surface(&class_of(fg)) {
         return false;
     }
     let mut r = Rect { left: 0, top: 0, right: 0, bottom: 0 };
@@ -269,6 +304,29 @@ fn env_flag(name: &'static str, cell: &'static std::sync::OnceLock<bool>) -> boo
 }
 static LOG_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static ICONTEST_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Cambios de estado que importan, siempre registrados.
+///
+/// Aparte de `dlog` a proposito. `dlog` esta detras de una variable de entorno
+/// porque escribe cada segundo, y para activarla hay que saber que existe y
+/// reiniciar la barra -- justo lo que no sirve cuando el fallo ya ocurrio. Esto
+/// se escribe siempre, en el mismo directorio donde ya viven los registros del
+/// supervisor y de notifyd, y solo ante transiciones, que son unas pocas al dia.
+fn elog(msg: &str) {
+    let path = config::config_path(r"logs\glaze-bar.log");
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    // Corte simple en vez de rotacion: esto anota transiciones, no un flujo. Si
+    // alguna vez llega a un cuarto de mega es que algo esta oscilando, y en ese
+    // caso lo ultimo es lo que interesa.
+    if std::fs::metadata(&path).map(|m| m.len() > 256 * 1024).unwrap_or(false) {
+        let _ = std::fs::remove_file(&path);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{} {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"), msg);
+    }
+}
 
 // Debug log to %TEMP%\glaze-bar.log when GLAZEBAR_LOG is set.
 fn dlog(msg: &str) {
@@ -1891,6 +1949,29 @@ impl eframe::App for BarApp {
                     // recreate the window under us.
                     unsafe { strip_native_frame(self.hwnd) };
                     let want = unsafe { should_clickthrough(self.hwnd) };
+                    if want != self.clickthrough {
+                        // Solo al cambiar: registrarlo dos veces por segundo
+                        // llenaria el archivo y no diria nada. Se anota QUIEN lo
+                        // provoco, que es justo lo que faltaba para diagnosticar
+                        // por que la barra desaparecia al hacer clic abajo.
+                        unsafe {
+                            let fg = GetForegroundWindow();
+                            let mut r = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+                            GetWindowRect(fg, &mut r);
+                            elog(&format!(
+                                "x={} clickthrough {} -> {}  foco: clase='{}' proc={:?} rect={},{} {}x{}",
+                                self.x,
+                                self.clickthrough,
+                                want,
+                                class_of(fg),
+                                win::foreground_process_name(),
+                                r.left,
+                                r.top,
+                                r.right - r.left,
+                                r.bottom - r.top
+                            ));
+                        }
+                    }
                     self.clickthrough = want;
                     // Assert the style unconditionally rather than only on a
                     // transition. set_clickthrough is a no-op when the bit already
