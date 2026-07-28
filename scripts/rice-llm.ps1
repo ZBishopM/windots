@@ -4,6 +4,7 @@
 #   rice-llm.ps1 -Tune        barre el reparto GPU/CPU y dice cual va mas rapido
 #   rice-llm.ps1 -Stop        lo para
 #   rice-llm.ps1 -Status      dice si esta vivo y cuanta VRAM y RAM usa
+#   rice-llm.ps1 -Chat        abre la interfaz de chat en el navegador
 #
 # Por que este modelo y no otro, para esta maquina en concreto: es un MoE de 35B
 # totales pero solo 3B ACTIVOS por token. El cuello de botella aqui no es la
@@ -36,6 +37,7 @@ param(
     [switch]$Tune,
     [switch]$Stop,
     [switch]$Status,
+    [switch]$Chat,
     [int]$CpuMoe = 0,
     [int]$Ctx = 32768,
     [int]$Port = 8080
@@ -54,9 +56,26 @@ function VramFree {
 }
 function Alive { [bool](Get-Process llama-server -EA SilentlyContinue) }
 
+# Avisa por la isla de la barra. Estos comandos se lanzan desde Win+Space, sin
+# terminal: una ventana de consola que aparece y desaparece no dice nada, y es
+# justo lo que paso la primera vez que se uso el comando de arrancar.
+function Notify([string]$title, [string]$body, [string]$accent = '#e0a35c') {
+    $j = @{ icon = ''; title = $title; body = $body; accent = $accent } | ConvertTo-Json -Compress
+    Set-Content -Path "$env:USERPROFILE\.config\island.json" -Value $j -Encoding UTF8
+}
+
 if ($Stop) {
+    if (-not (Alive)) { Notify 'Modelo local' 'no estaba corriendo'; return }
     Get-Process llama-server -EA SilentlyContinue | Stop-Process -Force
+    Notify 'Modelo local' 'parado, RAM liberada'
     Write-Host 'parado.'
+    return
+}
+
+# Abre la interfaz de chat. Es lo que llama-server sirve en su raiz.
+if ($Chat) {
+    if (-not (Alive)) { Notify 'Modelo local' 'no esta arrancado' '#c86464'; return }
+    Start-Process "http://127.0.0.1:$Port"
     return
 }
 
@@ -100,7 +119,12 @@ if ($Tune) {
 }
 
 # --- arrancar ------------------------------------------------------------
-if (Alive) { Write-Host 'ya esta corriendo. -Stop para pararlo.'; return }
+if (Alive) {
+    Notify 'Modelo local' 'ya estaba arrancado; abriendo el chat'
+    Start-Process "http://127.0.0.1:$Port"
+    return
+}
+Notify 'Modelo local' 'cargando, ~50 s...'
 if ($CpuMoe -eq 0) {
     $CpuMoe = if (Test-Path $tuned) { [int](Get-Content $tuned) } else { 24 }
 }
@@ -115,15 +139,18 @@ $args = @(
     '-fa', 'on',              # flash attention: menos VRAM de KV y mas rapido
     '-t', '6',                # 6 nucleos fisicos; poner 12 con HT suele ir PEOR
     '--host', '127.0.0.1',    # solo local, nada expuesto a la red
-    '--port', $Port,
-    '--no-webui'
+    '--port', $Port
 )
 Write-Host ("arrancando con --n-cpu-moe {0}, contexto {1}..." -f $CpuMoe, $Ctx)
 Start-Process -FilePath $server -ArgumentList $args -WindowStyle Hidden
 for ($i = 0; $i -lt 120; $i++) {
     Start-Sleep -Seconds 1
     try {
-        Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 2 | Out-Null
+        $h = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 2
+        # /health responde 503 mientras carga; Invoke-RestMethod lanza excepcion
+        # en ese caso, asi que llegar aqui ya significa que esta listo.
+        Notify 'Modelo local' ("listo en {0} s - abriendo el chat" -f $i) '#8fbf6f'
+        Start-Process "http://127.0.0.1:$Port"
         Write-Host ("listo en {0}s -> http://127.0.0.1:{1}" -f $i, $Port) -ForegroundColor Green
         return
     } catch { }

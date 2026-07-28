@@ -61,6 +61,12 @@ pub fn builtin() -> Vec<Entry> {
             "llm ia ai qwen modelo local llama jarvis arrancar",
         ),
         (
+            "Abrir el chat del modelo local",
+            "pwsh.exe",
+            r"-NoProfile -File %USERPROFILE%\.config\rice-llm.ps1 -Chat",
+            "llm ia ai chat qwen modelo local hablar preguntar jarvis",
+        ),
+        (
             "Parar el modelo local",
             "pwsh.exe",
             r"-NoProfile -File %USERPROFILE%\.config\rice-llm.ps1 -Stop",
