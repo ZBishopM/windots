@@ -62,6 +62,9 @@ mod win {
         pub fn GetForegroundWindow() -> isize;
         pub fn GetCurrentThreadId() -> u32;
         pub fn GetWindowRect(h: isize, r: *mut core::ffi::c_void) -> i32;
+        pub fn IsWindow(h: isize) -> i32;
+        pub fn GetWindow(h: isize, cmd: u32) -> isize;
+        pub fn GetWindowLongPtrW(h: isize, i: i32) -> isize;
     }
 
     pub const EVENT_MODIFY_STATE: u32 = 0x0002;
@@ -74,34 +77,49 @@ mod win {
     /// turned into a retry loop burning a core.
     pub static HWND: AtomicIsize = AtomicIsize::new(0);
 
+    /// Whoever owned the foreground before we took it, so it can be handed back.
+    ///
+    /// Parking the window off-screen does NOT take its focus away: the closed
+    /// box went on owning the keyboard from -30000,-30000, so every keystroke
+    /// afterwards went into a window nobody could see. It also fed the far more
+    /// visible symptom -- being foreground already, the next open had no focus
+    /// change to make, so nothing told the toolkit it was focused and the box
+    /// closed itself a quarter of a second later, every time.
+    pub static PREV_FG: AtomicIsize = AtomicIsize::new(0);
+
     pub fn hwnd() -> isize {
         HWND.load(Ordering::Relaxed)
     }
 
-    pub fn is_visible() -> bool {
+    /// Does the OS think we have the keyboard?
+    ///
+    /// The authority on purpose. eframe's `viewport().focused` is bookkeeping
+    /// derived from focus messages, and it was observed reading false while
+    /// `GetForegroundWindow` returned this very window.
+    pub fn has_focus() -> bool {
         let h = hwnd();
-        h != 0 && unsafe { IsWindowVisible(h) != 0 }
+        h != 0 && unsafe { GetForegroundWindow() } == h
     }
 
-    /// Show centred on the primary monitor and take focus.
+    /// Ask for the keyboard.
     ///
-    /// SetForegroundWindow alone is not enough: Windows refuses it for a process
-    /// that does not own the foreground, and the box would appear without the
-    /// caret, so typing went to whatever was behind it. Attaching to the current
-    /// foreground thread first is what makes the grant legal.
-    pub fn show(width: f32, height: f32) {
+    /// `SetForegroundWindow` alone is not enough: Windows refuses it for a
+    /// process that does not own the foreground, and the box would then appear
+    /// without a caret, so typing went to whatever was behind it. Attaching to
+    /// the current foreground thread first is what makes the grant legal.
+    pub fn take_foreground() {
         let h = hwnd();
         if h == 0 {
             return;
         }
         unsafe {
-            let sw = GetSystemMetrics(0) as f32;
-            let x = ((sw - width) / 2.0) as i32;
-            const SWP_NOZORDER: u32 = 0x0004;
-            SetWindowPos(h, 0, x, 220, width as i32, height as i32, SWP_NOZORDER);
-            ShowWindow(h, SW_SHOW);
-
             let fg = GetForegroundWindow();
+            if fg == h {
+                return;
+            }
+            if fg != 0 {
+                PREV_FG.store(fg, Ordering::Relaxed);
+            }
             let mut other_pid = 0u32;
             let other = GetWindowThreadProcessId(fg, &mut other_pid);
             let me = GetCurrentThreadId();
@@ -113,6 +131,27 @@ mod win {
                 SetForegroundWindow(h);
             }
         }
+    }
+
+    pub fn is_visible() -> bool {
+        let h = hwnd();
+        h != 0 && unsafe { IsWindowVisible(h) != 0 }
+    }
+
+    /// Show centred on the primary monitor and take focus.
+    pub fn show(width: f32, height: f32) {
+        let h = hwnd();
+        if h == 0 {
+            return;
+        }
+        unsafe {
+            let sw = GetSystemMetrics(0) as f32;
+            let x = ((sw - width) / 2.0) as i32;
+            const SWP_NOZORDER: u32 = 0x0004;
+            SetWindowPos(h, 0, x, 220, width as i32, height as i32, SWP_NOZORDER);
+            ShowWindow(h, SW_SHOW);
+        }
+        take_foreground();
     }
 
     /// Resize in place: same position, same z-order, same focus.
@@ -153,7 +192,93 @@ mod win {
             const SWP_NOACTIVATE: u32 = 0x0010;
             const SWP_NOSIZE: u32 = 0x0001;
             SetWindowPos(h, 0, -30000, -30000, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+
         }
+        release_foreground();
+    }
+
+    /// Hand the keyboard to somebody else.
+    ///
+    /// Moving a window off-screen does not take its focus away, so without this
+    /// the closed box went on owning every keystroke from -30000,-30000. Windows
+    /// normally does this for us when a window is destroyed or minimised, and we
+    /// can do neither: the window has to stay alive AND visible, because a
+    /// window with no visible surface has nothing to vsync against and its GL
+    /// loop free-runs a whole core.
+    ///
+    /// Giving the foreground away needs no attach dance -- the process that owns
+    /// it is allowed to pass it on.
+    pub fn release_foreground() {
+        let h = hwnd();
+        if h == 0 {
+            return;
+        }
+        unsafe {
+            if GetForegroundWindow() != h {
+                return;
+            }
+            // Whoever had it before us, if that is still a real window.
+            let prev = PREV_FG.load(Ordering::Relaxed);
+            PREV_FG.store(0, Ordering::Relaxed);
+            if prev != 0 && prev != h && IsWindow(prev) != 0 && activatable(prev) {
+                SetForegroundWindow(prev);
+                if GetForegroundWindow() != h {
+                    return;
+                }
+            }
+            // Nothing recorded, or it refused: walk down the z-order and give it
+            // to the first window that can actually take it. Reached whenever
+            // the box is closed twice in a row -- the second open never took the
+            // foreground from anyone, so there was nobody recorded to give it
+            // back to, and it stayed ours forever.
+            const GW_HWNDNEXT: u32 = 2;
+            let mut w = GetWindow(h, GW_HWNDNEXT);
+            let mut hops = 0;
+            while w != 0 && hops < 200 {
+                hops += 1;
+                if activatable(w) {
+                    SetForegroundWindow(w);
+                    if GetForegroundWindow() != h {
+                        return;
+                    }
+                }
+                w = GetWindow(w, GW_HWNDNEXT);
+            }
+        }
+    }
+
+    /// Can this window sensibly be handed the keyboard?
+    ///
+    /// Excludes our own overlays and everything else that is on screen without
+    /// wanting focus: the bars are click-through tool windows, and handing the
+    /// foreground to one is how the first attempt at this silently did nothing.
+    unsafe fn activatable(w: isize) -> bool {
+        const GW_OWNER: u32 = 4;
+        const GWL_STYLE: i32 = -16;
+        const GWL_EXSTYLE: i32 = -20;
+        const WS_DISABLED: isize = 0x0800_0000;
+        const WS_MINIMIZE: isize = 0x2000_0000;
+        const WS_EX_TOOLWINDOW: isize = 0x0000_0080;
+        const WS_EX_TRANSPARENT: isize = 0x0000_0020;
+        const WS_EX_NOACTIVATE: isize = 0x0800_0000;
+
+        if IsWindowVisible(w) == 0 || GetWindow(w, GW_OWNER) != 0 {
+            return false;
+        }
+        let style = GetWindowLongPtrW(w, GWL_STYLE);
+        if style & (WS_DISABLED | WS_MINIMIZE) != 0 {
+            return false;
+        }
+        let ex = GetWindowLongPtrW(w, GWL_EXSTYLE);
+        if ex & (WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE) != 0 {
+            return false;
+        }
+        // Something real, not a 1x1 helper parked somewhere.
+        let mut r = [0i32; 4];
+        if GetWindowRect(w, r.as_mut_ptr() as *mut _) == 0 {
+            return false;
+        }
+        r[0] > -10000 && (r[2] - r[0]) > 200 && (r[3] - r[1]) > 100
     }
 
     /// Off-screen windows still receive frames, so the waiter thread only has to
@@ -191,6 +316,22 @@ fn signal_show() -> bool {
         win::CloseHandle(h);
         true
     }
+}
+
+/// Do we have the keyboard?
+///
+/// On Windows this asks the OS rather than the toolkit. eframe's
+/// `viewport().focused` is bookkeeping derived from focus messages, and it was
+/// measured reading false while `GetForegroundWindow` returned this very window
+/// -- which closed the box a quarter of a second after every open.
+fn window_focused(ctx: &egui::Context) -> bool {
+    #[cfg(windows)]
+    {
+        let _ = ctx;
+        win::has_focus()
+    }
+    #[cfg(not(windows))]
+    ctx.input(|i| i.viewport().focused.unwrap_or(true))
 }
 
 /// How many application rows to leave room for once files are also showing.
@@ -526,9 +667,23 @@ impl eframe::App for App {
             .unwrap_or(true);
         // ...but not while flashing: the application being started takes the
         // foreground, and closing on that would swallow the acknowledgement.
-        if settled && !flashing && !ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
-            self.close();
-            return;
+        let focused = window_focused(ctx);
+        if settled && !flashing && !focused {
+            // Not ours yet is not the same as taken from us. Asking again for a
+            // few hundred milliseconds covers the case where the grant was
+            // refused on the first try; only after that does giving up mean the
+            // user really has clicked somewhere else.
+            let gave_up = self
+                .opened_at
+                .map(|t| t.elapsed() > std::time::Duration::from_millis(600))
+                .unwrap_or(true);
+            if gave_up {
+                self.close();
+                return;
+            }
+            #[cfg(windows)]
+            win::take_foreground();
+            ctx.request_repaint();
         }
 
         // The file search publishes from its own thread and asks for a repaint;
