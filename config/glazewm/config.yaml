@@ -173,6 +173,12 @@ window_rules:
       - window_process: { equals: 'glaze-bar' }
       # Ignore the custom Rust ShadowPlay notification toast.
       - window_process: { equals: 'shadowplay-notify' }
+      # Our Win+Space search box. Without this the WM tiles it, and because a
+      # tiled window belongs to a workspace, opening it FOCUSED THAT WORKSPACE --
+      # pressing Super+Space jumped to ws2 instead of showing the box. Exactly
+      # the CmdPal bug described below, and it only surfaced once the box began
+      # resizing itself to fit its results.
+      - window_process: { equals: 'launcher' }
 
       # Ignores picture-in-picture windows for browsers.
       - window_title: { regex: '[Pp]icture.in.[Pp]icture' }
