@@ -65,6 +65,15 @@ foreach ($f in 'AppxManifest.xml', 'build.ps1') {
     $Map["notifyd-package\$f"] = "$home_\.config\notifyd-package\$f"
 }
 
+# The memory tuning lives in the PROFILE, whose directory name is random per
+# machine, so it is looked up rather than hardcoded. user.js is the right file
+# for this: Firefox reads it at every start and stamps prefs.js from it, so
+# deleting it reverts everything on the next launch.
+$ffProfile = Get-ChildItem "$home_\AppData\Roaming\Mozilla\Firefox\Profiles" -Directory -EA SilentlyContinue |
+             Where-Object { $_.Name -match '\.(dev-edition-default|default-release|default)$' } |
+             Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if ($ffProfile) { $Map['firefox\user.js'] = Join-Path $ffProfile.FullName 'user.js' }
+
 foreach ($ff in "$env:ProgramFiles\Firefox Developer Edition", "$env:ProgramFiles\Mozilla Firefox") {
     if (-not (Test-Path $ff)) { continue }
     $Map['firefox\config.js'] = "$ff\config.js"
