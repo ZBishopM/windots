@@ -64,7 +64,8 @@ $server = "$root\llama.cpp\llama-server.exe"
 $bench  = "$root\llama.cpp\llama-bench.exe"
 $model  = "$root\models\Qwen3.6-35B-A3B-UD-Q3_K_XL.gguf"
 $mmproj = "$root\models\mmproj-F16.gguf"
-$tuned  = "$root\n-cpu-moe.txt"
+$tuned   = "$root\n-cpu-moe.txt"
+$presets = "$root\presets.ini"
 
 function VramFree {
     $o = & "$env:SystemRoot\System32\nvidia-smi.exe" --query-gpu=memory.free --format=csv,noheader,nounits
@@ -141,36 +142,37 @@ if (Alive) {
     Start-Process "http://127.0.0.1:$Port"
     return
 }
-Notify 'Modelo local' 'cargando, ~50 s...'
-if ($CpuMoe -eq 0) {
-    $CpuMoe = if (Test-Path $tuned) { [int](Get-Content $tuned) } else { 24 }
-}
+Notify 'Modelo local' 'router arrancando...'
 
+# MODO ROUTER, no un modelo suelto.
+#
+# Arrancar con `-m modelo.gguf` deja el contexto y el reparto fijados en la
+# linea de comandos, y el boton "load model" de la web da error porque no hay
+# nada que cargar. En modo router se le pasa un INI de presets: cada seccion
+# aparece en el selector de la web y se puede cambiar sin tocar la terminal, que
+# era justo lo que hacia falta para buscar el punto dulce.
+#
+# --models-max 1 porque no hay ni VRAM ni RAM para dos a la vez.
+# --no-models-autoload para que arranque en segundos y solo cargue el que se
+# elija; cargar son ~2 minutos por lo de --no-mmap.
 $args = @(
-    '-m', $model,
-    '--mmproj', $mmproj,      # entrada de imagenes: util para un asistente que mire la pantalla
-    '-ngl', '99',             # todas las capas a la GPU...
-    '--n-cpu-moe', $CpuMoe,   # ...menos los expertos de las primeras N, que van a RAM
-    '-c', $Ctx,
-    '--parallel', '1',        # UNA ranura, no cuatro
-    '--no-mmap',              # OBLIGATORIO aqui; ver la nota 3 de arriba
-    '-fa', 'on',              # flash attention: menos VRAM de KV y mas rapido
-    '-t', '6',                # 6 nucleos fisicos; poner 12 con HT suele ir PEOR
-    '--host', '127.0.0.1',    # solo local, nada expuesto a la red
+    '--models-preset', $presets,
+    '--models-max', '1',
+    '--no-models-autoload',
+    '--host', '127.0.0.1',
     '--port', $Port
 )
-Write-Host ("arrancando con --n-cpu-moe {0}, contexto {1}..." -f $CpuMoe, $Ctx)
 Start-Process -FilePath $server -ArgumentList $args -WindowStyle Hidden
-for ($i = 0; $i -lt 120; $i++) {
+for ($i = 0; $i -lt 60; $i++) {
     Start-Sleep -Seconds 1
     try {
-        $h = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 2
-        # /health responde 503 mientras carga; Invoke-RestMethod lanza excepcion
-        # en ese caso, asi que llegar aqui ya significa que esta listo.
-        Notify 'Modelo local' ("listo en {0} s - abriendo el chat" -f $i) '#8fbf6f'
+        Invoke-RestMethod "http://127.0.0.1:$Port/v1/models" -TimeoutSec 2 | Out-Null
+        Notify 'Modelo local' 'router listo: elige un preset en la web' '#8fbf6f'
         Start-Process "http://127.0.0.1:$Port"
-        Write-Host ("listo en {0}s -> http://127.0.0.1:{1}" -f $i, $Port) -ForegroundColor Green
+        Write-Host ("router listo en {0}s -> http://127.0.0.1:{1}" -f $i, $Port) -ForegroundColor Green
+        Write-Host 'Elige un preset en el selector de la web. Cargar tarda ~2 min.'
         return
     } catch { }
 }
-Write-Host 'no respondio en 120s; mira si el proceso sigue vivo con -Status.' -ForegroundColor Yellow
+Notify 'Modelo local' 'no respondio' '#c86464'
+Write-Host 'el router no respondio en 60s.' -ForegroundColor Yellow

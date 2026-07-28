@@ -81,6 +81,11 @@ foreach ($ff in "$env:ProgramFiles\Firefox Developer Edition", "$env:ProgramFile
     break   # first install wins; two Firefox channels would map to the same repo file
 }
 
+# Los presets del modelo local. Viven en I: junto al modelo (17 GB no caben en
+# el repo), pero el INI si merece seguimiento: es donde estan medidos el reparto
+# GPU/CPU y los contextos que funcionan en este equipo.
+if (Test-Path 'I:i\presets.ini') { $Map['ai\presets.ini'] = 'I:i\presets.ini' }
+
 # Rust sources: whole trees, minus build output.
 $Trees = @{ 'crates' = "$home_\dev\crates" }
 $Loose = @{ 'Cargo.toml' = "$home_\dev\Cargo.toml"; 'Cargo.lock' = "$home_\dev\Cargo.lock" }
