@@ -326,11 +326,23 @@ fn show(t: &Toast, hold: f32) {
     let want_island = style == "island" || style == "both";
     let want_toast = style != "island";
 
+    // Sobre un juego a pantalla completa, SIEMPRE por la isla y nunca por el
+    // toast. No es cuestion de foco -- el toast ya nace con WS_EX_NOACTIVATE y
+    // se comprobo que no lo roba -- sino de que es un PROCESO NUEVO con su
+    // propia ventana OpenGL, y una ventana nueva encima de un juego en pantalla
+    // completa exclusiva le obliga a cambiar de modo. Eso es lo que minimizaba
+    // League cada vez que llegaba una notificacion.
+    //
+    // La isla no crea nada: se dibuja dentro de la ventana que la barra ya tiene
+    // abierta y que la barra ya mantiene visible sobre los juegos justo para
+    // esto.
+    let over_game = win::fullscreen_app_focused();
+
     let ev = IslandEvent::new(t.icon, &t.title, &t.body, &hex(theme::ACCENT));
-    if want_island {
+    if want_island || over_game {
         let _ = ev.publish();
     }
-    if !want_toast {
+    if !want_toast || over_game {
         return;
     }
 

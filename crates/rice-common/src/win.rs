@@ -162,3 +162,70 @@ pub fn sibling_exe(name: &str) -> std::path::PathBuf {
         .and_then(|p| p.parent().map(|d| d.join(name)))
         .unwrap_or_else(|| name.into())
 }
+
+/// ¿Hay una aplicación cubriendo por completo el monitor donde está?
+///
+/// Lo usa notifyd para decidir por dónde entregar una notificación. La respuesta
+/// cambia el MEDIO, no el mensaje: sobre un juego, un toast es una ventana nueva
+/// -- y una ventana nueva encima de un juego en pantalla completa exclusiva le
+/// obliga a cambiar de modo, que es lo que minimizaba League. La isla no crea
+/// nada: vive dentro de la ventana que la barra ya tiene abierta.
+///
+/// Deliberadamente NO comprueba el escritorio: `Progman` y `WorkerW` son del
+/// tamaño del monitor y harían que un clic en el escritorio silenciara los
+/// toasts. Es el mismo error que escondía la barra al hacer clic abajo.
+#[cfg(windows)]
+pub fn fullscreen_app_focused() -> bool {
+    #[repr(C)]
+    struct Rect { left: i32, top: i32, right: i32, bottom: i32 }
+    #[repr(C)]
+    struct MonInfo { cb: u32, rc_monitor: Rect, rc_work: Rect, flags: u32 }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetForegroundWindow() -> isize;
+        fn GetWindowRect(h: isize, r: *mut Rect) -> i32;
+        fn MonitorFromWindow(h: isize, flags: u32) -> isize;
+        fn GetMonitorInfoW(m: isize, mi: *mut MonInfo) -> i32;
+        fn GetClassNameW(h: isize, buf: *mut u16, n: i32) -> i32;
+    }
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg == 0 {
+            return false;
+        }
+        let mut buf = [0u16; 64];
+        let n = GetClassNameW(fg, buf.as_mut_ptr(), buf.len() as i32);
+        let class = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+        if matches!(class.as_str(), "Progman" | "WorkerW" | "SysListView32"
+            | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
+            return false;
+        }
+        let mut r = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+        if GetWindowRect(fg, &mut r) == 0 {
+            return false;
+        }
+        let mon = MonitorFromWindow(fg, 2 /* NEAREST */);
+        let mut mi = MonInfo {
+            cb: std::mem::size_of::<MonInfo>() as u32,
+            rc_monitor: Rect { left: 0, top: 0, right: 0, bottom: 0 },
+            rc_work: Rect { left: 0, top: 0, right: 0, bottom: 0 },
+            flags: 0,
+        };
+        if GetMonitorInfoW(mon, &mut mi) == 0 {
+            return false;
+        }
+        // Unos pocos píxeles de holgura: algunos juegos en borderless se quedan
+        // un pelo dentro del rect del monitor y una comparación exacta los
+        // dejaría fuera.
+        const SLACK: i32 = 4;
+        r.left <= mi.rc_monitor.left + SLACK
+            && r.top <= mi.rc_monitor.top + SLACK
+            && r.right >= mi.rc_monitor.right - SLACK
+            && r.bottom >= mi.rc_monitor.bottom - SLACK
+    }
+}
+
+#[cfg(not(windows))]
+pub fn fullscreen_app_focused() -> bool {
+    false
+}
