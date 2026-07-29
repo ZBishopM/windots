@@ -2,8 +2,6 @@
 # app is placed only now, by focusing its workspace and waiting for its window to
 # appear before moving on (so it lands there). Open apps later go wherever you are.
 
-Start-Sleep -Seconds 12  # let GlazeWM + dwindle + the bars settle after login
-
 $wez = 'C:\Program Files\WezTerm\wezterm-gui.exe'
 
 # The IPC client lives in lib/rice-ipc.ps1 now. This script's own copy was the
@@ -13,6 +11,27 @@ $wez = 'C:\Program Files\WezTerm\wezterm-gui.exe'
 # focused. That was the "my apps came up on the wrong workspace" symptom.
 . "$env:USERPROFILE\.config\lib\rice-paths.ps1"
 . "$env:USERPROFILE\.config\lib\rice-ipc.ps1"
+
+# Esperar a que GlazeWM CONTESTE, no doce segundos por si acaso.
+#
+# Aqui habia un `Start-Sleep -Seconds 12` con el comentario "let GlazeWM +
+# dwindle + the bars settle". Era una adivinanza, y de las caras: en el ultimo
+# inicio de sesion GlazeWM ya estaba arriba a las 09:32:11 y este script no
+# lanzo nada hasta las 09:32:27. Diez segundos de reloj mirando al techo.
+#
+# `Wait-GlazeIpcReady` se escribio precisamente para sustituir estas esperas
+# fijas -- lo dice su propio comentario en lib/rice-ipc.ps1 -- pero la
+# migracion nunca llego a este archivo.
+#
+# Lo unico que de verdad tiene que estar listo antes es GlazeWM: es quien coloca
+# cada ventana por window_rules segun aparece, y quien responde a los `Focus` de
+# mas abajo. Las barras y dwindle reaccionan a eventos y no bloquean a nadie.
+#
+# Si no contesta se sigue igualmente: mejor las aplicaciones mal colocadas que
+# ninguna aplicacion.
+if (-not (Wait-GlazeIpcReady -TimeoutSec 60)) {
+    Write-Host 'GlazeWM no respondio; sigo de todas formas'
+}
 
 function Focus($n) {
     if (-not (Set-GlazeWorkspace -Index $n)) { Write-Host "Focus ${n}: no IPC" }
