@@ -131,4 +131,72 @@ foreach ($n in $dead) {
     }
 }
 
+# --- 5. Overlay de NVIDIA -------------------------------------------------
+# ~696 MB medidos: 5 procesos de 'NVIDIA Overlay' (476 MB) mas los 4 de
+# 'nvcontainer' (220 MB) que los alojan. Es el Alt+Z, el contador de FPS y el
+# ShadowPlay de NVIDIA -- justo lo que este escritorio ya reemplazo con
+# shadowplay-wgc, que ocupa 177 MB y guarda con Alt+F10.
+#
+# NVDisplay.ContainerLocalSystem NO se toca, y la diferencia importa: ese es el
+# contenedor del DRIVER DE PANTALLA. De ahi salen el panel de control de NVIDIA,
+# G-Sync y la gestion de resoluciones. Apagarlo no ahorra overlay, rompe la
+# pantalla. Se parecen en el nombre y no en lo que hacen.
+Write-Host '== overlay de NVIDIA =='
+if ($Undo) {
+    Set-Service NvContainerLocalSystem -StartupType Automatic -EA SilentlyContinue
+    Start-Service NvContainerLocalSystem -EA SilentlyContinue
+    Write-Host '   NvContainerLocalSystem: Automatico, arrancado'
+} else {
+    Stop-Service NvContainerLocalSystem -Force -EA SilentlyContinue
+    Set-Service NvContainerLocalSystem -StartupType Disabled -EA SilentlyContinue
+    Get-Process 'NVIDIA Overlay','nvcontainer','nvsphelper64' -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+    Write-Host '   NvContainerLocalSystem: Deshabilitado, parado (overlay incluido)'
+}
+
+# El autoactualizador de la NVIDIA App, misma categoria que los de SCP y Meta
+# Horizon que ya se apagaron por avisar constantemente.
+$t = Get-ScheduledTask -EA SilentlyContinue | Where-Object { $_.TaskName -like 'NVIDIA App SelfUpdate*' }
+foreach ($x in $t) {
+    if ($Undo) { Enable-ScheduledTask -TaskPath $x.TaskPath -TaskName $x.TaskName -EA SilentlyContinue | Out-Null }
+    else       { Disable-ScheduledTask -TaskPath $x.TaskPath -TaskName $x.TaskName -EA SilentlyContinue | Out-Null }
+    Write-Host ("   {0} {1}" -f $(if ($Undo) {'+'} else {'-'}), $x.TaskName)
+}
+
+# --- 6. Indice de Windows -------------------------------------------------
+# El launcher tiene su propio indice de archivos (crates/launcher/src/files.rs),
+# que cubre el 100% de los discos. El catalogo de WSearch tenia ~196.000 de las
+# ~2,17M entradas de esta maquina -- un 12% -- porque su ambito excluye AppData,
+# todos los dotfolders y D: entero. Ademas solo indexa por prefijo, asi que ni
+# siquiera puede servir busqueda difusa.
+#
+# LA CONTRAPARTIDA ES REAL: la busqueda del menu Inicio y la del Explorador
+# dependen de este servicio y dejan de encontrar archivos. Win+Space no.
+Write-Host '== indice de Windows =='
+if ($Undo) {
+    Set-Service WSearch -StartupType Automatic -EA SilentlyContinue
+    Start-Service WSearch -EA SilentlyContinue
+    Write-Host '   WSearch: Automatico, arrancado'
+} else {
+    Stop-Service WSearch -Force -EA SilentlyContinue
+    Set-Service WSearch -StartupType Disabled -EA SilentlyContinue
+    Write-Host '   WSearch: Deshabilitado, parado'
+}
+
+# --- 7. Tareas de inicio de sesion muertas --------------------------------
+# MSIAfterburner: la tarea existe y el ejecutable NO. Se dispara en cada inicio
+# de sesion y devuelve 0x80070002 (fichero no encontrado). Lleva fallando desde
+# que se desinstalo el programa.
+#
+# OneDrive Startup Task: la segunda via de arranque de OneDrive. El trim de las
+# claves Run solo miraba HKCU\...\Run, asi que esta tarea nunca se toco.
+Write-Host '== tareas de inicio muertas =='
+foreach ($n in 'MSIAfterburner', 'OneDrive Startup Task') {
+    $tasks = Get-ScheduledTask -EA SilentlyContinue | Where-Object { $_.TaskName -like "$n*" }
+    foreach ($x in $tasks) {
+        if ($Undo) { Enable-ScheduledTask -TaskPath $x.TaskPath -TaskName $x.TaskName -EA SilentlyContinue | Out-Null }
+        else       { Disable-ScheduledTask -TaskPath $x.TaskPath -TaskName $x.TaskName -EA SilentlyContinue | Out-Null }
+        Write-Host ("   {0} {1}" -f $(if ($Undo) {'+'} else {'-'}), $x.TaskName)
+    }
+}
+
 Write-Host "`nhecho. Reinicia sesion para ver el efecto completo en el arranque."

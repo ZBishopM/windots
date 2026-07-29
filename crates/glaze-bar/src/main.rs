@@ -1611,7 +1611,7 @@ impl BarApp {
         } else {
             0.0
         };
-        p.circle_stroke(ring_c, 30.0, egui::Stroke::new(4.0, ISL_HI));
+        p.circle_stroke(ring_c, 30.0, egui::Stroke::new(4.0_f32, ISL_HI));
         // egui has no arc primitive; draw the remaining portion as short segments.
         let steps = 48;
         let lit = (frac * steps as f32).round() as usize;
@@ -1623,7 +1623,7 @@ impl BarApp {
                     ring_c + egui::vec2(a0.cos(), a0.sin()) * 30.0,
                     ring_c + egui::vec2(a1.cos(), a1.sin()) * 30.0,
                 ],
-                egui::Stroke::new(4.0, WARM_ACCENT),
+                egui::Stroke::new(4.0_f32, WARM_ACCENT),
             );
         }
         p.text(ring_c, egui::Align2::CENTER_CENTER, &label, egui::FontId::proportional(17.0), WARM_TEXT);
@@ -1746,7 +1746,7 @@ impl BarApp {
             } else if r.connected {
                 p.circle_filled(dot, 4.5, col(theme::ACCENT_OK));
             } else {
-                p.circle_stroke(dot, 4.5, egui::Stroke::new(1.5, WARM_SUB));
+                p.circle_stroke(dot, 4.5, egui::Stroke::new(1.5_f32, WARM_SUB));
             }
 
             let fg = if r.connected { WARM_TEXT } else { WARM_SUB };
@@ -1990,7 +1990,13 @@ impl eframe::App for BarApp {
                     // matches, and this way anything that clears the ex-style
                     // behind our back is corrected on the next tick instead of
                     // leaving the bar permanently solid.
-                    unsafe { set_clickthrough(self.hwnd, want) };
+                    // ...pero NO mientras hay una notificacion en pantalla. Con
+                    // WS_EX_TRANSPARENT puesto la barra no recibe raton, asi que
+                    // el clic-para-descartar de la pildora no podia dispararse
+                    // nunca sobre un juego: la unica forma de quitarla era
+                    // esperar los 4 s. Aqui recupera el raton exactamente
+                    // mientras hay algo que descartar, y solo entonces.
+                    unsafe { set_clickthrough(self.hwnd, want && self.isl_notif.is_none()) };
                 }
                 // Live-reload bar opacity from the file (so editing it directly also
                 // updates in real time), except while the slider owns the value.
@@ -2025,17 +2031,27 @@ impl eframe::App for BarApp {
                     "#a9b56a",
                 );
                 let _ = ev.publish();
-                let exe = win::sibling_exe("shadowplay-notify.exe");
-                std::thread::spawn(move || {
-                    use std::os::windows::process::CommandExt;
-                    let _ = std::process::Command::new(exe)
-                        .args([
-                            "--title", "Temporizador", "--body", "tiempo cumplido",
-                            "--icon", "check", "--accent", "#a9b56a", "--hold", "8",
-                        ])
-                        .creation_flags(win::CREATE_NO_WINDOW)
-                        .spawn();
-                });
+                // Sobre un juego a pantalla completa, la isla y punto.
+                //
+                // El toast es un PROCESO aparte con su propia ventana OpenGL, y
+                // una ventana nueva encima de un juego en exclusiva fuerza un
+                // cambio de modo de video: eso es lo que minimizaba League cada
+                // vez que llegaba una notificacion. notifyd ya lo evita
+                // (notifyd/src/main.rs), pero este temporizador se lo saltaba y
+                // era el unico sitio del rice que seguia abriendo esa ventana.
+                if !rice_common::win::fullscreen_app_focused() {
+                    let exe = win::sibling_exe("shadowplay-notify.exe");
+                    std::thread::spawn(move || {
+                        use std::os::windows::process::CommandExt;
+                        let _ = std::process::Command::new(exe)
+                            .args([
+                                "--title", "Temporizador", "--body", "tiempo cumplido",
+                                "--icon", "check", "--accent", "#a9b56a", "--hold", "8",
+                            ])
+                            .creation_flags(win::CREATE_NO_WINDOW)
+                            .spawn();
+                    });
+                }
             }
             ctx.request_repaint_after(Duration::from_millis(250));
         } else {
@@ -2380,7 +2396,7 @@ impl eframe::App for BarApp {
                 ui.painter().rect_stroke(
                     rect.shrink(0.5),
                     round,
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(ISL_HI.r(), ISL_HI.g(), ISL_HI.b(), 110)),
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(ISL_HI.r(), ISL_HI.g(), ISL_HI.b(), 110)),
                 );
 
                 // Live spectrum, drawn inside the pill to the right of the clock when
@@ -2463,7 +2479,7 @@ impl eframe::App for BarApp {
                     let dx = tx + div_gap / 2.0;
                     cp.line_segment(
                         [egui::pos2(dx, cy - 7.0), egui::pos2(dx, cy + 7.0)],
-                        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(WARM_SUB.r(), WARM_SUB.g(), WARM_SUB.b(), 70)),
+                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(WARM_SUB.r(), WARM_SUB.g(), WARM_SUB.b(), 70)),
                     );
                     tx += div_gap;
                 }

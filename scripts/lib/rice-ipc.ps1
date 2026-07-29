@@ -22,11 +22,11 @@ function Connect-GlazeIpc {
 }
 
 function Close-GlazeIpc {
-    param($Socket)
+    param($Socket, [int]$TimeoutMs = 1000)
     if (-not $Socket) { return }
     # CloseAsync rather than a bare Dispose, so GlazeWM sees a clean close instead
     # of an abortive reset on every one of the supervisor's ~2880 daily probes.
-    try { [void]$Socket.CloseAsync('NormalClosure', '', [Threading.CancellationToken]::None).Wait(1000) } catch { }
+    try { [void]$Socket.CloseAsync('NormalClosure', '', [Threading.CancellationToken]::None).Wait($TimeoutMs) } catch { }
     try { $Socket.Dispose() } catch { }
 }
 
@@ -58,17 +58,30 @@ function Receive-GlazeIpc {
 }
 
 # Connect, send, read, close -- always in a finally.
+#
+# El plazo es para la operacion ENTERA, no por fase. Antes -TimeoutMs solo
+# llegaba a Connect-GlazeIpc y las otras tres fases traian el suyo propio
+# (Send 2000 + Receive 3000 + Close 1000), asi que una sonda que conectaba y
+# luego se colgaba costaba ~8 s aunque se hubieran pedido 2. Eso multiplicaba
+# por cuatro el presupuesto de Wait-GlazeIpcReady, que es la funcion de la que
+# dependen el arranque de sesion (rice-autostart) y el supervisor: -TimeoutSec 90
+# podia convertirse en ~98 s reales con todo parado esperando.
 function Invoke-GlazeIpc {
     param([Parameter(Mandatory)][string]$Command, [int]$TimeoutMs = 4000, [switch]$Raw)
-    $ws = Connect-GlazeIpc -TimeoutMs $TimeoutMs
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    # Suelo de 200 ms: agotado el presupuesto sigue haciendo falta un plazo
+    # positivo para que el cierre no quede colgado sin limite.
+    $left = { [int][Math]::Max(200, $TimeoutMs - $sw.ElapsedMilliseconds) }
+
+    $ws = Connect-GlazeIpc -TimeoutMs (& $left)
     if (-not $ws) { return $null }
     try {
-        if (-not (Send-GlazeIpc $ws $Command)) { return $null }
-        $txt = Receive-GlazeIpc $ws
+        if (-not (Send-GlazeIpc $ws $Command -TimeoutMs (& $left))) { return $null }
+        $txt = Receive-GlazeIpc $ws -TimeoutMs (& $left)
         if (-not $txt) { return $null }
         if ($Raw) { return $txt }
         try { return $txt | ConvertFrom-Json } catch { return $null }
-    } finally { Close-GlazeIpc $ws }
+    } finally { Close-GlazeIpc $ws -TimeoutMs (& $left) }
 }
 
 # Is GlazeWM responding? Uses `query focused` rather than `query windows`: the

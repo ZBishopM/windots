@@ -11,7 +11,32 @@
 
   "launcher": {
     "index_store_apps": false,
-    "index_files": true
+    "index_files": true,
+    "file_skip": [
+      ":\\windows",
+      ":\\program files",
+      ":\\program files (x86)",
+      ":\\programdata",
+      "\\node_modules",
+      "\\.git",
+      "\\.rustup",
+      "\\.cargo\\registry",
+      "\\.nuget",
+      "\\.gradle",
+      "\\.m2",
+      "\\.vscode\\extensions",
+      "\\.vscode-insiders\\extensions",
+      "\\__pycache__",
+      "\\.venv",
+      "\\target\\debug",
+      "\\target\\release",
+      "\\appdata\\local\\temp",
+      "\\appdata\\local\\packages",
+      "\\appdata\\local\\microsoft",
+      "\\appdata\\locallow",
+      "\\$recycle.bin",
+      "\\system volume information"
+    ]
   },
 
   "animation": {

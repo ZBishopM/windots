@@ -521,30 +521,40 @@ impl App {
         let run = self.run_n();
         let apps = self.app_shown();
         let target = if run == 1 && self.selected == 0 {
-            self.run_row.as_ref().map(|r| (r.target.clone(), r.args.clone(), elevated))
+            self.run_row.as_ref().map(|r| (r.target.clone(), r.args.clone(), String::new(), elevated))
         } else if self.selected - run < apps {
             self.hits.get(self.selected - run).map(|&(i, _)| match &self.entries[i].action {
-                Action::Shortcut { target, args, .. } => {
-                    (target.to_string_lossy().into_owned(), args.clone(), elevated)
+                // `dir` viaja hasta el final. Antes se descartaba aqui con `..`
+                // y ShellExecuteW recibia null, asi que toda aplicacion lanzada
+                // desde un acceso directo del menu Inicio heredaba el directorio
+                // de trabajo DEL LANZADOR. resolve_lnk se molesta en leerlo y
+                // nadie lo usaba: el aviso de dead_code sobre el campo era esto
+                // asomando.
+                Action::Shortcut { target, args, dir } => {
+                    (target.to_string_lossy().into_owned(), args.clone(), dir.clone(), elevated)
                 }
                 // A packaged app cannot be elevated -- Windows has no mechanism
                 // for it -- so the flag is ignored rather than quietly starting
                 // it unelevated as though it had worked.
-                Action::Aumid(id) => (format!("shell:AppsFolder\\{id}"), String::new(), false),
-                Action::Command { target, args } => (target.clone(), args.clone(), elevated),
+                Action::Aumid(id) => {
+                    (format!("shell:AppsFolder\\{id}"), String::new(), String::new(), false)
+                }
+                Action::Command { target, args } => {
+                    (target.clone(), args.clone(), String::new(), elevated)
+                }
             })
         } else {
             // A folder opens in Explorer and a file in whatever owns it: the
             // same call either way, since the shell decides from the target.
             self.file_hits
                 .get(self.selected - run - apps)
-                .map(|h| (h.path.clone(), String::new(), elevated))
+                .map(|h| (h.path.clone(), String::new(), String::new(), elevated))
         };
-        let Some((target, args, elevated)) = target else {
+        let Some((target, args, dir, elevated)) = target else {
             self.close();
             return;
         };
-        launch_async(target, args, elevated);
+        launch_async(target, args, dir, elevated);
         // Deliberately NOT closing yet. The lit row is the only acknowledgement
         // the keypress gets, and the application's own window is seconds away.
         self.flash = Some(std::time::Instant::now());
@@ -621,21 +631,45 @@ fn primary_size() -> (f32, f32) {
 /// A thread per launch rather than a worker queue: `ShellExecuteW` goes through
 /// arbitrary shell extensions, and one that decides to block would put every
 /// later launch behind it. Spawning costs microseconds next to half a second.
-fn launch_async(target: String, args: String, elevated: bool) {
+fn launch_async(target: String, args: String, dir: String, elevated: bool) {
     std::thread::Builder::new()
         .name("shell-exec".into())
-        .spawn(move || open_via_shell(&target, &args, elevated))
+        .spawn(move || {
+            // El shell es COM, y este hilo es nuevo. Sin inicializarlo,
+            // ShellExecuteW paga su propia inicializacion implicita en CADA
+            // lanzamiento y la tira al terminar el hilo. Es la misma leccion que
+            // ya esta escrita en icons.rs:78 para el hilo de iconos; alli se
+            // aplico y aqui se habia quedado sin aplicar.
+            #[cfg(windows)]
+            unsafe {
+                // Del crate `windows`, no una declaracion propia: index.rs ya
+                // importa este mismo simbolo y dos `extern` con firmas distintas
+                // en el mismo binario es un aviso del enlazador.
+                use windows::Win32::System::Com::{
+                    CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
+                };
+                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+                open_via_shell(&target, &args, &dir, elevated);
+                CoUninitialize();
+            }
+            #[cfg(not(windows))]
+            open_via_shell(&target, &args, &dir, elevated);
+        })
         .ok();
 }
 
 /// Start something, optionally elevated.
 ///
-/// ShellExecuteW rather than CreateProcess: it resolves .lnk files with their
-/// arguments and working directory intact, and its "runas" verb is the only way
-/// to ask for elevation -- that is what raises the UAC prompt. It also does not
+/// ShellExecuteW rather than CreateProcess: its "runas" verb is the only way to
+/// ask for elevation -- that is what raises the UAC prompt -- and it does not
 /// make the launcher the parent of what it starts, so closing this window can
 /// never take the launched application with it.
-fn open_via_shell(target: &str, args: &str, elevated: bool) {
+///
+/// `dir` importa: el indice resuelve los .lnk a su ejecutable (7067 ms -> 16 ms),
+/// y al hacerlo deja de ser el shell quien aplica el directorio de trabajo del
+/// acceso directo. Hay que pasarselo a mano o la aplicacion arranca en el
+/// directorio del lanzador.
+fn open_via_shell(target: &str, args: &str, dir: &str, elevated: bool) {
     #[cfg(windows)]
     unsafe {
         #[link(name = "shell32")]
@@ -652,17 +686,18 @@ fn open_via_shell(target: &str, args: &str, elevated: bool) {
         let verb: Vec<u16> = if elevated { "runas\0".encode_utf16().collect() } else { "open\0".encode_utf16().collect() };
         let file: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
         let params: Vec<u16> = args.encode_utf16().chain(Some(0)).collect();
+        let wdir: Vec<u16> = dir.encode_utf16().chain(Some(0)).collect();
         ShellExecuteW(
             0,
             verb.as_ptr(),
             file.as_ptr(),
             if args.is_empty() { std::ptr::null() } else { params.as_ptr() },
-            std::ptr::null(),
+            if dir.is_empty() { std::ptr::null() } else { wdir.as_ptr() },
             1, // SW_SHOWNORMAL
         );
     }
     #[cfg(not(windows))]
-    let _ = (target, args, elevated);
+    let _ = (target, args, dir, elevated);
 }
 
 impl eframe::App for App {
@@ -861,7 +896,7 @@ impl eframe::App for App {
                 // padding and the trailing hint cannot drift apart -- two copies
                 // of this in an earlier screen is exactly how the island's close
                 // logic ended up resetting three of seven flags.
-                let mut row = |ui: &mut egui::Ui,
+                let row = |ui: &mut egui::Ui,
                                n: usize,
                                name: &str,
                                trail: &str,

@@ -42,13 +42,33 @@ function New-WS($uri) {
   return $ws
 }
 # One-shot request/response on the action socket.
+#
+# Lee hasta EndOfMessage. Un solo ReceiveAsync devuelve como mucho lo que quepa
+# en el buffer Y como mucho un fragmento: si la respuesta viene partida, lo que
+# se devuelve es JSON a medias, ConvertFrom-Json lanza, y el catch de quien
+# llama se lo traga -- esa ventana se queda sin colocar y no hay ni un aviso.
+# Hoy no llega a pasar (medido: 'query windows' son 4.604 bytes con 7 ventanas,
+# ~658 por ventana, asi que el buffer de 128 KiB aguanta ~199), pero el modo de
+# fallo es silencioso y por eso no conviene dejarlo dependiendo de un margen.
+#
+# NO se usa Invoke-GlazeIpc de lib/rice-ipc.ps1 aunque ya resuelva esto: abre y
+# cierra un socket por llamada, y aqui hay un socket de acciones persistente que
+# se consulta una vez por ventana nueva. Cambiarlo seria una conexion nueva por
+# evento.
 function Query-WS($ws, $msg, $timeoutMs) {
   if (-not (Send-WS $ws $msg)) { return $null }
   $buf = New-Object byte[] 131072
   $seg = [System.ArraySegment[byte]]::new($buf)
-  $r = $ws.ReceiveAsync($seg, [Threading.CancellationToken]::None)
-  if ($r.Wait($timeoutMs)) { return [Text.Encoding]::UTF8.GetString($buf, 0, $r.Result.Count) }
-  return $null
+  $sb = New-Object Text.StringBuilder
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  do {
+    $left = [int][Math]::Max(200, $timeoutMs - $sw.ElapsedMilliseconds)
+    $r = $ws.ReceiveAsync($seg, [Threading.CancellationToken]::None)
+    if (-not $r.Wait($left)) { return $null }
+    if ($r.IsFaulted -or $r.IsCanceled) { return $null }
+    [void]$sb.Append([Text.Encoding]::UTF8.GetString($buf, 0, $r.Result.Count))
+  } while (-not $r.Result.EndOfMessage)
+  return $sb.ToString()
 }
 
 while ($true) {

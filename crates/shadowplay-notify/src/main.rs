@@ -127,7 +127,7 @@ impl eframe::App for Notify {
                     .rounding(Rounding::same(16.0))
                     .inner_margin(Margin::symmetric(14.0, 13.0))
                     .outer_margin(Margin::same(10.0))
-                    .stroke(Stroke::new(1.0, fade(BORDER)))
+                    .stroke(Stroke::new(1.0_f32, fade(BORDER)))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             // accent icon chip
