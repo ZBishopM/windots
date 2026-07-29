@@ -37,15 +37,6 @@ function Focus($n) {
     if (-not (Set-GlazeWorkspace -Index $n)) { Write-Host "Focus ${n}: no IPC" }
 }
 
-# Launch then block until the app's window exists (login is a clean slate, so the
-# process isn't already running), so focus stays on the target ws until it lands.
-function WaitWin($proc, $sec = 15) {
-    $end = (Get-Date).AddSeconds($sec)
-    while (-not (Get-Process $proc -EA SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }) -and (Get-Date) -lt $end) {
-        Start-Sleep -Milliseconds 400
-    }
-    Start-Sleep -Milliseconds 700  # settle in the workspace
-}
 
 # Launch everything at once. These used to go one at a time, each blocking on
 # WaitWin until its window appeared -- up to 15s apiece plus a settle, so five
@@ -66,22 +57,50 @@ foreach ($a in $parallel) {
     else         { Start-Process $a.Path -EA SilentlyContinue }
 }
 
-# The terminals stay ordered. Both are wezterm-gui, so a process-name rule cannot
-# tell the `claude` window from the `btop` one, and at launch their titles are not
-# set yet either. They come up fast, so the cost of keeping this sequential is
-# small -- unlike the block above.
+# Esperar a que la ventana APAREZCA, no dos segundos por si acaso.
+#
+# Los dos son wezterm-gui, asi que una regla por nombre de proceso no distingue
+# la del `claude` de la del `btop`, y al lanzarlas su titulo aun no esta puesto:
+# por eso siguen en orden. Pero el orden solo exige esperar a que la primera
+# exista, y eso se puede comprobar en vez de suponerlo. Eran dos `Start-Sleep
+# -Seconds 2` fijos esperando a nada.
+function WaitWezterm($antes, $sec = 6) {
+    $fin = (Get-Date).AddSeconds($sec)
+    while ((Get-Date) -lt $fin) {
+        if ((Get-Process wezterm-gui -EA SilentlyContinue | Measure-Object).Count -gt $antes) { return }
+        Start-Sleep -Milliseconds 120
+    }
+}
+
+$n = (Get-Process wezterm-gui -EA SilentlyContinue | Measure-Object).Count
 Focus 2
 Start-Process $wez -ArgumentList 'start', '--', 'pwsh', '-NoExit', '-Command', 'claude'
-Start-Sleep -Seconds 2
+WaitWezterm $n
+$n = (Get-Process wezterm-gui -EA SilentlyContinue | Measure-Object).Count
 Focus 5
 Start-Process $wez -ArgumentList 'start', '--', 'pwsh', '-NoExit', '-Command', 'btop'
-Start-Sleep -Seconds 2
+WaitWezterm $n
 
-Focus 1  # end on the primary workspace
+# -SettleMs 0: es el ultimo enfoque del script y detras no viene nada que pueda
+# adelantarse, asi que los 400 ms por defecto se esperarian para nada.
+Set-GlazeWorkspace -Index 1 -SettleMs 0 | Out-Null  # end on the primary workspace
 
 # The Windows taskbar is hidden by taskbar.exe --watch, which the SUPERVISOR
 # owns (see its component table). It used to be started here too, so at login
 # both could fire and leave two watchers fighting over the same window.
 
-# Once at login: has GlazeWM's animation PR #1392 merged yet? Toast if so (fail-silent).
-Start-Process pwsh -ArgumentList '-NoProfile', '-WindowStyle', 'Hidden', '-File', "$env:USERPROFILE\.config\glazewm-animcheck.ps1" -WindowStyle Hidden
+# Una vez por semana: ha mergeado ya el PR #1392 de animaciones de GlazeWM?
+#
+# La puerta semanal se mira AQUI, no dentro del script. Lanzarlo siempre gastaba
+# un pwsh entero -- 274 ms medidos -- para que el propio script comprobara la
+# fecha y volviera sin hacer nada, seis de cada siete arranques. La comprobacion
+# es un Test-Path y una resta; el proceso solo hace falta el septimo dia.
+$animFlag  = "$env:USERPROFILE\.config\.glaze-anim-merged"
+$animStamp = "$env:USERPROFILE\.config\.glaze-anim-checked"
+$tocaMirar = -not (Test-Path $animFlag) -and (
+    -not (Test-Path $animStamp) -or
+    ((Get-Date) - (Get-Item $animStamp).LastWriteTime) -ge [TimeSpan]::FromDays(7)
+)
+if ($tocaMirar) {
+    Start-Process pwsh -ArgumentList '-NoProfile', '-WindowStyle', 'Hidden', '-File', "$env:USERPROFILE\.config\glazewm-animcheck.ps1" -WindowStyle Hidden
+}

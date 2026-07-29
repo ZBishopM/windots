@@ -27,10 +27,25 @@ Add-Type -Namespace W -Name K -MemberDefinition @'
 [System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern System.IntPtr GetCurrentProcess();
 '@ -EA SilentlyContinue
 
-# Wait for GlazeWM to answer rather than sleeping a fixed guess, so the first
-# tick can't land in the middle of the login layout and judge a warming-up WM.
 Write-RiceLog 'supervisor starting'
-[void](Wait-GlazeIpcReady -TimeoutSec 90)
+
+# NO se espera a GlazeWM aqui. Aqui habia un `Wait-GlazeIpcReady -TimeoutSec 90`
+# antes de construir la tabla, y eso ataba TODOS los componentes al arranque del
+# gestor de ventanas. De los once, solo la fila `glazewm` depende de el: notifyd,
+# taskbar, launcher, ws-slide, shadowplay-wgc, altsnap y wezterm-hotkey no le
+# piden nada. Con GlazeWM tardando o sin arrancar, el escritorio se quedaba sin
+# supervisar entero -- y notifyd caido bajo No molestar significa que las
+# notificaciones no aparecen en ningun sitio.
+#
+# La espera se movio a la fila `glazewm`, que ya tiene `Grace = 90` para lo mismo:
+# su sonda de salud no cuenta como fallo hasta que pasa ese margen.
+#
+# El primer tick tampoco corre inmediatamente. La carpeta de Inicio esta lanzando
+# GlazeWM, AltSnap, wezterm-hotkey y shadowplay-wgc en este mismo momento, y sin
+# este margen el supervisor los veia ausentes y lanzaba una segunda copia: en el
+# log del 29/07 se ve `[wezterm-hotkey] started` cuando el acceso directo ya lo
+# habia arrancado, y `#SingleInstance Force` mataba al primero.
+Start-Sleep -Seconds 8
 
 $Components = @(
     # GlazeWM can wedge: the process stays alive but its IPC (and keybinds) stop
