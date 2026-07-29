@@ -46,7 +46,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LWIN, VK_
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PeekMessageW,
     PostThreadMessageW,
-    RegisterClassW, SetWindowDisplayAffinity, SetWindowsHookExW, ShowWindow, UpdateLayeredWindow,
+    RegisterClassW, SetWindowDisplayAffinity, SetWindowPos, SetWindowsHookExW, ShowWindow,
+    UpdateLayeredWindow, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     KBDLLHOOKSTRUCT, MSG, PM_NOREMOVE, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WDA_EXCLUDEFROMCAPTURE,
     WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER, WNDCLASSW,
     WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
@@ -237,6 +238,27 @@ fn cover(overlay: HWND, screen: HDC, b: &MonBuf, m: &MonRect, forward: bool) -> 
             (w, 0)
         };
         blit(overlay, screen, b, m, start);
+        // Reafirmar la banda TOPMOST en cada animacion, no solo al crear la
+        // ventana.
+        //
+        // WS_EX_TOPMOST se pone una vez en make_overlay(), y el bit sobrevive a
+        // todo. La COLOCACION en la banda z, no: un reinicio de explorer la
+        // pierde, y como esta ventana se crea al arrancar y se reutiliza para
+        // siempre, nunca se recuperaba. El sintoma es exacto y desconcertante --
+        // la animacion se ve por DETRAS de las ventanas del workspace nuevo, o
+        // sea el destino encima de la transicion que deberia taparlo.
+        //
+        // Una llamada idempotente por cambio de workspace; a este ritmo no
+        // cuesta nada.
+        let _ = SetWindowPos(
+            overlay,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
         let _ = ShowWindow(overlay, SW_SHOWNOACTIVATE);
         (start, end)
     }
