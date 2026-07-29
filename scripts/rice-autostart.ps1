@@ -41,8 +41,6 @@ $parallel = @(
     @{ Path = 'shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude' }
     @{ Path = "$env:LOCALAPPDATA\Programs\Zed\Zed.exe" }
     @{ Path = 'C:\Program Files\Firefox Developer Edition\firefox.exe' }
-    @{ Path = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
-       Args = @('--profile-directory=Profile 5') }
 )
 foreach ($a in $parallel) {
     if ($a.Args) { Start-Process $a.Path -ArgumentList $a.Args -EA SilentlyContinue }
