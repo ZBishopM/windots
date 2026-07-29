@@ -93,15 +93,34 @@ foreach ($t in $tasks) {
 
 # --- 4. Arranques muertos de ProgramData ---------------------------------
 # Estan en la carpeta de Inicio para todos los usuarios y ni siquiera llegan a
-# quedarse corriendo. No se borran: se mueven a un subdirectorio, que Windows no
-# recorre, asi que devolverlos es arrastrarlos de vuelta.
+# quedarse corriendo. No se borran: se apartan, asi que devolverlos es
+# arrastrarlos de vuelta.
+#
+# El almacen esta FUERA de la carpeta de Inicio, y eso importa. La primera
+# version usaba un subdirectorio dentro de ella, con el razonamiento de que
+# "Windows no recorre subcarpetas". Es verdad a medias y por eso costo un bug:
+# no ejecuta los accesos directos de dentro, pero SI ABRE LA CARPETA EN EL
+# EXPLORADOR al iniciar sesion. Cada arranque saltaba una ventana de
+# 'desactivado-por-rice'. Cualquier cosa dentro de Inicio se "ejecuta", y para
+# una carpeta ejecutar significa abrirla.
 #
 # Cloudflare WARP NO esta en la lista a proposito: lo pediste explicitamente.
 Write-Host '== arranques muertos (todos los usuarios) =='
 $sf   = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup"
-$off  = Join-Path $sf 'desactivado-por-rice'
+$off  = "$env:ProgramData\rice\arranques-desactivados"
 $dead = @('CodeMeter Control Center.lnk', 'ScpToolkit Tray Notifications.lnk')
 if (-not (Test-Path $off)) { New-Item $off -ItemType Directory -Force | Out-Null }
+
+# Migracion del sitio viejo. Se hace siempre, tambien con -Undo, porque lo que
+# hay que quitar de Inicio es la CARPETA en si.
+$legacy = Join-Path $sf 'desactivado-por-rice'
+if (Test-Path $legacy) {
+    Get-ChildItem $legacy -Force -EA SilentlyContinue |
+        ForEach-Object { Move-Item $_.FullName (Join-Path $off $_.Name) -Force -EA SilentlyContinue }
+    Remove-Item $legacy -Recurse -Force -EA SilentlyContinue
+    Write-Host "   movido fuera de Inicio -> $off"
+}
+
 foreach ($n in $dead) {
     if ($Undo) {
         $src = Join-Path $off $n
