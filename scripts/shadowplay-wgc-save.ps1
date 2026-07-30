@@ -78,21 +78,24 @@ else {
 #
 # Write-then-rename: the bar polls this file, so a truncate-then-write could be
 # observed half-written.
-function Set-Island($icon, $title, $body, $accent) {
-    $tmp = "$($Rice.Island).tmp"
-    @{icon = $icon; title = $title; body = $body; accent = $accent } |
-        ConvertTo-Json -Compress | Set-Content $tmp -Encoding utf8
-    [System.IO.File]::Move($tmp, $Rice.Island, $true)
-}
-
 if (Test-Path $dest) {
-    Set-Island 'replay' 'Replay guardado' (Split-Path $dest -Leaf) '#a9b56a'
+    Set-RiceIsland 'replay' 'Replay guardado' (Split-Path $dest -Leaf) '#a9b56a'
     Write-Output $dest
+
+    # La subida va aparte y desligada: transcodificar y subir son ~15 s y Alt+F10
+    # tiene que devolver el control ya. -WindowStyle Hidden para que no parpadee
+    # una consola encima del juego.
+    $share = Join-Path $Rice.Config 'rice-clip-share.ps1'
+    if (Test-Path $share) {
+        $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $share, $dest)
+        if ($esJuego) { $a += '-Game' }
+        Start-Process pwsh -ArgumentList $a -WindowStyle Hidden
+    }
 }
 else {
     # ffmpeg failed (its stderr is discarded above). Say so, so Alt+F10 never
     # just silently does nothing.
-    Set-Island 'warn' 'Replay falló' 'ffmpeg no produjo el clip' '#d08770'
+    Set-RiceIsland 'warn' 'Replay falló' 'ffmpeg no produjo el clip' '#d08770'
 }
 
 }

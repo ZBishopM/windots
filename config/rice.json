@@ -9,6 +9,15 @@
   "clickthrough_apps": ["league of legends", "valorant"],
   "hide_bar_on_fullscreen": true,
 
+  "clips": {
+    "upload": false,
+    "host": "catbox",
+    "litterbox_time": "72h",
+    "transcode": true,
+    "cq": 26,
+    "discord_when_focused": ["league of legends"]
+  },
+
   "launcher": {
     "index_store_apps": false,
     "index_files": true,

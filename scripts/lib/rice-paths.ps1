@@ -37,3 +37,25 @@ function Get-RiceExe {
     param([Parameter(Mandatory)][string]$Name)
     Join-Path $Rice.Dev $Name
 }
+
+# Publica un evento en la isla de la barra.
+#
+# Vive aqui, junto a $Rice.Island, porque ya habia dos copias de estas seis
+# lineas en scripts distintos y este proyecto ya sabe como acaba eso: la
+# cabecera de rice-ipc.ps1 cuenta que hubo CUATRO clientes IPC hechos a mano que
+# derivaron hasta ser bugs distintos.
+#
+# Escribir-y-renombrar, no truncar-y-escribir: la barra sondea este archivo por
+# su fecha de modificacion y podria leerlo a medio escribir.
+function Set-RiceIsland {
+    param(
+        [Parameter(Mandatory)][string]$Icon,
+        [Parameter(Mandatory)][string]$Title,
+        [string]$Body = '',
+        [string]$Accent = '#a9b56a'
+    )
+    $tmp = "$($Rice.Island).tmp"
+    @{ icon = $Icon; title = $Title; body = $Body; accent = $Accent } |
+        ConvertTo-Json -Compress | Set-Content $tmp -Encoding utf8
+    [System.IO.File]::Move($tmp, $Rice.Island, $true)
+}

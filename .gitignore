@@ -10,3 +10,8 @@ ShadowPlay/
 # OS cruft
 Thumbs.db
 desktop.ini
+
+# Secretos: la URL del webhook de Discord permite publicar en el canal a
+# cualquiera que la tenga, y este repo es publico. Tampoco esta en el mapa
+# de sync.ps1, asi que no llega aqui ni por accidente.
+rice-secrets.json
