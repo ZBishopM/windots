@@ -1,4 +1,10 @@
 # Stitch the last ~30s of the WGC rolling buffer into a replay clip.
+#
+#   -Foreground <proceso>   quien tenia el foco al pulsar el atajo. Lo manda
+#                           wezterm-hotkey.ahk, que es lo unico que corre en ese
+#                           instante; ver el comentario del bind !F10.
+[CmdletBinding()]
+param([string]$Foreground = '')
 # Video segments (segNN.mp4) are video-only; each has parallel raw-PCM audio in
 # lockstep: segNN.pcm (system audio) and segNN.mic.pcm (microphone), s16le 48k
 # stereo. We concat the video + each audio ring; if the mic ring exists we mix
@@ -6,6 +12,42 @@
 . "$env:USERPROFILE\.config\lib\rice-paths.ps1"
 # (rice-ipc is no longer needed here: the toast used to be positioned on the
 #  focused monitor via GlazeWM IPC, and the toast is gone.)
+
+# Que aplicacion estaba delante al pulsar el atajo. Decide si el clip se anuncia
+# en Discord.
+#
+# Se PREFIERE lo que nos pasa quien llama, porque leerlo aqui llega tarde:
+# lanzar pwsh -- incluso con 'Hide' -- asigna una consola, y esa ventana ya ha
+# movido el foco cuando este script arranca. Medido en el log: dos clips de
+# League seguidos quedaron registrados como "no era League" con la partida
+# delante. wezterm-hotkey.ahk lo lee con WinGetProcessName("A"), que si corre en
+# el instante de la pulsacion, y lo manda en -Foreground.
+#
+# El P/Invoke se queda como respaldo para cuando el script se invoca a mano.
+$fgName = $Foreground
+if (-not $fgName) {
+    Add-Type -Namespace RiceFg -Name W -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern System.IntPtr GetForegroundWindow();
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(System.IntPtr h, out uint pid);
+'@ -EA SilentlyContinue
+    try {
+        $fgPid = 0
+        [void][RiceFg.W]::GetWindowThreadProcessId([RiceFg.W]::GetForegroundWindow(), [ref]$fgPid)
+        if ($fgPid) { $fgName = (Get-Process -Id $fgPid -EA SilentlyContinue).ProcessName }
+    } catch { }
+}
+
+# Se compara por SUBCADENA, que es lo que hace que valga igual el nombre con
+# extension que devuelve AHK ('League of Legends.exe') y el sin ella del
+# P/Invoke. El proceso en partida es 'League of Legends'; el cliente es
+# 'LeagueClientUx' y a proposito NO coincide -- un clip del lobby no es jugada.
+$juegos = @('league of legends')
+try {
+    $cfgJson = Get-Content (Join-Path $Rice.Config 'rice.json') -Raw | ConvertFrom-Json
+    if ($cfgJson.clips.discord_when_focused) { $juegos = @($cfgJson.clips.discord_when_focused) }
+} catch { }
+$esJuego = $false
+foreach ($g in $juegos) { if ($fgName -and $fgName.ToLower().Contains($g.ToLower())) { $esJuego = $true } }
 
 $buf = $Rice.WgcBuffer
 $out = $Rice.Clips
@@ -93,6 +135,11 @@ if (Test-Path $dest) {
     # Alt+F10. CreateNoWindow no crea consola en absoluto, y es lo que ya usa
     # todo el arbol para esto (rice_common::win::CREATE_NO_WINDOW, y su comentario
     # dice literalmente "so spawning a helper never flashes a console").
+    # Anotar que se detecto: la vez pasada hubo que deducirlo del log de
+    # subidas, y ahi solo constaba el resultado ("no era League"), no el dato.
+    ("{0} guardado {1} | foco='{2}' | juego={3}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), (Split-Path $dest -Leaf), $fgName, $esJuego) |
+        Add-Content -Path (Join-Path $Rice.LogDir 'clip-share.log') -Encoding utf8
+
     $share = Join-Path $Rice.Config 'rice-clip-share.ps1'
     if (Test-Path $share) {
         $psi = New-Object System.Diagnostics.ProcessStartInfo

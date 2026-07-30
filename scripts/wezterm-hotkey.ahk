@@ -78,8 +78,19 @@
 ; ShadowPlay: Alt+F10 saves the last ~30s from the rolling buffer.
 ; ------------------------------------------------------------
 !F10:: {
-    ; Save runs the concat then pops the custom Rust notification itself.
-    Run('pwsh -NoProfile -WindowStyle Hidden -File "C:\Users\obisp\.config\shadowplay-wgc-save.ps1"', , 'Hide')
+    ; La aplicacion activa se lee AQUI, y se le pasa al script.
+    ;
+    ; Esto es lo unico que corre en el instante de la pulsacion. El script de
+    ; guardado lo intentaba por su cuenta con GetForegroundWindow y siempre veia
+    ; otra cosa: lanzar pwsh -- incluso con 'Hide' -- asigna una consola, y esa
+    ; ventana ya ha movido el foco cuando el script arranca. El sintoma era que
+    ; ningun clip de League llegaba a Discord; el log decia "no era League" con
+    ; la partida delante.
+    ;
+    ; De paso deja de importar cuanto tarde el script en arrancar.
+    proc := ""
+    try proc := WinGetProcessName("A")
+    Run('pwsh -NoProfile -WindowStyle Hidden -File "' . EnvGet('USERPROFILE') . '\.config\shadowplay-wgc-save.ps1" -Foreground "' . proc . '"', , 'Hide')
 }
 
 ; ------------------------------------------------------------
