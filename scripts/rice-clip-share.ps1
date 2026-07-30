@@ -74,7 +74,6 @@ $subir = $Clip
 $tmp = $null
 if ($cfg.transcode) {
     $tmp = Join-Path $env:TEMP ("share_" + [IO.Path]::GetFileNameWithoutExtension($Clip) + ".mp4")
-    Set-RiceIsland 'replay' 'Preparando clip' 'transcodificando a H.264' '#8fa1b3'
     $sw = [Diagnostics.Stopwatch]::StartNew()
     # cq en vez de bitrate fijo: el contenido de un juego varia mucho y un
     # bitrate constante desperdicia en las pausas y se queda corto en las peleas.
@@ -112,18 +111,63 @@ if ($cfg.transcode) {
 
 $mb = (Get-Item -LiteralPath $subir).Length / 1MB
 
+# --- avisar: una vez, y no mientras juegas ---------------------------------
+#
+# Pediste que no moleste de inmediato, y tenias razon de sobra: la version
+# anterior soltaba CUATRO eventos de isla por un Alt+F10 a lo largo de ~90 s, y
+# cada uno expande la barra. Con el juego en pantalla completa exclusiva eso lo
+# minimizaba una y otra vez.
+#
+# Todo aviso pasa por aqui, incluidos los errores, porque un fallo tampoco es
+# excusa para sacarte de la partida. Se acumula y se publica cuando el juego
+# pierde el foco. El enlace esta en el portapapeles desde el instante en que
+# existe, asi que esperar no cuesta nada.
+#
+# Se sondea el PROCESO enfocado y no la geometria: quien nos llamo ya decidio
+# que esto era un clip de juego, asi que la pregunta que queda es la simple --
+# sigue ese mismo juego delante?
+$juegos = @('league of legends')
+try {
+    $jj = Get-Content (Join-Path $Rice.Config 'rice.json') -Raw | ConvertFrom-Json
+    if ($jj.clips.discord_when_focused) { $juegos = @($jj.clips.discord_when_focused) }
+} catch { }
+
+Add-Type -Namespace RiceFg2 -Name W -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern System.IntPtr GetForegroundWindow();
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(System.IntPtr h, out uint pid);
+'@ -EA SilentlyContinue
+
+function Test-JuegoDelante {
+    $fgPid = 0
+    [void][RiceFg2.W]::GetWindowThreadProcessId([RiceFg2.W]::GetForegroundWindow(), [ref]$fgPid)
+    if (-not $fgPid) { return $false }
+    $n = (Get-Process -Id $fgPid -EA SilentlyContinue).ProcessName
+    if (-not $n) { return $false }
+    foreach ($g in $juegos) { if ($n.ToLower().Contains($g.ToLower())) { return $true } }
+    return $false
+}
+
+# Publica en la isla, esperando a salir del juego si hace falta. Tope de 15 min:
+# pasado eso se avisa igual, porque un aviso que nunca llega es peor que uno
+# inoportuno.
+function Publish-Aviso {
+    param([string]$Icon, [string]$Title, [string]$Body, [string]$Accent)
+    $fin = (Get-Date).AddMinutes(15)
+    while ((Test-JuegoDelante) -and (Get-Date) -lt $fin) { Start-Sleep -Seconds 5 }
+    Set-RiceIsland $Icon $Title $Body $Accent
+}
+
 # --- subir -----------------------------------------------------------------
 $esLitter = $cfg.host -eq 'litterbox'
 $api  = if ($esLitter) { 'https://litterbox.catbox.moe/resources/internals/api.php' } else { 'https://catbox.moe/user/api.php' }
 $tope = if ($esLitter) { 1024 } else { 200 }
 if ($mb -gt $tope) {
     L ("{0:N1} MB pasa del limite de {1} ({2} MB)" -f $mb, $cfg.host, $tope)
-    Set-RiceIsland 'warn' 'Clip demasiado grande' ("{0:N0} MB, el limite es {1} MB" -f $mb, $tope) '#d08770'
     if ($tmp) { Remove-Item $tmp -Force -EA SilentlyContinue }
+    Publish-Aviso 'warn' 'Clip demasiado grande' ("{0:N0} MB, el limite es {1} MB" -f $mb, $tope) '#d08770'
     exit 1
 }
 
-Set-RiceIsland 'replay' 'Subiendo clip' ("{0:N1} MB a {1}" -f $mb, $cfg.host) '#8fa1b3'
 $form = @{ reqtype = 'fileupload'; fileToUpload = Get-Item -LiteralPath $subir }
 if ($esLitter) { $form.time = $cfg.litterbox_time }
 # Con userhash la subida queda asociada a la cuenta, y eso es lo que la hace
@@ -143,22 +187,22 @@ if ($tmp) { Remove-Item $tmp -Force -EA SilentlyContinue }
 
 if (-not ($url -match '^https?://')) {
     L "respuesta inesperada de $($cfg.host): $url"
-    Set-RiceIsland 'warn' 'Subida fallida' 'mira clip-share.log' '#d08770'
+    Publish-Aviso 'warn' 'Subida fallida' 'mira clip-share.log' '#d08770'
     exit 1
 }
 L "subido: $url"
-Set-Clipboard -Value $url   # aunque no vaya a Discord, queda a mano
+Set-Clipboard -Value $url   # disponible ya, sin esperar al aviso
 
-# --- avisar a Discord, solo si es de League --------------------------------
+# --- Discord: AHORA, sin esperar -------------------------------------------
+# Publicar en Discord no te interrumpe -- es en la maquina de otros donde
+# aparece -- y el sentido de compartir una jugada es que la vean mientras
+# sigues en la partida. Solo el AVISO EN TU PANTALLA se aplaza.
 $aDiscord = $Game -and -not $NoDiscord -and $hook
-if (-not $Game) {
-    L 'no era League: no aviso a Discord'
-} elseif ($NoDiscord) {
-    L '-NoDiscord: no aviso'
-} elseif (-not $hook) {
-    L 'era League pero no hay discord_webhook en rice-secrets.json'
-}
+if (-not $Game)          { L 'no era League: no aviso a Discord' }
+elseif ($NoDiscord)      { L '-NoDiscord: no aviso' }
+elseif (-not $hook)      { L 'era League pero no hay discord_webhook en rice-secrets.json' }
 
+$okDiscord = $false
 if ($aDiscord) {
     try {
         # Solo el enlace, no el archivo. El webhook usa el nivel de BOOST DEL
@@ -168,11 +212,10 @@ if ($aDiscord) {
         $cuerpo = @{ content = $url } | ConvertTo-Json -Compress
         Invoke-RestMethod -Uri $hook -Method Post -ContentType 'application/json' -Body $cuerpo -TimeoutSec 30 | Out-Null
         L 'publicado en Discord'
-        Set-RiceIsland 'check' 'Clip compartido' 'en Discord y en el portapapeles' '#a9b56a'
-    } catch {
-        L "Discord fallo: $($_.Exception.Message)"
-        Set-RiceIsland 'warn' 'Clip subido, Discord no' 'enlace en el portapapeles' '#d08770'
-    }
-} else {
-    Set-RiceIsland 'check' 'Clip subido' 'enlace en el portapapeles' '#a9b56a'
+        $okDiscord = $true
+    } catch { L "Discord fallo: $($_.Exception.Message)" }
 }
+
+if ($okDiscord)      { Publish-Aviso 'check' 'Clip compartido' 'en Discord y en el portapapeles' '#a9b56a' }
+elseif ($aDiscord)   { Publish-Aviso 'warn' 'Clip subido, Discord no' 'enlace en el portapapeles' '#d08770' }
+else                 { Publish-Aviso 'check' 'Clip subido' 'enlace en el portapapeles' '#a9b56a' }

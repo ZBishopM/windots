@@ -10,7 +10,7 @@
   "hide_bar_on_fullscreen": true,
 
   "clips": {
-    "upload": false,
+    "upload": true,
     "host": "catbox",
     "litterbox_time": "72h",
     "transcode": true,

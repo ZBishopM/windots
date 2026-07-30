@@ -83,13 +83,27 @@ if (Test-Path $dest) {
     Write-Output $dest
 
     # La subida va aparte y desligada: transcodificar y subir son ~15 s y Alt+F10
-    # tiene que devolver el control ya. -WindowStyle Hidden para que no parpadee
-    # una consola encima del juego.
+    # tiene que devolver el control ya.
+    #
+    # CreateNoWindow, NO `Start-Process -WindowStyle Hidden`. No son lo mismo y la
+    # diferencia se vio en el juego: -WindowStyle Hidden pide SW_HIDE en el
+    # STARTUPINFO, pero la consola SE ASIGNA IGUAL -- y asignar una ventana nueva
+    # encima de un juego en pantalla completa exclusiva fuerza un cambio de modo
+    # de video, que lo minimiza. Con League en fullscreen eso pasaba en CADA
+    # Alt+F10. CreateNoWindow no crea consola en absoluto, y es lo que ya usa
+    # todo el arbol para esto (rice_common::win::CREATE_NO_WINDOW, y su comentario
+    # dice literalmente "so spawning a helper never flashes a console").
     $share = Join-Path $Rice.Config 'rice-clip-share.ps1'
     if (Test-Path $share) {
-        $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $share, $dest)
-        if ($esJuego) { $a += '-Game' }
-        Start-Process pwsh -ArgumentList $a -WindowStyle Hidden
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = 'pwsh'
+        $psi.CreateNoWindow = $true
+        $psi.UseShellExecute = $false   # obligatorio: con $true, CreateNoWindow se ignora
+        foreach ($a in @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $share, $dest)) {
+            [void]$psi.ArgumentList.Add($a)
+        }
+        if ($esJuego) { [void]$psi.ArgumentList.Add('-Game') }
+        [void][System.Diagnostics.Process]::Start($psi)
     }
 }
 else {
