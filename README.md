@@ -3,9 +3,17 @@
 Un escritorio Windows 11 tipo Hyprland, hecho desde cero: **WezTerm + fastfetch**,
 **GlazeWM** en tiling fibonacci, una **barra de estado nativa en Rust** (~6 MB), y un
 **ShadowPlay propio** (AV1 + audio del sistema). Todo con la tecla **SUPER** y
-optimizado para pesar lo mínimo: **~600 MB todo el stack**, medido, de los cuales
-164 MB son el grabador y **169 MB los dos hosts de PowerShell** (supervisor y
-dwindle) -- más que todos nuestros binarios juntos.
+optimizado para pesar lo mínimo: **~520 MB todo el stack**, medido, y de esos
+**178 MB son el grabador** — con el buffer rodante de 30 s corriendo — más otros
+125 MB del índice de archivos del buscador. Los dos hosts de PowerShell
+(supervisor y dwindle) suman **26 MB**.
+
+Las cifras por proceso oscilan bastante y conviene saber por qué antes de
+perseguir un pico: varios componentes llaman a `EmptyWorkingSet` cuando están
+ociosos, así que sus páginas van a la lista de espera y vuelven al primer uso.
+dwindle mide 15 MB o 5 MB según el momento en que mires, y el buscador 125 MB
+recién indexado o 5 MB después. Una sola foto no dice nada; el número de arriba
+es con todo caliente.
 
 ---
 
