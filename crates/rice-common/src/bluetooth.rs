@@ -304,7 +304,7 @@ const AQS_UNPAIRED: &str = concat!(
 /// which streams results but needs an event loop to pump.
 pub fn scan_pairable() -> Vec<Pairable> {
     let mut out = Vec::new();
-    unsafe {
+    {
         // FindAllAsync rather than a DeviceWatcher: a watcher would need an event
         // loop and a way to marshal callbacks back, and this already runs on its
         // own thread where blocking is fine.
@@ -347,7 +347,7 @@ pub fn scan_pairable() -> Vec<Pairable> {
 /// A device that insists on a PIN will fail here rather than silently hang
 /// waiting for input we have nowhere to display.
 pub fn pair(id: &str) -> Result<(), String> {
-    unsafe {
+    {
         let info = DeviceInformation::CreateFromIdAsync(&HSTRING::from(id))
             .and_then(|op| op.get())
             .map_err(|e| format!("device not found: {e}"))?;
@@ -387,7 +387,7 @@ pub fn pair(id: &str) -> Result<(), String> {
 /// Forget a device. Its audio endpoints disappear with it, so the row vanishes
 /// from the device list rather than going offline.
 pub fn unpair(id: &str) -> Result<(), String> {
-    unsafe {
+    {
         let info = DeviceInformation::CreateFromIdAsync(&HSTRING::from(id))
             .and_then(|op| op.get())
             .map_err(|e| format!("device not found: {e}"))?;

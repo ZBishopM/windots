@@ -50,7 +50,12 @@ function Resolve-TrayPath([string]$p) {
 
 # Lo que nunca se promociona: la infraestructura del propio rice. Su icono no
 # dice nada que la barra no diga ya, y estaba saliendo en la bandeja.
-$riceExe = 'glazewm|AutoHotkey64|wezterm|altsnap|glaze-bar|launcher|notifyd|taskbar|ws-slide|micswitch|windeco|shadowplay|PowerToys|CmdPal'
+# Los propios overlays del rice, para no promover sus iconos a la bandeja.
+# Sin windeco (borrado del arbol: dejaba retazos y su --restore no era
+# fiable) ni PowerToys/CmdPal (sustituidos por crates/launcher). Eran tres
+# alternativas que no podian coincidir con nada, evaluadas en un recorrido
+# de 134 claves.
+$riceExe = 'glazewm|AutoHotkey64|wezterm|altsnap|glaze-bar|launcher|notifyd|taskbar|ws-slide|micswitch|shadowplay'
 
 $changed = 0
 foreach ($sub in Get-ChildItem $key) {

@@ -39,7 +39,7 @@
 use std::path::PathBuf;
 
 use windows::core::Interface;
-use windows::Win32::Foundation::{HWND, POINT, RECT};
+use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
     ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HGDIOBJ,
@@ -406,8 +406,3 @@ pub fn digest(items: &[Item]) -> u64 {
     }
     h
 }
-
-/// Silencia el aviso de import no usado en compilaciones donde POINT no hace
-/// falta; está aquí porque las firmas de GDI lo piden en otras rutas.
-#[allow(dead_code)]
-fn _unused(_: POINT) {}

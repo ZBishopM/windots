@@ -868,17 +868,6 @@ const ACTIONS: [(&str, &str, [u8; 3]); 8] = [
     ("devices", "\u{f025}", [150, 200, 190]), // fa-headphones -> outputs + bluetooth
 ];
 
-// Draw an opacity slider track (bg + accent fill + handle) at a normalized value t.
-fn draw_track(p: &egui::Painter, tl: f32, tw: f32, cy: f32, t: f32, acc: egui::Color32) {
-    let track = egui::Rect::from_min_max(egui::pos2(tl, cy - 3.0), egui::pos2(tl + tw, cy + 3.0));
-    p.rect_filled(track, egui::Rounding::same(3.0), egui::Color32::from_rgba_unmultiplied(WARM_SUB.r(), WARM_SUB.g(), WARM_SUB.b(), 55));
-    p.rect_filled(
-        egui::Rect::from_min_max(track.min, egui::pos2(tl + tw * t, track.max.y)),
-        egui::Rounding::same(3.0),
-        acc,
-    );
-    p.circle_filled(egui::pos2(tl + tw * t, cy), 5.5, acc);
-}
 
 // Run a quick-action off the UI thread. "mic" also pushes its result to the island.
 fn run_action(kind: &str, shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
@@ -1218,7 +1207,6 @@ struct BarApp {
     last_opacity_write: Instant,
 }
 
-const ISL_HOLD: f32 = 4.0; // seconds a notification stays before collapsing
 
 
 impl BarApp {
@@ -2139,7 +2127,9 @@ impl eframe::App for BarApp {
                 // the whole strip is skipped -- but the island block below still
                 // runs, because a notification IS worth covering a pixel of it.
                 if !hidden {
-                ui.allocate_ui_at_rect(full, |ui| {
+                // allocate_new_ui, no allocate_ui_at_rect: egui 0.29 marco esa
+                // como obsoleta. El rectangulo se pasa ahora por UiBuilder.
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(full), |ui| {
                 ui.horizontal_centered(|ui| {
                     // ---- left: workspaces (clickable -> focus that workspace) ----
                     // The focused-workspace highlight is one pill that SLIDES between

@@ -225,8 +225,6 @@ mod sys {
     pub const SHGFI_ICON: u32 = 0x0000_0100;
     pub const SHGFI_LARGEICON: u32 = 0x0000_0000;
     pub const SHGFI_USEFILEATTRIBUTES: u32 = 0x0000_0010;
-    pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
-    pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 }
 
 #[cfg(windows)]

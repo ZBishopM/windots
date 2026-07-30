@@ -282,7 +282,6 @@ fn ident(dir: u32, name: &str) -> u64 {
 }
 
 pub struct FileIndex {
-    dirs: Arc<RwLock<Dirs>>,
     scanning: Arc<AtomicBool>,
     count: Arc<AtomicUsize>,
     /// Generación de la consulta en curso. Cualquier búsqueda cuyo número ya no
@@ -366,7 +365,7 @@ impl FileIndex {
                 .ok();
         }
 
-        Self { dirs, scanning, count, gen, out, tx }
+        Self { scanning, count, gen, out, tx }
     }
 
     /// ¿Sigue creciendo el índice?
@@ -399,10 +398,6 @@ impl FileIndex {
         self.out.lock().unwrap().0 == self.gen.load(Ordering::SeqCst)
     }
 
-    /// Reconstruye la ruta de un directorio. Para el resto del programa.
-    pub fn dir_path(&self, id: u32) -> String {
-        self.dirs.read().unwrap().path(id)
-    }
 }
 
 // ------------------------------------------------------------------ búsqueda

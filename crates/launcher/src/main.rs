@@ -138,11 +138,6 @@ mod win {
         }
     }
 
-    pub fn is_visible() -> bool {
-        let h = hwnd();
-        h != 0 && unsafe { IsWindowVisible(h) != 0 }
-    }
-
     /// Show centred on the primary monitor and take focus.
     pub fn show(width: f32, height: f32) {
         let h = hwnd();
@@ -383,7 +378,6 @@ struct App {
     /// When it last opened, for the focus grace period.
     opened_at: Option<std::time::Instant>,
     idle: u32,
-    started: bool,
     /// `None` when `launcher.index_files` is off, in which case nothing is
     /// walked and nothing is held in memory.
     files: Option<files::FileIndex>,
@@ -428,7 +422,6 @@ impl App {
             pending,
             opened_at: None,
             idle: 0,
-            started: false,
             files,
             icons,
             runner: commands::Runner::new(),
@@ -606,19 +599,6 @@ impl App {
         #[cfg(windows)]
         win::resize(WIDTH, Self::height_for(rows));
     }
-}
-
-fn primary_size() -> (f32, f32) {
-    #[cfg(windows)]
-    unsafe {
-        #[link(name = "user32")]
-        extern "system" {
-            fn GetSystemMetrics(i: i32) -> i32;
-        }
-        (GetSystemMetrics(0) as f32, GetSystemMetrics(1) as f32)
-    }
-    #[cfg(not(windows))]
-    (1920.0, 1080.0)
 }
 
 /// Start something without blocking the interface.

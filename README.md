@@ -3,7 +3,9 @@
 Un escritorio Windows 11 tipo Hyprland, hecho desde cero: **WezTerm + fastfetch**,
 **GlazeWM** en tiling fibonacci, una **barra de estado nativa en Rust** (~6 MB), y un
 **ShadowPlay propio** (AV1 + audio del sistema). Todo con la tecla **SUPER** y
-optimizado para pesar lo mínimo (~340 MB todo el stack).
+optimizado para pesar lo mínimo: **~600 MB todo el stack**, medido, de los cuales
+164 MB son el grabador y **169 MB los dos hosts de PowerShell** (supervisor y
+dwindle) -- más que todos nuestros binarios juntos.
 
 ---
 
@@ -106,7 +108,7 @@ está en la cabecera de `crates/launcher/src/files.rs`.
 |---|---|
 | **Índice de Windows** (WSearch, `Search.CollatorDSO`) | Descartado. Tiene ~196k elementos de los ~2,17M que hay: excluye `AppData`, todos los dotfolders y **D: entero**. Cuesta 218 MB residentes. Y **no tiene infijos** — `LIKE '%x%'` son 133-206 ms frente a 4-9 ms de un prefijo — así que un buscador difuso no puede montarse encima. Además devuelve rutas localizadas (`C:\Usuarios\…`) que no existen en disco. |
 | **Everything por IPC** | Descartado por dependencia, no por técnica: el IPC es fácil (`WM_COPYDATA` sobre `EVERYTHING_TASKBAR_NOTIFICATION`, o el crate `everything-ipc`). Pero leer la MFT **exige administrador**, por eso instala un servicio; sin él degrada a escanear directorios, que es justo lo que hacemos nosotros. |
-| **Propio** ✅ | Recorrido paralelo en memoria, sin admin ni servicio ni terceros. **2.169.925 entradas en 7,5 s**, ~117 MB, búsquedas de **11-45 ms**, 0,00% de CPU en reposo. Se mantiene al día con `ReadDirectoryChangesW`. Cobertura ajustable en `launcher.file_roots` / `file_skip`. |
+| **Propio** ✅ | Recorrido paralelo en memoria, sin admin ni servicio ni terceros. **1.815.240 entradas en 6,0 s**, **68 MB**, búsquedas de **8,6-31,8 ms**, 0,00% de CPU en reposo. Se mantiene al día con `ReadDirectoryChangesW`. Cobertura ajustable en `launcher.file_roots` / `file_skip`: el `rice.json` de aquí excluye `:\windows` y `:\program files` — anclados con dos puntos a propósito, porque un `\windows` suelto también excluiría la carpeta `windows/` de cada proyecto Flutter o CMake. |
 
 Como esto cubre el 100% del disco y WSearch el 12%, se puede apagar el servicio
 `WSearch` y recuperar sus 218 MB — a cambio de perder la búsqueda del menú Inicio y
@@ -120,9 +122,10 @@ la del Explorador, que siguen dependiendo de él.
 | `~/.config/lib/*.ps1` | Librería común de los scripts: rutas (`rice-paths`), cliente IPC de GlazeWM (`rice-ipc`), helpers de procesos (`rice-proc`) |
 | `sync.ps1` | Copia el sistema vivo → repo (lo inverso de `install.ps1`). `-Check` sólo reporta diferencias y sale con código 1 |
 
-Los binarios Rust viven en un **workspace cargo** (`~/dev/Cargo.toml`, 2 crates): `glaze-bar`
-(barra + `cava` + `sysaudio-loopback` + `shadowplay-notify`) y `shadowplay-wgc` (el grabador).
-Compilan juntos a `~/dev/target/release/`.
+Los binarios Rust viven en un **workspace cargo** (`~/dev/Cargo.toml`, **13 crates**):
+`rice-common` (la librería compartida, no produce ejecutable) más doce binarios que
+compilan juntos a `~/dev/target/release/`. Al estar en el mismo directorio, el
+grabador y `cava` encuentran a su hermano `sysaudio-loopback.exe` sin paso de copia.
 
 ---
 
@@ -222,7 +225,10 @@ dotfiles/
    ├─ sysaudio-loopback/    # captura WASAPI
    ├─ micswitch/            # cambio de micro / salida de audio
    ├─ appvol/               # volumen master y por aplicación
-   ├─ taskbar/              # mostrar/ocultar la barra de tareas
+   ├─ taskbar/              # ocultar la barra de tareas + bandeja del sistema
+   ├─ launcher/             # el buscador de Win+Space (apps · archivos · comandos)
+   ├─ notifyd/              # redibuja TODAS las notificaciones de Windows
+   ├─ winkill/              # matar el proceso de la ventana enfocada (SUPER+Shift+Q)
    └─ cava/                 # visualizador de espectro
 ```
 
@@ -271,7 +277,6 @@ resto.
   un decodificador PNG/JPEG y subirla como textura de egui.
 - **Preview de vídeo**: SMTC no entrega fotogramas, así que habría que capturar
   la ventana del reproductor. Es un problema aparte del de la carátula.
-- **Bandeja del sistema en la barra** — proyecto aparte, ver abajo.
 - **Ocultar barras de título**: en apps que dibujan la suya (Vesktop, Discord,
   Claude, Zed) no se puede desde fuera; hay que usar el ajuste de cada app. En
   apps con marco nativo sí se podría quitar `WS_CAPTION`, pendiente de decidir
@@ -315,7 +320,7 @@ resto.
   juego), pero el clic derecho seguía sin llegar al juego. Se usa LoL en
   *fullscreen* como solución. Sospecha: el juego lee entrada por raw input.
 
-### Bandeja del sistema: por qué es un proyecto aparte
+### Bandeja del sistema: cómo se resolvió
 
 En Windows 11 25H2 la bandeja legacy ya no existe: `TrayNotifyWnd` sigue ahí
 pero **sin `SysPager`/`ToolbarWindow32` dentro**, y los iconos los pinta XAML.

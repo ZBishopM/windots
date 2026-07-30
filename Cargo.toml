@@ -20,7 +20,6 @@ members = [
     "crates/micswitch",
     "crates/taskbar",
     "crates/appvol",
-    "crates/windeco",
     "crates/winkill",
     "crates/launcher",
     "crates/shadowplay-wgc",

@@ -205,9 +205,6 @@ impl Runner {
         Self { exes }
     }
 
-    pub fn len(&self) -> usize {
-        self.exes.len()
-    }
 
     /// La ruta completa de un ejecutable del PATH.
     ///
