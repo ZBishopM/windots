@@ -50,9 +50,10 @@ scoop bucket add main 2>$null; scoop bucket add extras 2>$null
 # nerd-fonts: the bar, the toasts and WezTerm all render Nerd Font glyphs and all
 # three fail *silently* to tofu boxes when the font is missing.
 scoop bucket add nerd-fonts 2>$null
-# btop + vesktop are launched by rice-autostart's layout; JetBrainsMono-NF is the
-# font every UI component hardcodes.
-foreach ($p in 'fastfetch', 'glazewm', 'altsnap', 'autohotkey', 'ffmpeg', 'nu', 'btop', 'vesktop', 'JetBrainsMono-NF') {
+# btop is not started as an app: rice-autostart opens it INSIDE wezterm
+# (`wezterm start -- pwsh -NoExit -Command btop`), so what it needs is to be on
+# PATH. JetBrainsMono-NF is the font every UI component hardcodes.
+foreach ($p in 'fastfetch', 'glazewm', 'altsnap', 'autohotkey', 'ffmpeg', 'nu', 'btop', 'JetBrainsMono-NF') {
     # Match the package name exactly: `scoop list nu | Select-String nu` matches any
     # installed package containing "nu", which silently skipped nushell.
     if (scoop list $p 6>$null | Where-Object Name -eq $p) { Ok "have $p" } else { scoop install $p }
@@ -60,12 +61,11 @@ foreach ($p in 'fastfetch', 'glazewm', 'altsnap', 'autohotkey', 'ffmpeg', 'nu', 
 if (-not (Get-Command wezterm -EA SilentlyContinue) -and -not (Test-Path "$env:ProgramFiles\WezTerm\wezterm.exe")) {
     winget install --id wez.wezterm --silent --accept-source-agreements --accept-package-agreements
 }
-# PowerToys: the Command Palette (CmdPal) is the Win+Ctrl+Space launcher that
-# wezterm-hotkey.ahk forwards Win+Space to, and rice-supervisor keeps its host
-# process alive. Without it that keybind does nothing.
-if (-not (Test-Path "$env:LOCALAPPDATA\PowerToys\PowerToys.exe")) {
-    winget install --id Microsoft.PowerToys --silent --accept-source-agreements --accept-package-agreements
-}
+# No PowerToys, deliberately. The Win+Space search box is crates/launcher: built
+# in step 3, kept resident by rice-supervisor, invoked by wezterm-hotkey.ahk with
+# `--show`. PowerToys' Command Palette did that same job for 267 MB resident and
+# 59 s of cold start -- measured, and the largest single item in the post-login
+# budget. Installing it here would put both back.
 if (-not (Get-Command cargo -EA SilentlyContinue)) {
     winget install --id Rustlang.Rustup --silent --accept-source-agreements --accept-package-agreements
     $env:Path += ";$home_\.cargo\bin"
@@ -84,7 +84,18 @@ Deploy "$repo\powershell\Microsoft.PowerShell_profile.ps1" "$home_\Documents\Pow
 # Nushell: the fast interactive shell (pwsh still runs the infra scripts). Config
 # carries fastfetch + the rice tool wrappers (cava/mic/notify-test).
 Deploy "$repo\nushell\config.nu"                          "$home_\AppData\Roaming\nushell\config.nu"
-foreach ($f in 'glazewm-dwindle.ps1', 'glazewm-animcheck.ps1', 'rice-accent.ps1', 'wezterm-hotkey.ahk', 'shadowplay-record.ps1', 'shadowplay-record.vbs', 'shadowplay-wgc-save.ps1', 'shadowplay-wgc.vbs', 'rice-supervisor.ps1', 'rice-supervisor.vbs', 'rice-autostart.ps1', 'rice-autostart.vbs') {
+# rice-llm.ps1 and rice-uninstall.ps1 are not optional extras: crates/launcher
+# hard-codes %USERPROFILE%\.config\ paths to them (see commands.rs), so a machine
+# where they were never deployed gets Win+Space entries that resolve to nothing
+# and fail only when someone picks them.
+#
+# The one-shot tuning scripts go out too, even though nothing launches them. A
+# fresh machine is exactly where they are wanted: trim-background and trim-run
+# turn off the resident software this desktop replaced, retire-replaced
+# uninstalls it, boot-report says what login cost. Leaving them in the repo
+# only meant re-deriving them by hand on the next machine.
+foreach ($f in 'glazewm-dwindle.ps1', 'glazewm-animcheck.ps1', 'rice-accent.ps1', 'wezterm-hotkey.ahk', 'shadowplay-record.ps1', 'shadowplay-record.vbs', 'shadowplay-wgc-save.ps1', 'shadowplay-wgc.vbs', 'rice-supervisor.ps1', 'rice-supervisor.vbs', 'rice-autostart.ps1', 'rice-autostart.vbs', 'rice-llm.ps1', 'rice-uninstall.ps1',
+               'rice-trim-background.ps1', 'rice-trim-run.ps1', 'rice-tame-startup.ps1', 'rice-retire-replaced.ps1', 'rice-boot-report.ps1', 'rice-notif-banners.ps1', 'rice-tray-promote.ps1') {
     Deploy "$repo\scripts\$f" "$home_\.config\$f"
 }
 # Shared library dot-sourced by the scripts above (paths, GlazeWM IPC, process
@@ -96,7 +107,7 @@ foreach ($f in Get-ChildItem "$repo\scripts\lib\*.ps1") {
 # $home_. AutoConfig is read from the application directory next to firefox.exe,
 # which is how it gets to override @mozilla.org/alerts-service;1 before any
 # profile JS exists. Program Files needs elevation, so they are only *staged*
-# here (Deploy still rewrites the home path); step 7 copies them in under the one
+# here (Deploy still rewrites the home path); step 8 copies them in under the one
 # UAC prompt the installer already asks for.
 $ffStage = "$home_\.config\firefox-autoconfig"
 Deploy "$repo\firefox\config.js"                     "$ffStage\config.js"
@@ -105,19 +116,21 @@ $ffDirs = @("$env:ProgramFiles\Firefox Developer Edition", "$env:ProgramFiles\Mo
     Where-Object { Test-Path $_ }
 if (-not $ffDirs) { Ok 'no Firefox in Program Files - notification override will be skipped' }
 
-# Vesktop's equivalent. Discord raises its notifications from the renderer's
-# window.Notification, and Vesktop ships Vencord as four prebuilt files in its own
-# data directory with no plugin hook, so the override is an append to three of
-# them. apply.ps1 does the staging (~\.config\vesktop) and the patching itself; it
-# needs no elevation and never restarts Vesktop. Non-fatal on purpose -- Vesktop
-# has to have been launched once before its Vencord files exist to patch.
-try { & "$repo\vesktop\apply.ps1" } catch { Ok "vesktop notification override skipped: $_" }
+# No per-app notification patch is installed, for Discord or anything else.
+# notifyd subscribes to the system notification listener, so it sees and redraws
+# every app's notifications -- including the Discord client's -- from one single
+# process. dotfiles\vesktop\ is the pre-notifyd approach kept for reference: an
+# append to three of Vencord's prebuilt bundle files, because Discord raises its
+# notifications from the renderer's window.Notification and Vesktop offered no
+# plugin hook. It was per-app by nature, so it bought one client and every other
+# app kept the stock blue toast; that is the reason not to reach for it again.
 
 # ---------------------------------------------------------------- 3. Rust tools
-# One cargo workspace (dev/Cargo.toml) builds every bin -- glaze-bar, cava,
-# sysaudio-loopback, shadowplay-notify, micswitch, ws-slide, shadowplay-wgc --
-# into a single dev/target/release/. The recorder and cava find their sibling
-# sysaudio-loopback.exe there automatically, so there is no copy step.
+# One cargo workspace (dev/Cargo.toml) builds every bin -- glaze-bar, taskbar,
+# launcher, notifyd, cava, sysaudio-loopback, shadowplay-notify, shadowplay-wgc,
+# micswitch, appvol, winkill, ws-slide -- into a single dev/target/release/. The
+# recorder and cava find their sibling sysaudio-loopback.exe there automatically,
+# so there is no copy step. rice-common is the shared library and yields no exe.
 Say '3/8  Build Rust tools (cargo workspace)'
 $dev = "$home_\dev"
 New-Item -ItemType Directory -Force "$dev\crates" | Out-Null
@@ -149,16 +162,22 @@ Shortcut 'wezterm-hotkey'  "$scoopApps\autohotkey\current\v2\AutoHotkey64.exe" "
 Shortcut 'ShadowPlay'      'wscript.exe' "`"$home_\.config\shadowplay-wgc.vbs`""  # WGC recorder (ddagrab shadowplay-record.vbs kept for the v1.0 fallback)
 # Supervisor: relaunches any of the above that dies (crash, kill, GlazeWM restart).
 Shortcut 'RiceSupervisor'  'wscript.exe' "`"$home_\.config\rice-supervisor.vbs`""
-# Autostart: opens the working app/workspace layout once at login. App paths + the
-# Chrome profile + Claude AUMID inside are machine-specific; edit for your setup.
+# Autostart: opens the working app/workspace layout once at login. The app paths
+# inside (WezTerm, Zed, Firefox Developer Edition) and the Claude AUMID are
+# machine-specific; edit for your setup.
 Shortcut 'RiceAutostart'   'wscript.exe' "`"$home_\.config\rice-autostart.vbs`""
 
 # ---------------------------------------------------------------- 6. registry / env
 Say '6/8  Registry + env tweaks'
 $tg = 'HKCU:\Keyboard Layout\Toggle'
 if (-not (Test-Path $tg)) { New-Item -Path $tg -Force | Out-Null }
+# Value 3 is "none". Alt+Shift fires by accident far too easily: one stray press
+# stepped the input language on to the Chinese IME and every keystroke after that
+# came out as pinyin, with no obvious way back. wezterm-hotkey.ahk puts the
+# deliberate replacement on Ctrl+Alt+Shift+Space -- Win+Space belongs to the
+# launcher, and plain Ctrl+Alt+Space IS AltGr+Space on a Spanish layout.
 'Language Hotkey', 'Hotkey', 'Layout Hotkey' | ForEach-Object { Set-ItemProperty $tg -Name $_ -Value '3' -Type String }
-Ok 'Alt+Shift language switch disabled (use Win+Space for lang / Command Palette)'
+Ok 'Alt+Shift language switch disabled (Ctrl+Alt+Shift+Space cycles it instead)'
 [Environment]::SetEnvironmentVariable('POWERSHELL_TELEMETRY_OPTOUT', '1', 'User')
 [Environment]::SetEnvironmentVariable('DOTNET_CLI_TELEMETRY_OPTOUT', '1', 'User')
 Ok 'telemetry optout'
@@ -188,6 +207,14 @@ try {
 
 # ---------------------------------------------------------------- 8. system tweaks (admin)
 Say '8/8  Firefox AutoConfig + notifyd cert + disable unused services + MPO (optional, needs admin)'
+# DPS is in this list knowingly, and it is the one with a price. It is the service
+# that writes the Diagnostics-Performance events, which is where
+# scripts/rice-boot-report.ps1 gets its numbers -- disabled here, that report has
+# nothing new to show and says so. The trade taken: boot timings are wanted for a
+# few days while tuning startup, the service runs at every boot forever. To
+# measure again, elevated:
+#     Set-Service DPS -StartupType Manual; Start-Service DPS
+# then reboot; the event lands a couple of minutes after login.
 $svc = 'DiagTrack', 'SysMain', 'DPS', 'Spooler'
 $adminCmd = ($svc | ForEach-Object { "Set-Service $_ -StartupType Disabled -EA SilentlyContinue; Stop-Service $_ -Force -EA SilentlyContinue" }) -join '; '
 # The staged AutoConfig pair, folded into the same elevated call so the installer
@@ -233,7 +260,6 @@ Write-Host ''
 Say 'Done. Log out/in (or reboot) to start everything.' Green
 Write-Host @"
     Manual bits (see README):
-      - Command Palette on Win+Space: install PowerToys, then set its hotkey.
       - Monitor layout: glaze-bar --x/--width in glazewm config.yaml startup_commands
         and the notify position are hard-coded to 1920 + 2560; adjust for your screens.
       - Turn Do Not Disturb ON (Settings > System > Notifications, or Win+N and the

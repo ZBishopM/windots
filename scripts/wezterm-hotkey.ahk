@@ -17,8 +17,8 @@
 ; Win+... combination.
 ;
 ; Windows opens Start on Win *keyup* only when no other key was pressed in
-; between. So: `~` passes the real LWin through (GlazeWM's lwin+... bindings and
-; CmdPal's Win+Ctrl+Space still see it), and we immediately send vkE8 -- an
+; between. So: `~` passes the real LWin through (GlazeWM's lwin+... bindings
+; still see it), and we immediately send vkE8 -- an
 ; unassigned virtual key that does nothing -- so the OS sees a combination and
 ; leaves Start alone.
 ;
@@ -28,10 +28,15 @@
 ~LWin::Send '{Blind}{vkE8}'
 
 ; ------------------------------------------------------------
-; Win+Space -> Command Palette (CmdPal), NOT the OS language switch.
-; Windows fires its input-language switcher on Win+Space even with a
-; low-level hook, so AHK claims the combo (suppressing the switch) and
-; forwards to CmdPal, which listens on Win+Ctrl+Space.
+; Win+Space -> our launcher, NOT the OS language switch.
+;
+; Windows fires its input-language switcher on Win+Space even with a low-level
+; hook in place, so AHK has to CLAIM the combo -- that is what suppresses the
+; switch -- and then act on it itself.
+;
+; This used to forward to PowerToys' Command Palette on Win+Ctrl+Space. That is
+; gone: crates/launcher does the job now and is invoked directly, so there is no
+; second hotkey in the middle.
 ; ------------------------------------------------------------
 #Space:: {
     ; Our own launcher. One press opens it, the next closes it -- the launcher
@@ -48,7 +53,7 @@
 ; Ctrl+Alt+Space -> cycle the input language.
 ;
 ; The OS normally offers Win+Space and Alt+Shift for this. Win+Space is taken
-; above (Command Palette), and Alt+Shift is now disabled in the registry because
+; above (the launcher), and Alt+Shift is now disabled in the registry because
 ; it fires by accident far too easily -- a stray Alt+Shift stepped the input
 ; language on to the Chinese IME and every keystroke after that came out as
 ; pinyin, with no obvious way back. This is the deliberate replacement.

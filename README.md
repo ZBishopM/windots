@@ -131,7 +131,7 @@ Compilan juntos a `~/dev/target/release/`.
 | Acción | Atajo |
 |---|---|
 | Abrir WezTerm | `SUPER + Enter` |
-| Command Palette (buscador) | `SUPER + Space` |
+| Buscador (apps, archivos, comandos) | `SUPER + Space` |
 | Enfocar ventana | `SUPER + ← ↑ ↓ →` (o `H K J`) |
 | Mover ventana | `SUPER + Shift + ←↑↓→` |
 | Redimensionar | `SUPER + U I O P` |

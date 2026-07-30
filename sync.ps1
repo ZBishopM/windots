@@ -31,32 +31,24 @@ $Map = [ordered]@{
     'nushell\config.nu'                          = "$home_\AppData\Roaming\nushell\config.nu"
     'altsnap\AltSnap.ini'                        = "$home_\scoop\persist\altsnap\AltSnap.ini"
 }
+# EVERY .ps1/.vbs/.ahk committed under scripts\ belongs here, not just the ones
+# something else launches. A script left out of this list is worse than untracked:
+# it is in the repo, so it looks versioned, while -Check keeps answering 'repo
+# matches live' however far the live copy has moved. The one-shot tuning scripts
+# (accent, boot-report, notif-banners, retire-replaced, tame-startup, trim-run)
+# are exactly the ones that get edited live and never copied back, because nobody
+# runs them twice in the same week.
 foreach ($f in 'glazewm-dwindle.ps1', 'glazewm-animcheck.ps1', 'wezterm-hotkey.ahk',
                'shadowplay-record.ps1', 'shadowplay-record.vbs', 'shadowplay-wgc-save.ps1',
                'shadowplay-wgc.vbs', 'rice-supervisor.ps1', 'rice-supervisor.vbs',
                'rice-autostart.ps1', 'rice-autostart.vbs', 'rice-tray-promote.ps1',
-               'rice-trim-background.ps1', 'rice-uninstall.ps1', 'rice-llm.ps1') {
+               'rice-trim-background.ps1', 'rice-uninstall.ps1', 'rice-llm.ps1',
+               'rice-accent.ps1', 'rice-boot-report.ps1', 'rice-notif-banners.ps1',
+               'rice-retire-replaced.ps1', 'rice-tame-startup.ps1', 'rice-trim-run.ps1') {
     $Map["scripts\$f"] = "$home_\.config\$f"
 }
 foreach ($f in Get-ChildItem "$home_\.config\lib\*.ps1" -EA SilentlyContinue) {
     $Map["scripts\lib\$($f.Name)"] = $f.FullName
-}
-# The one exception to the $home_ convention: Firefox reads AutoConfig from its
-# application directory, next to firefox.exe, so the notification override can
-# only live in Program Files. Absolute paths on purpose. Pulling live -> repo is
-# a plain read and needs no elevation; pushing back does, which is why only
-# install.ps1's admin step writes them.
-#
-# They are tracked unconditionally, so -Check reports MISSING LIVE when they are
-# not there. That is the point: a Firefox update rewrites its own install
-# directory and can take config.js with it, which would silently give the stock
-# Windows toasts back. This is the only thing that notices.
-# Vesktop notification override: the staged fragments only. The files they are
-# appended to live in Vesktop's data directory and are 700 KB of vendored Vencord
-# bundle -- tracking those would be tracking someone else's build output. Whether
-# the append is still *in* them is checked further down instead.
-foreach ($f in 'apply.ps1', 'notify-main.js', 'notify-preload.js', 'notify-renderer.js') {
-    $Map["vesktop\$f"] = "$home_\.config\vesktop\$f"
 }
 # notifyd's sparse package: the manifest and the build script only. The .msix,
 # the .cer and the stage\ tree next to them live are build output and a private
@@ -74,6 +66,17 @@ $ffProfile = Get-ChildItem "$home_\AppData\Roaming\Mozilla\Firefox\Profiles" -Di
              Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if ($ffProfile) { $Map['firefox\user.js'] = Join-Path $ffProfile.FullName 'user.js' }
 
+# The one exception to the $home_ convention: Firefox reads AutoConfig from its
+# application directory, next to firefox.exe, so the notification override can
+# only live in Program Files. Absolute paths on purpose. Pulling live -> repo is
+# a plain read and needs no elevation; pushing back does, which is why only
+# install.ps1's admin step writes them.
+#
+# Once a Firefox install is found the pair is mapped without checking that the
+# files themselves are there, so -Check reports MISSING LIVE when they are not.
+# That is the point: a Firefox update rewrites its own install directory and can
+# take config.js with it, which would silently give the stock Windows toasts
+# back. This is the only thing that notices.
 foreach ($ff in "$env:ProgramFiles\Firefox Developer Edition", "$env:ProgramFiles\Mozilla Firefox") {
     if (-not (Test-Path $ff)) { continue }
     $Map['firefox\config.js'] = "$ff\config.js"
@@ -84,7 +87,15 @@ foreach ($ff in "$env:ProgramFiles\Firefox Developer Edition", "$env:ProgramFile
 # Los presets del modelo local. Viven en I: junto al modelo (17 GB no caben en
 # el repo), pero el INI si merece seguimiento: es donde estan medidos el reparto
 # GPU/CPU y los contextos que funcionan en este equipo.
-if (Test-Path 'I:i\presets.ini') { $Map['ai\presets.ini'] = 'I:i\presets.ini' }
+#
+# Ruta absoluta CON barra: 'I:\ai\presets.ini'. Sin ella ('I:ai\...') seria una
+# ruta relativa al directorio actual DE ESA UNIDAD, y la secuencia barra+a es
+# peor todavia: aqui se colo una vez como un BEL (0x07) literal dentro del
+# archivo, invisible al abrirlo. Las dos formas fallan en silencio, porque la
+# linea entera vive dentro de un Test-Path: el mapa se queda sin la entrada y
+# -Check sigue contestando que el repo cuadra con lo vivo, con el INI sin
+# versionar.
+if (Test-Path 'I:\ai\presets.ini') { $Map['ai\presets.ini'] = 'I:\ai\presets.ini' }
 
 # Rust sources: whole trees, minus build output.
 $Trees = @{ 'crates' = "$home_\dev\crates" }
@@ -119,16 +130,17 @@ foreach ($rel in $Trees.Keys) {
     }
 }
 
-# Same idea as the Firefox pair above, one level further out. The three Vencord
-# files vesktop\apply.ps1 appends to are rewritten wholesale by every Vencord
-# update, which silently gives the stock blue Windows toasts back. notify-main.js
-# re-applies itself when it sees that happen; this is what notices when it did
-# not. Shelled out rather than reimplemented so the data-directory lookup lives in
-# one place; -Check there stages nothing and writes nothing.
-if (Test-Path "$repo\vesktop\apply.ps1") {
-    & "$repo\vesktop\apply.ps1" -Check 6>$null | Out-Null
-    if ($LASTEXITCODE -ne 0) { $diff += 'PATCH GONE    vesktop  (re-run vesktop\apply.ps1)' }
-}
+# A guard that shells out to another script and reads $LASTEXITCODE only reports
+# what that script chose to fail on. vesktop\apply.ps1 -Check used to be wired in
+# here to catch a Vencord update wiping the notification patch, but it exits 0 --
+# success -- when there is no Vesktop data directory to inspect, which is also
+# what an uninstalled Vesktop looks like. So the moment the app went away the
+# check went permanently green while still appearing to guard something. If a
+# check like this is ever added back, the "cannot tell" case has to be a distinct
+# exit code from "checked and fine", or it is not a check.
+#
+# Nothing replaces it: notifyd draws every app's notifications from the system
+# listener, so there is no per-app patch left to go missing.
 
 if ($Check) {
     if ($diff.Count) {
