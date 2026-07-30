@@ -31,8 +31,10 @@
 #    -- H: quedo con 51,3 de 52 GB libres -- pero su clave del registro seguia
 #    ahi, asi que reaparecia en la lista como si se pudiera desinstalar. Eso no
 #    necesita un desinstalador, necesita borrar la clave.
+#
+#   rice-uninstall.ps1 -Limpiar   borra las claves huerfanas, con copia previa
 [CmdletBinding()]
-param([string]$Filtro, [switch]$Size)
+param([string]$Filtro, [switch]$Size, [switch]$Limpiar)
 
 # Ojo: NO se pone $ErrorActionPreference = 'SilentlyContinue' de forma global.
 # Eso es lo que oculto el fallo de arriba. Cada lectura que puede no existir
@@ -89,7 +91,7 @@ if (Test-Path $scoopDir) {
         $apps += [pscustomobject]@{
             Nombre = $d.Name; Editor = 'scoop'; MB = 0; Origen = 'scoop'
             Comando = "scoop uninstall $($d.Name)"; Ruta = $d.FullName
-            Clave = $null; Huerfana = $false
+            Clave = $null; Huerfana = $false; DesinstRoto = $false
         }
     }
 }
@@ -109,14 +111,42 @@ foreach ($k in $keys) {
         if ($e.ReleaseType -in 'Security Update', 'Update Rollup', 'Hotfix') { continue }
         if (-not $e.UninstallString) { continue }
 
-        # Huerfana = la entrada existe pero lo que describe ya no. Dos senales, y
-        # se piden las dos porque cada una sola da falsos positivos: msiexec
-        # siempre existe (asi que su ruta no dice nada) y muchos instaladores no
-        # rellenan InstallLocation (asi que su ausencia tampoco dice nada).
+        # Huerfana = el PROGRAMA ya no esta, no que su desinstalador este roto.
+        # La distincion importa y costo un falso positivo de nueve entradas: los
+        # paquetes portables de WinGet guardan en UninstallString la ruta con la
+        # VERSION dentro, asi que al actualizarse queda obsoleta aunque el
+        # programa siga perfectamente instalado. Marcarlos como huerfanos y
+        # ofrecer borrar su clave habria quitado la unica via de desinstalarlos.
+        #
+        # Asi que manda InstallLocation cuando existe, y la ruta del
+        # desinstalador solo se usa cuando no hay nada mejor:
+        #
+        #   InstallLocation presente y existe  -> instalado (aunque falte el .exe)
+        #   InstallLocation presente y NO existe -> huerfana, sin dudas
+        #   sin InstallLocation                -> se juzga por el desinstalador
+        #
+        # msiexec se excluye del juicio porque siempre existe: su presencia no
+        # dice nada sobre si el producto sigue ahi.
         $p = Split-Uninstall $e.UninstallString
         $esMsi = $p.Exe -match 'msiexec'
-        $faltaExe = -not $esMsi -and -not (Test-Path $p.Exe -EA SilentlyContinue)
-        $faltaDir = $e.InstallLocation -and -not (Test-Path $e.InstallLocation -EA SilentlyContinue)
+        $faltaExe = -not $esMsi -and -not (Test-Path -LiteralPath $p.Exe -EA SilentlyContinue)
+
+        # InstallLocation se normaliza antes de comprobarlo: hay instaladores que
+        # lo escriben ENTRECOMILLADO, y entonces Test-Path falla por las comillas
+        # y no por ausencia. En esta maquina son tres -- art-chat-rs,
+        # live-subs-tauri (los dos Tauri) y el instalador de Visual Studio -- y
+        # los tres existen; sin esto los tres salian como huerfanos y se habria
+        # ofrecido borrar la clave de programas instalados.
+        $dir = if ($e.InstallLocation) { $e.InstallLocation.Trim().Trim('"') } else { '' }
+
+        if ($dir) {
+            $hayDir = Test-Path -LiteralPath $dir -EA SilentlyContinue
+            $huerfana = -not $hayDir
+            $desinstRoto = $hayDir -and $faltaExe
+        } else {
+            $huerfana = $faltaExe
+            $desinstRoto = $false
+        }
 
         $apps += [pscustomobject]@{
             Nombre = $e.DisplayName
@@ -124,14 +154,72 @@ foreach ($k in $keys) {
             MB     = if ($e.EstimatedSize) { [int]($e.EstimatedSize / 1024) } else { 0 }
             Origen = if ($k -like 'HKCU*') { 'usuario' } else { 'equipo' }
             Comando  = $e.UninstallString
-            Ruta     = $e.InstallLocation
+            Ruta     = $dir
             Clave    = $e.PSPath
-            Huerfana = ($faltaExe -or $faltaDir)
+            Huerfana = $huerfana
+            DesinstRoto = $desinstRoto
         }
     }
 }
 
 $apps = $apps | Sort-Object Nombre -Unique
+
+# --- limpieza de huerfanas -------------------------------------------------
+# Por que se acumulan, que es la pregunta de fondo: NADA en Windows valida estas
+# claves. En la practica la rama Uninstall es de solo-anadir -- cada instalador
+# escribe la suya y unicamente un desinstalador que se porte bien la retira. Si
+# borras la carpeta a mano, si desconectas el disco donde vivia, o si el
+# desinstalador falla a medias, la clave se queda para siempre. En esta maquina
+# eso dio: dos unidades que ya no existen (E: y G:), una biblioteca de Steam
+# entera que se movio de C:\Program Files (x86)\Steam a D:\Steam, juegos
+# borrados a mano, y PWAs de Brave cuyo perfil se limpio.
+#
+# Se borran SOLO las huerfanas -- programa ausente -- y nunca las de
+# desinstalador roto, que estan instaladas.
+if ($Limpiar) {
+    $basura = $apps | Where-Object { $_.Huerfana -and $_.Clave }
+    if (-not $basura) { Write-Host 'no hay claves huerfanas.' -ForegroundColor Green; return }
+
+    Write-Host ("{0} claves huerfanas:" -f $basura.Count) -ForegroundColor Cyan
+    $basura | Sort-Object Nombre | ForEach-Object {
+        Write-Host ("  {0,-46} {1}" -f $_.Nombre.Substring(0, [Math]::Min(46, $_.Nombre.Length)), $_.Ruta)
+    }
+    $hklm = $basura | Where-Object { $_.Clave -notlike '*HKEY_CURRENT_USER*' }
+    $esAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+               ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    Write-Host ''
+    Write-Host ("  {0} en HKLM (hacen falta permisos de administrador) - los tienes: {1}" -f $hklm.Count, $esAdmin)
+    Write-Host '  NO se toca nada marcado [desinst.roto]: eso esta instalado.' -ForegroundColor DarkGray
+    Write-Host ''
+    if ((Read-Host 'borrar esas claves? (s/N)') -notmatch '^[sSyY]') { Write-Host 'cancelado.'; return }
+
+    # Copia primero, y de las tres ramas enteras, no clave por clave: si algo se
+    # va de las manos, un doble clic en el .reg lo devuelve todo.
+    $bak = "$env:USERPROFILE\.config\logs\uninstall-backup-$(Get-Date -Format yyyyMMdd-HHmmss)"
+    New-Item (Split-Path $bak) -ItemType Directory -Force -EA SilentlyContinue | Out-Null
+    $ramas = @{
+        'HKLM64' = 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
+        'HKLM32' = 'HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+        'HKCU'   = 'HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
+    }
+    foreach ($r in $ramas.GetEnumerator()) {
+        $f = "$bak-$($r.Key).reg"
+        & reg.exe export $r.Value $f /y *>$null
+        Write-Host ("  copia: {0}  ({1:N0} KB)" -f $f, ((Get-Item $f -EA SilentlyContinue).Length / 1KB))
+    }
+
+    $ok = 0; $fail = 0
+    foreach ($b in $basura) {
+        try { Remove-Item $b.Clave -Recurse -Force -ErrorAction Stop; $ok++ }
+        catch { $fail++; Write-Host ("  no se pudo: {0} -- {1}" -f $b.Nombre, $_.Exception.Message) -ForegroundColor Red }
+    }
+    Write-Host ''
+    Write-Host ("borradas {0}, fallaron {1}." -f $ok, $fail) -ForegroundColor $(if ($fail) { 'Yellow' } else { 'Green' })
+    if ($fail) { Write-Host 'las que fallaron viven en HKLM: relanza esto en una consola como administrador.' }
+    Write-Host "para deshacer: doble clic en $bak-*.reg"
+    return
+}
+
 if ($Filtro) { $apps = $apps | Where-Object { $_.Nombre -like "*$Filtro*" -or $_.Editor -like "*$Filtro*" } }
 $apps = if ($Size) { $apps | Sort-Object MB -Descending } else { $apps | Sort-Object Nombre }
 
@@ -142,7 +230,7 @@ $apps | ForEach-Object {
     $i++
     # 'MB?' con interrogacion a proposito: es el tamano que DECLARA el instalador.
     $tam = if ($_.MB -gt 0) { '{0,6:N0} MB?' -f $_.MB } else { '           ' }
-    $marca = if ($_.Huerfana) { ' [huerfana]' } else { '' }
+    $marca = if ($_.Huerfana) { ' [huerfana]' } elseif ($_.DesinstRoto) { ' [desinst.roto]' } else { '' }
     Write-Host ("{0,3}. {1,-46} {2} {3,-8} {4}{5}" -f $i, `
         $(if ($_.Nombre.Length -gt 46) { $_.Nombre.Substring(0, 43) + '...' } else { $_.Nombre }), `
         $tam, $_.Origen, $_.Editor, $marca)
@@ -151,6 +239,9 @@ Write-Host ''
 Write-Host '  MB? = tamano DECLARADO por el instalador, no medido. Puede ser falso.' -ForegroundColor DarkGray
 if ($apps | Where-Object Huerfana) {
     Write-Host '  [huerfana] = la entrada sigue en el registro pero sus archivos ya no estan.' -ForegroundColor DarkGray
+}
+if ($apps | Where-Object DesinstRoto) {
+    Write-Host '  [desinst.roto] = esta instalado, pero la ruta de su desinstalador ya no existe.' -ForegroundColor DarkGray
 }
 Write-Host ''
 $sel = Read-Host 'numero a desinstalar (Enter para salir)'
@@ -197,6 +288,17 @@ if ($app.Huerfana) {
     return
 }
 
+if ($app.DesinstRoto) {
+    Write-Host ''
+    Write-Host '  SU DESINSTALADOR NO ESTA DONDE DICE EL REGISTRO.' -ForegroundColor Yellow
+    Write-Host ("  no existe: {0}" -f (Split-Uninstall $app.Comando).Exe)
+    Write-Host '  El programa SI esta instalado (su carpeta existe), asi que la clave no'
+    Write-Host '  sobra: lo que esta obsoleto es la ruta. Tipico de los portables de WinGet,'
+    Write-Host '  que la guardan con la version dentro. Desinstalalo por su gestor'
+    Write-Host '  (winget uninstall <id>, o scoop uninstall) en vez de desde aqui.'
+    Write-Host ''
+    return
+}
 Write-Host ("  se ejecuta: {0}" -f $app.Comando) -ForegroundColor Yellow
 if ($app.Origen -eq 'equipo') { Write-Host '  (instalada para todo el equipo: pedira permisos de administrador)' }
 Write-Host ''
