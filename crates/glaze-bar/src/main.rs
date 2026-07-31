@@ -1233,6 +1233,9 @@ struct BarApp {
     sized: bool,
     frame: u32,
     // dynamic island animation state
+    /// Borde izquierdo del bloque de stats del fotograma anterior, o None si no
+    /// se dibujaron (pantalla completa). Un fotograma de retraso no se ve.
+    stats_left: Option<f32>,
     isl_w: f32,                            // current (animated) pill width
     isl_h: f32,                            // current (animated) pill height
     isl_serial: u64,                       // last event serial consumed
@@ -2583,7 +2586,7 @@ impl eframe::App for BarApp {
                     }
 
                     // ---- right: metrics ----
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let derecha = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(4.0);
                         // La bandeja va pegada al borde derecho, que es donde
                         // lleva estando treinta años.
@@ -2624,6 +2627,9 @@ impl eframe::App for BarApp {
                                 });
                         }
                     });
+                    // Borde izquierdo de los stats. Se guarda para que la isla
+                    // sepa donde parar en vez de crecer por encima.
+                    self.stats_left = Some(derecha.response.rect.left());
                 });
                 });
                 }
@@ -2686,7 +2692,27 @@ impl eframe::App for BarApp {
                 let timer_reserve = if self.timer_running && self.isl_notif.is_none() { 44.0 } else { 0.0 };
                 let idle_w = pad + clock_w + timer_reserve + spec_reserve + pad;
                 let notif_open = self.isl_notif.is_some();
-                let target_w = if notif_open { pad + clock_w + div_gap + extra_w + pad } else { idle_w };
+                let mut target_w = if notif_open { pad + clock_w + div_gap + extra_w + pad } else { idle_w };
+
+                // La isla PARA antes de los stats en vez de taparlos.
+                //
+                // La pildora se ancla por su izquierda -- para que el reloj no se
+                // mueva -- y se despliega hacia la derecha, que es justo donde
+                // viven RAM / CPU / GPU / red y la bandeja. Un aviso con titulo
+                // largo se los comia enteros: la notificacion aparecia Y la barra
+                // dejaba de informar de nada mientras durase.
+                //
+                // Se usa el borde del fotograma anterior. Un fotograma de retraso
+                // no se ve, y medirlo despues de dibujar es lo unico que da el
+                // ancho real del bloque, que cambia con la bandeja y con el modo.
+                //
+                // Sin stats (pantalla completa) no hay nada que respetar y el
+                // aviso puede ocupar lo que necesite.
+                if let Some(sl) = self.stats_left {
+                    let left_anchor = full.center().x - idle_w / 2.0;
+                    let tope = (sl - 12.0 - left_anchor).max(idle_w);
+                    target_w = target_w.min(tope);
+                }
                 let target_h = if has_extra { 30.0 } else { 24.0 };
 
                 if self.isl_w <= 1.0 {
@@ -2870,11 +2896,45 @@ impl eframe::App for BarApp {
                         draw_icon(&cp, c, icon, 13.0, accent);
                         tx += 26.0;
                     }
+                    // Puntos suspensivos, no un corte a hueso.
+                    //
+                    // La pildora ya no crece por encima de los stats, asi que un
+                    // titulo largo TIENE que caber en lo que quede. Dejarlo al
+                    // recorte del clip funciona mientras la pildora se despliega
+                    // -- ese barrido es lo que hace la animacion -- pero una vez
+                    // quieta un texto cortado a mitad de letra se lee como un
+                    // fallo de dibujo, no como un texto que no cabia.
+                    let sitio = (pill.rect.right() - 12.0 - tx).max(24.0);
+                    let recortado = |txt: &str, size: f32, col: egui::Color32| {
+                        let mut job = egui::text::LayoutJob::single_section(
+                            txt.to_string(),
+                            egui::TextFormat { font_id: egui::FontId::proportional(size), color: col, ..Default::default() },
+                        );
+                        job.wrap = egui::text::TextWrapping {
+                            max_width: sitio,
+                            max_rows: 1,
+                            break_anywhere: true,
+                            overflow_character: Some('…'),
+                        };
+                        job
+                    };
                     if ev.body.is_empty() {
-                        cp.text(egui::pos2(tx, cy), egui::Align2::LEFT_CENTER, &ev.title, egui::FontId::proportional(13.0), WARM_TEXT);
+                        cp.galley(
+                            egui::pos2(tx, cy - 8.0),
+                            ui.fonts(|f| f.layout_job(recortado(&ev.title, 13.0, WARM_TEXT))),
+                            WARM_TEXT,
+                        );
                     } else {
-                        cp.text(egui::pos2(tx, cy - 6.0), egui::Align2::LEFT_CENTER, &ev.title, egui::FontId::proportional(12.5), WARM_TEXT);
-                        cp.text(egui::pos2(tx, cy + 6.0), egui::Align2::LEFT_CENTER, &ev.body, egui::FontId::proportional(11.0), WARM_SUB);
+                        cp.galley(
+                            egui::pos2(tx, cy - 14.0),
+                            ui.fonts(|f| f.layout_job(recortado(&ev.title, 12.5, WARM_TEXT))),
+                            WARM_TEXT,
+                        );
+                        cp.galley(
+                            egui::pos2(tx, cy - 1.0),
+                            ui.fonts(|f| f.layout_job(recortado(&ev.body, 11.0, WARM_SUB))),
+                            WARM_SUB,
+                        );
                     }
                     if pill.clicked() {
                         self.isl_notif = None; // click dismisses early
@@ -3126,6 +3186,7 @@ fn main() -> eframe::Result<()> {
                 notifs: Vec::new(),
                 notifs_stamp: None,
                 notifs_checked: Instant::now() - Duration::from_secs(2),
+                stats_left: None,
                 atajo: Atajo::Vivo,
                 atajo_f10: 0,
                 atajo_checked: Instant::now() - Duration::from_secs(5),
