@@ -212,8 +212,19 @@ fn stream_bytes(s: &IRandomAccessStream) -> Result<Vec<u8>, Err> {
 /// never pick up a segment left over from a previous lap of the ring.
 fn dump_ring(dir: &str, ring: &Ring, audio: &AudioRing) -> usize {
     let mut written = 0;
+    // El audio se COPIA y se suelta el cerrojo antes de tocar el disco.
+    //
+    // Los dos hilos de audio escriben en ese mismo cerrojo cada vez que el tubo
+    // les entrega un bloque; retenerlo durante los ~56 ms de escritura los dejaba
+    // bloqueados todo ese rato. Sobrevivia porque 56 ms son unos 10 KB y el tubo
+    // aguanta, pero era margen prestado. La copia son ~23 MB y ~5 ms.
+    //
+    // El anillo de video no necesita lo mismo: su cerrojo solo lo toca este hilo.
+    let a: Audio = {
+        let g = audio.lock().unwrap();
+        Audio { sys: g.sys.clone(), mic: g.mic.clone() }
+    };
     let guard = ring.lock().unwrap();
-    let a = audio.lock().unwrap();
     for (i, slot) in guard.iter().enumerate() {
         let mp4 = format!("{dir}\\seg{i:02}.mp4");
         let pcm = format!("{dir}\\seg{i:02}.pcm");

@@ -6,8 +6,8 @@
 //! mismo endpoint para el mismo flujo. Ahora captura uno y lee quien quiera.
 //!
 //! Si nadie publica -- el caso normal es que el grabador no este corriendo --
-//! se lanza un publicador, pero UNO SOLO entre todas las barras: quien consigue
-//! el mutex con nombre lo lanza y los demas simplemente leen. Ese publicador se
+//! se lanza uno de respaldo. Que no haya dos lo garantiza el HELPER, con su
+//! propia instancia unica, no la barra: ver `ensure_publisher`. Ese publicador se
 //! apaga solo cuando dejan de leerle, asi que no queda de huerfano aunque su
 //! lanzador muera de golpe.
 //!
@@ -27,8 +27,10 @@ const DECAY: f32 = 0.90;
 /// Cadencia de lectura. 20 ms da 50 analisis por segundo, de sobra para ocho
 /// barras que ademas van suavizadas.
 const TICK_MS: u64 = 20;
-/// Mutex que decide quien lanza el publicador de respaldo.
-const PUB_MUTEX: &str = "Global\\rice-audio-publisher";
+/// Mínimo entre intentos de lanzar el publicador de respaldo. Es sólo un freno
+/// contra ráfagas: quien de verdad garantiza que no haya dos es el propio helper,
+/// que toma su instancia única al arrancar.
+const SPAWN_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub struct Spectrum {
     levels: Arc<Mutex<Vec<f32>>>,
@@ -38,28 +40,45 @@ pub struct Spectrum {
     child: Arc<Mutex<Option<std::process::Child>>>,
 }
 
-/// Lanza el publicador de respaldo si no hay ninguno y si nos toca a nosotros.
+/// Lanza el publicador de respaldo si no hay ninguno.
 ///
-/// El mutex se toma y NO se suelta mientras el proceso viva: es lo que evita que
-/// las dos barras lancen uno cada una en el mismo instante.
+/// La exclusion NO se decide aqui, y esa es la correccion.
+///
+/// La primera version tomaba un mutex con nombre en la barra antes de lanzar. No
+/// vale, por dos motivos que se tapaban entre si:
+///
+///   1. `single_instance` devuelve false tambien cuando el mutex lo tiene ESTE
+///      mismo proceso -- `CreateMutexW` contesta ERROR_ALREADY_EXISTS igual --
+///      asi que tras el primer lanzamiento la barra se autobloqueaba.
+///   2. Un mutex de Win32 solo puede soltarlo el hilo que lo tomo, asi que
+///      tampoco servia guardarlo para soltarlo cuando muriera el hijo.
+///
+/// Resultado: en cuanto el publicador de respaldo se apagaba -- cosa que hace
+/// nada mas aparecer el grabador -- ninguna barra volvia a lanzar otro, y si
+/// luego moria el grabador el espectro se quedaba mudo hasta reiniciar la barra.
+///
+/// Ahora la exclusion la hace el HELPER, que toma su propia instancia unica al
+/// arrancar y se va si ya hay otra. Un proceso suelta sus mutex al morir, pase lo
+/// que pase. Las dos barras pueden lanzar a la vez: el perdedor sale al instante.
 #[cfg(windows)]
-fn ensure_publisher(child: &Arc<Mutex<Option<std::process::Child>>>) {
+fn ensure_publisher(
+    child: &Arc<Mutex<Option<std::process::Child>>>,
+    ultimo: &mut std::time::Instant,
+) {
     {
-        // Se limpia el hijo muerto, si no la barra se quedaria creyendo que
-        // todavia tiene uno vivo y no relanzaria nunca. Y el helper SI se muere
-        // solo: se aparta en cuanto aparece el del grabador.
         let mut g = child.lock().unwrap();
         if let Some(c) = g.as_mut() {
             if matches!(c.try_wait(), Ok(Some(_))) {
                 *g = None;
             } else {
-                return;
+                return; // el nuestro sigue vivo
             }
         }
     }
-    if !crate::win::single_instance(PUB_MUTEX) {
-        return; // otra barra ya lo tiene
+    if ultimo.elapsed() < SPAWN_COOLDOWN {
+        return;
     }
+    *ultimo = std::time::Instant::now();
     use std::os::windows::process::CommandExt;
     let exe = crate::win::sibling_exe("sysaudio-loopback.exe");
     if let Ok(c) = std::process::Command::new(exe)
@@ -74,7 +93,7 @@ fn ensure_publisher(child: &Arc<Mutex<Option<std::process::Child>>>) {
 }
 
 #[cfg(not(windows))]
-fn ensure_publisher(_child: &Arc<Mutex<Option<std::process::Child>>>) {}
+fn ensure_publisher(_c: &Arc<Mutex<Option<std::process::Child>>>, _u: &mut std::time::Instant) {}
 
 impl Spectrum {
     /// Start capturing. `bands` is how many bars to publish.
@@ -100,6 +119,8 @@ impl Spectrum {
 
             #[cfg(windows)]
             let mut lector: Option<crate::audioshare::Reader> = None;
+            // En el pasado para que el primer intento sea inmediato.
+            let mut ultimo_intento = std::time::Instant::now() - SPAWN_COOLDOWN;
 
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(TICK_MS));
@@ -118,12 +139,12 @@ impl Spectrum {
                             if r.advancing() {
                                 r.latest(&mut raw)
                             } else {
-                                ensure_publisher(&child2);
+                                ensure_publisher(&child2, &mut ultimo_intento);
                                 false
                             }
                         }
                         None => {
-                            ensure_publisher(&child2);
+                            ensure_publisher(&child2, &mut ultimo_intento);
                             false
                         }
                     }

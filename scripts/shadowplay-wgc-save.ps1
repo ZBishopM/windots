@@ -95,16 +95,39 @@ $marcado = ''
 # Puede que el corte YA este pedido y hasta servido: wezterm-hotkey.ahk señaliza
 # el evento en el instante de la pulsacion, en paralelo con el arranque de pwsh.
 #
-# Se distingue por la EDAD de la marca. Es fiable porque el grabador solo la
-# escribe en un corte -- las rotaciones normales cada 5 s no la tocan -- asi que
-# una marca de hace menos de 2 s solo puede ser la respuesta a esta pulsacion. Y
-# los guardados van serializados por el mutex de mas arriba, asi que tampoco
-# puede ser la de otro.
-$edad = if (Test-Path $marca) { ((Get-Date) - (Get-Item $marca).LastWriteTime).TotalSeconds } else { 999 }
-$viaAhk = $edad -lt 2.0
-if ($viaAhk) { $marcado = $antes }
+# Se distingue comparando la marca del grabador contra el SELLO que deja AHK
+# justo antes de señalizar: el corte es nuestro si el segmento se cerro DESPUES
+# de pedirlo.
+#
+# Antes esto se hacia por la edad de la marca (menos de 2 s = mia). Falla con dos
+# Alt+F10 seguidos: el segundo veia la marca del PRIMERO, la daba por suya, y
+# guardaba un clip que terminaba hasta 2 s antes de la segunda pulsacion.
+# MIN_CUT_SECS lo empeora, porque puede diferir el corte nuevo hasta 1 s.
+$sello  = Join-Path $buf 'cut-requested.txt'
+$tSello = $null
+if (Test-Path $sello) {
+    $t = (Get-Item $sello).LastWriteTime
+    # Reciente: si no, es el sello de una pulsacion vieja y no dice nada de esta.
+    if (((Get-Date) - $t).TotalSeconds -lt 5) { $tSello = $t }
+}
+$viaAhk = [bool]$tSello
+
+if ($viaAhk) {
+    # Ya esta pedido: solo hay que esperar a que el segmento se cierre. NO se
+    # vuelve a señalizar -- eso provocaria un segundo corte por una sola
+    # pulsacion, y con MIN_CUT_SECS de por medio el segundo saldria diferido.
+    $tope = (Get-Date).AddSeconds(4)
+    while ((Get-Date) -lt $tope) {
+        if ((Test-Path $marca) -and ((Get-Item $marca).LastWriteTime -ge $tSello)) {
+            $marcado = Get-Marca
+            break
+        }
+        Start-Sleep -Milliseconds 20
+    }
+}
 
 if (-not $marcado) {
+    # Nadie lo pidio por nosotros (invocacion a mano, o AHK caido): lo pedimos.
     try {
         $ev = [System.Threading.EventWaitHandle]::OpenExisting('Global\rice-shadowplay-cut')
         [void]$ev.Set()

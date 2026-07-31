@@ -51,8 +51,20 @@ pub fn history() -> Vec<NotifRecord> {
 
 /// Aplica un cambio al historial bajo el cerrojo, y lo deja escrito.
 fn edit_history<F: FnOnce(&mut Vec<NotifRecord>)>(f: F) -> std::io::Result<()> {
+    // Si el cerrojo no llega en 2 s se escribe IGUAL, pero dejándolo dicho.
+    //
+    // Perder una notificación por una carrera es peor que no perder ninguna, y
+    // rendirse aquí perdería una seguro. Pero un `let _ = ...` a secas convertía
+    // el caso raro en invisible: si esto empieza a salir, es que alguien retiene
+    // el cerrojo mucho más de lo que debería.
     #[cfg(windows)]
-    let _lock = crate::win::NamedLock::acquire(HISTORY_LOCK, 2000);
+    let _lock = match crate::win::NamedLock::acquire(HISTORY_LOCK, 2000) {
+        Some(l) => Some(l),
+        None => {
+            eprintln!("historial: no pude tomar {HISTORY_LOCK} en 2 s; escribo sin cerrojo");
+            None
+        }
+    };
     let mut v = history();
     f(&mut v);
     v.truncate(HISTORY_MAX);

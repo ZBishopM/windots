@@ -1220,6 +1220,8 @@ struct BarApp {
     /// archivo, no en cada fotograma.
     notifs: Vec<rice_common::event::NotifRecord>,
     notifs_stamp: Option<std::time::SystemTime>,
+    /// Cuando se miro por ultima vez la fecha del archivo.
+    notifs_checked: Instant,
     /// Cuantas se muestran ahora mismo; "ver mas" lo sube.
     notifs_shown: usize,
     want_close: bool,   // set under the shared lock, acted on after it is dropped
@@ -1550,8 +1552,17 @@ impl BarApp {
     }
 
 
-    /// Relee el historial si el archivo cambió (o si se fuerza al abrir).
+    /// Relee el historial si el archivo cambio (o si se fuerza al abrir).
+    ///
+    /// Con freno de un segundo: sin el, `fs::metadata` corria una vez por
+    /// FOTOGRAMA mientras el panel estuviera abierto, o sea ~60 llamadas al
+    /// sistema por segundo para mirar un archivo que cambia cada varios minutos.
+    /// Es el mismo freno que ya lleva `Tray::poll` por la misma razon.
     fn reload_notifs(&mut self, force: bool) {
+        if !force && self.notifs_checked.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.notifs_checked = Instant::now();
         let path = rice_common::config::config_path(rice_common::event::HISTORY_FILE);
         let stamp = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         if force || stamp != self.notifs_stamp {
@@ -2959,6 +2970,7 @@ fn main() -> eframe::Result<()> {
                 isl_notifs: std::env::var("GLAZEBAR_PANEL").as_deref() == Ok("notifs"),
                 notifs: Vec::new(),
                 notifs_stamp: None,
+                notifs_checked: Instant::now() - Duration::from_secs(2),
                 notifs_shown: NOTIFS_PAGE,
                 want_close: false,
                 want_back: false,

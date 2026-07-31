@@ -24,6 +24,17 @@ use windows::Win32::Media::Audio::*;
 use windows::Win32::System::Com::*;
 
 const OUT_RATE: f64 = 48000.0;
+/// Lo toma la instancia del grabador; la de --publish-only se aparta al verlo.
+///
+/// Doble barra. Con una sola, `\r` es un retorno de carro valido en Rust: el
+/// nombre real pasaba a ser `Global<CR>ice-audio-primary`, compilaba sin una
+/// queja y funcionaba de chiripa porque los dos sitios llevaban la misma cadena
+/// mal. Ni estaba en el espacio Global ni decia lo que aparentaba.
+const PRIMARIO: &str = "Global\\rice-audio-primary";
+/// Instancia unica del publicador de respaldo. Lo toma EL HELPER, no la barra:
+/// un proceso suelta sus mutex al morir pase lo que pase, y un mutex de Win32
+/// solo puede soltarlo el hilo que lo tomo.
+const RESPALDO: &str = "Global\\rice-audio-backup";
 
 fn main() -> Result<()> {
     let mic = std::env::args().any(|a| a == "--mic");
@@ -49,10 +60,12 @@ fn main() -> Result<()> {
     //
     // Asi que la del grabador toma PRIMARIO y publica; la de --publish-only se
     // aparta en cuanto ese mutex aparece, al arrancar y cada dos segundos.
-    const PRIMARIO: &str = "Global\rice-audio-primary";
     let publicador = if mic {
         None
     } else if solo_publicar {
+        // Instancia unica lo PRIMERO: las dos barras pueden lanzarnos a la vez y
+        // solo puede quedar uno escribiendo el anillo.
+        rice_common::win::single_instance_or_exit(RESPALDO);
         if rice_common::win::mutex_taken(PRIMARIO) {
             return Ok(()); // ya publica el del grabador: sobramos
         }
@@ -190,6 +203,10 @@ unsafe fn capture<W: Write>(out: &mut Sink<W>, mic: bool, solo_publicar: bool) -
     // Solo se usan en --publish-only; ver el final del bucle.
     let mut ultimas_lecturas = 0u64;
     let mut sin_lectores = start;
+    // Cronometro PROPIO. Reusar last_dev_check no valia: se reasigna a `now` doce
+    // lineas mas arriba en esta misma vuelta, asi que la condicion de abajo nunca
+    // llegaba a ser cierta y toda la comprobacion periodica era codigo muerto.
+    let mut ultimo_chequeo_primario = start;
     const IDLE_SECS: f64 = 0.15;
 
     loop {
@@ -279,10 +296,11 @@ unsafe fn capture<W: Write>(out: &mut Sink<W>, mic: bool, solo_publicar: bool) -
         if solo_publicar {
             // Llego el del grabador: nos apartamos para no escribir dos en el
             // mismo anillo.
-            if now.duration_since(last_dev_check).as_secs_f64() > 2.0
-                && rice_common::win::mutex_taken("Global\rice-audio-primary")
-            {
-                std::process::exit(0);
+            if now.duration_since(ultimo_chequeo_primario).as_secs_f64() > 2.0 {
+                ultimo_chequeo_primario = now;
+                if rice_common::win::mutex_taken(PRIMARIO) {
+                    std::process::exit(0);
+                }
             }
             if let Some(p) = &out.publicador {
                 let r = p.reads();

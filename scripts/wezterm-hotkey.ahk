@@ -101,6 +101,18 @@
     ; 0x0002 es EVENT_MODIFY_STATE, lo justo para SetEvent. Si el grabador no
     ; esta, OpenEventW devuelve 0 y no pasa nada: el script lo intenta por su
     ; cuenta como antes.
+    ; El sello va ANTES de señalizar, y no es opcional.
+    ;
+    ; El script necesita distinguir "este corte es el mío" de "este corte es el
+    ; de la pulsación anterior". Antes lo hacía por la EDAD de la marca (menos de
+    ; 2 s = mía), y eso falla con dos Alt+F10 seguidos: el segundo se quedaba con
+    ; el corte del primero y guardaba un clip que terminaba hasta 2 s antes de la
+    ; segunda pulsación. Con el sello la pregunta es exacta: ¿se cerró el
+    ; segmento DESPUÉS de que yo lo pidiera?
+    stamp := EnvGet('USERPROFILE') . '\ShadowPlay\wgc-buffer\cut-requested.txt'
+    try FileDelete(stamp)
+    try FileAppend('1', stamp)
+
     h := DllCall("OpenEventW", "UInt", 0x0002, "Int", 0, "Str", "Global\rice-shadowplay-cut", "Ptr")
     if h {
         DllCall("SetEvent", "Ptr", h)

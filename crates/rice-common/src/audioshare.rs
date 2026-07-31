@@ -165,13 +165,23 @@ impl Publisher {
             return;
         }
         let h = self.view.header();
-        let start = h.written.load(Ordering::Relaxed) as usize;
+        let start = h.written.load(Ordering::Relaxed) as usize % CAPACITY_FRAMES;
         let data = self.view.data();
+        // Dos memcpy y no 48.000 modulos por segundo: el trozo hasta el final del
+        // anillo y, si hace falta, el que da la vuelta.
+        let primero = n.min(CAPACITY_FRAMES - start);
         unsafe {
-            for i in 0..n {
-                let slot = ((start + i) % CAPACITY_FRAMES) * CHANNELS;
-                *data.add(slot) = frames[i * CHANNELS];
-                *data.add(slot + 1) = frames[i * CHANNELS + 1];
+            std::ptr::copy_nonoverlapping(
+                frames.as_ptr(),
+                data.add(start * CHANNELS),
+                primero * CHANNELS,
+            );
+            if n > primero {
+                std::ptr::copy_nonoverlapping(
+                    frames.as_ptr().add(primero * CHANNELS),
+                    data,
+                    (n - primero) * CHANNELS,
+                );
             }
         }
         // Release: los fotogramas de arriba tienen que ser visibles antes que el
