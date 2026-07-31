@@ -19,7 +19,7 @@
 // Usage: shadowplay-wgc [buffer_dir]
 
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::time::Instant;
@@ -37,7 +37,32 @@ use windows_capture::{
 };
 
 const SEG_SECS: u64 = 5;
-const RING: usize = 8;
+// 12 slots = ~60s of history for a 30s clip. It used to be 8 (~40s), which was
+// enough only while every segment lasted the full SEG_SECS. Cut-on-demand ends
+// segments early, so each save spends a slot on a partial one and the buffer
+// shrinks; back-to-back saves eroded a 30s clip down to 19s (measured). Doubling
+// the target absorbs that. Costs ~50 MB more on disk, nothing in CPU.
+// Keep in sync with $RING in .config/shadowplay-wgc-save.ps1.
+const RING: usize = 12;
+/// Named event that asks for the current segment to be closed NOW.
+///
+/// Alt+F10 used to be worth 0-5 seconds of waiting: the save step could only use
+/// segments that were already closed, so it either threw away everything since
+/// the last boundary or sat waiting for one. Neither is necessary -- the boundary
+/// swap here is O(1) thanks to the pre-warmed encoder, so it can happen on
+/// demand. Measured: the outgoing MP4 is byte-complete ~80 ms after a boundary.
+///
+/// Auto-reset, same as `Global\rice-launcher-show`: one signal is exactly one cut.
+const CUT_EVENT: &str = "Global\\rice-shadowplay-cut";
+/// Written by the finisher after each `finish()`, so the saver knows the segment
+/// it asked for is on disk instead of polling ffprobe until something parses.
+const CUT_MARK: &str = "last-finished.txt";
+/// A cut is ignored below this age. The maker keeps exactly ONE spare encoder,
+/// so two cuts in quick succession would find `make_ready_rx` empty and block the
+/// capture thread inside `VideoEncoder::new` (a synchronous PrepareTranscodeAsync
+/// -- expensive enough that the whole maker thread exists to hide it). The cut is
+/// not dropped, just deferred to this age.
+const MIN_CUT_SECS: f32 = 1.0;
 // HEVC target bitrate. 10 Mbps at 1080p60 is a good size/quality balance for a
 // rolling replay buffer (also ~a third less continuous disk write than 15).
 const BITRATE: u32 = 10_000_000;
@@ -51,6 +76,8 @@ type Err = Box<dyn std::error::Error + Send + Sync>;
 struct Flags {
     dir: String,
     audio_idx: Arc<AtomicUsize>,
+    /// Puesta a true por el hilo que escucha CUT_EVENT.
+    cut: Arc<AtomicBool>,
     w: u32,
     h: u32,
 }
@@ -60,12 +87,14 @@ struct Rec {
     seg_start: Instant,
     idx: usize,
     // Hand finished segments off the capture thread; finish() blocks ~1s.
-    finish_tx: Sender<VideoEncoder>,
+    finish_tx: Sender<(VideoEncoder, usize)>,
     // Request the next segment's encoder and receive it pre-warmed.
     make_req_tx: Sender<usize>,
     make_ready_rx: Receiver<VideoEncoder>,
     // Shared with the audio thread so its PCM file rotates in lockstep with video.
     audio_idx: Arc<AtomicUsize>,
+    // Raised from outside (Alt+F10) to close this segment early.
+    cut: Arc<AtomicBool>,
 }
 
 fn make_encoder(dir: &str, idx: usize, w: u32, h: u32) -> Result<VideoEncoder, Err> {
@@ -82,15 +111,26 @@ fn make_encoder(dir: &str, idx: usize, w: u32, h: u32) -> Result<VideoEncoder, E
 
 // Background worker: finalize (flush + write moov) encoders handed to it. This is
 // the ~1s blocking call that must stay off the capture callback thread.
-fn spawn_finisher() -> Sender<VideoEncoder> {
-    let (tx, rx) = channel::<VideoEncoder>();
+fn spawn_finisher(dir: String) -> Sender<(VideoEncoder, usize)> {
+    let (tx, rx) = channel::<(VideoEncoder, usize)>();
     std::thread::spawn(move || {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
-        while let Ok(enc) = rx.recv() {
-            if let Err(e) = enc.finish() {
-                eprintln!("segment finish failed: {e}");
+        while let Ok((enc, idx)) = rx.recv() {
+            let t = Instant::now();
+            match enc.finish() {
+                Ok(()) => {
+                    // Escribir-y-renombrar: quien guarda sondea este archivo y no
+                    // puede leerlo a medio escribir.
+                    let tmp = format!("{dir}\\{CUT_MARK}.tmp");
+                    let dst = format!("{dir}\\{CUT_MARK}");
+                    if std::fs::write(&tmp, format!("seg{idx:02}")).is_ok() {
+                        let _ = std::fs::rename(&tmp, &dst);
+                    }
+                    eprintln!("seg{idx:02} finished in {} ms", t.elapsed().as_millis());
+                }
+                Err(e) => eprintln!("segment finish failed: {e}"),
             }
         }
     });
@@ -107,8 +147,13 @@ fn spawn_maker(dir: String, w: u32, h: u32) -> (Sender<usize>, Receiver<VideoEnc
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
         while let Ok(idx) = req_rx.recv() {
+            // Cronometrado porque el unico numero que habia sobre esto en todo el
+            // repo era un "~1s" en un comentario, sin medicion detras -- y de su
+            // coste depende que un corte bajo demanda sea seguro.
+            let t = Instant::now();
             match make_encoder(&dir, idx, w, h) {
                 Ok(e) => {
+                    eprintln!("seg{idx:02} encoder ready in {} ms", t.elapsed().as_millis());
                     if ready_tx.send(e).is_err() {
                         break;
                     }
@@ -130,11 +175,15 @@ impl GraphicsCaptureApiHandler for Rec {
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
         let dir = ctx.flags.dir;
         let audio_idx = ctx.flags.audio_idx;
+        let cut = ctx.flags.cut;
         let (w, h) = (ctx.flags.w, ctx.flags.h);
         std::fs::create_dir_all(&dir).ok();
+        // Stale marker from a previous run: the saver would otherwise read it as
+        // an answer to the cut it is about to ask for.
+        let _ = std::fs::remove_file(format!("{dir}\\{CUT_MARK}"));
         // seg 0 built inline (capture isn't running yet, so no stall to hide).
         let enc = make_encoder(&dir, 0, w, h)?;
-        let finish_tx = spawn_finisher();
+        let finish_tx = spawn_finisher(dir.clone());
         let (make_req_tx, make_ready_rx) = spawn_maker(dir, w, h);
         // Pre-warm seg 1 so the first boundary swap is instant.
         make_req_tx.send(1).ok();
@@ -146,6 +195,7 @@ impl GraphicsCaptureApiHandler for Rec {
             make_req_tx,
             make_ready_rx,
             audio_idx,
+            cut,
         })
     }
 
@@ -156,12 +206,25 @@ impl GraphicsCaptureApiHandler for Rec {
     ) -> Result<(), Self::Error> {
         self.enc.as_mut().unwrap().send_frame(frame)?;
 
-        if self.seg_start.elapsed().as_secs() >= SEG_SECS {
+        // A cut requested from outside (Alt+F10) closes the segment right here
+        // instead of at the next 5s boundary. Same branch, same O(1) swap -- the
+        // only reason this was ever worth 0-5 seconds of waiting is that nothing
+        // could ask for it.
+        let age = self.seg_start.elapsed();
+        let asked = self.cut.load(Ordering::Relaxed);
+        if age.as_secs() >= SEG_SECS || (asked && age.as_secs_f32() >= MIN_CUT_SECS) {
+            // Cleared only when actually honoured: a cut arriving in the first
+            // second stays pending and fires at MIN_CUT_SECS rather than being
+            // silently dropped.
+            if asked {
+                self.cut.store(false, Ordering::Relaxed);
+            }
             // Swap in the pre-warmed encoder (requested ~5s ago -> recv is instant),
             // then hand the old one to the finisher. The whole boundary is O(1).
             let next = self.make_ready_rx.recv()?;
             let old = self.enc.replace(next).unwrap();
-            self.finish_tx.send(old).ok();
+            let old_idx = self.idx;
+            self.finish_tx.send((old, old_idx)).ok();
             self.idx = (self.idx + 1) % RING;
             // Move the audio PCM file to the same index (keeps A/V aligned).
             self.audio_idx.store(self.idx, Ordering::Relaxed);
@@ -260,6 +323,27 @@ fn main() {
     spawn_audio(dir.clone(), audio_idx.clone(), false); // system audio -> seg*.pcm
     spawn_audio(dir.clone(), audio_idx.clone(), true); //  microphone   -> seg*.mic.pcm
 
+    // Cut-on-demand listener. Costs nothing while idle: parked in
+    // WaitForSingleObject(INFINITE), never scheduled until someone signals.
+    let cut = Arc::new(AtomicBool::new(false));
+    match rice_common::win::NamedEvent::create(CUT_EVENT) {
+        Some(ev) => {
+            let flag = cut.clone();
+            std::thread::spawn(move || loop {
+                if !ev.wait() {
+                    // A bad handle returns instantly, forever. Sleeping keeps
+                    // that from becoming a spin loop (same guard as launcher).
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    continue;
+                }
+                flag.store(true, Ordering::Relaxed);
+            });
+        }
+        // Not fatal: rotation still happens every SEG_SECS, so Alt+F10 degrades
+        // to the old behaviour instead of the recorder refusing to run.
+        None => eprintln!("could not create {CUT_EVENT}; cuts on demand disabled"),
+    }
+
     let monitor = Monitor::primary().expect("no primary monitor");
     // Match the encoder to the monitor's real resolution so frames never hit the
     // crate's padded-surface fallback (an extra per-frame GPU copy).
@@ -273,7 +357,7 @@ fn main() {
         MinimumUpdateIntervalSettings::Default,
         DirtyRegionSettings::Default,
         ColorFormat::Rgba8,
-        Flags { dir, audio_idx, w, h },
+        Flags { dir, audio_idx, cut, w, h },
     );
     eprintln!("wgc recorder (video + parallel-pcm audio) started");
     Rec::start(settings).expect("capture failed");

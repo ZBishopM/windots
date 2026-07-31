@@ -5,6 +5,11 @@
 #                           instante; ver el comentario del bind !F10.
 [CmdletBinding()]
 param([string]$Foreground = '')
+# Lo PRIMERO, antes de cualquier trabajo. La version anterior lo sellaba despues
+# del bucle de espera, asi que el "margen" del log comparaba el final del clip
+# con el final de la espera y no con la pulsacion: parecia medir la latencia y
+# no la medía.
+$pulsado = Get-Date
 # Video segments (segNN.mp4) are video-only; each has parallel raw-PCM audio in
 # lockstep: segNN.pcm (system audio) and segNN.mic.pcm (microphone), s16le 48k
 # stereo. We concat the video + each audio ring; if the mic ring exists we mix
@@ -63,9 +68,127 @@ catch [System.Threading.AbandonedMutexException] { }   # previous save died; we 
 $segs = Get-ChildItem "$buf\seg*.mp4" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime
 if ($segs.Count -lt 2) { $saveLock.ReleaseMutex(); exit 1 }
 
-# Newest segment is still being written -> drop it, take the newest 6 (~30s).
-$complete = $segs[0..($segs.Count - 2)]
-$last = @($complete | Select-Object -Last 6)
+# ---------------------------------------------------------------------------
+# PEDIR EL CORTE, en vez de esperar al siguiente.
+#
+# El problema original: los segmentos duran 5 s y solo sirve un segmento
+# cerrado, asi que al pulsar habia dos salidas malas y ninguna buena. Tirar el
+# segmento en curso perdia entre 1,7 y 4,7 s -- justo lo que uno quiere guardar
+# cuando pulsa. Esperar a que cerrara solo costaba lo mismo en espera (0-5 s).
+#
+# Se arregla en el grabador: rotar de segmento ya era O(1) (un hilo pre-crea el
+# codificador siguiente), lo unico que faltaba era poder pedirlo. Ahora se
+# señaliza 'Global\rice-shadowplay-cut' y el corte ocurre en el fotograma
+# siguiente; el grabador deja escrito en last-finished.txt QUE segmento acaba de
+# cerrar, asi que aqui no hay que adivinar por fechas ni sondear ffprobe.
+#
+# El grabador ignora un corte si el segmento tiene menos de 1 s (solo guarda un
+# codificador de repuesto), de ahi que la espera maxima util sean ~4 s y no 9.
+# ---------------------------------------------------------------------------
+$marca   = Join-Path $buf 'last-finished.txt'
+function Get-Marca { if (Test-Path $marca) { (Get-Content $marca -Raw -EA SilentlyContinue).Trim() } else { '' } }
+$antes   = Get-Marca
+$marcado = ''
+try {
+    $ev = [System.Threading.EventWaitHandle]::OpenExisting('Global\rice-shadowplay-cut')
+    [void]$ev.Set()
+    $ev.Dispose()
+    $tope = (Get-Date).AddSeconds(4)
+    while ((Get-Date) -lt $tope) {
+        $ahora = Get-Marca
+        if ($ahora -and $ahora -ne $antes) { $marcado = $ahora; break }
+        Start-Sleep -Milliseconds 20
+    }
+} catch { }   # grabador parado o sin el evento: se cae al camino de respaldo
+
+# Un segmento esta listo cuando su video Y su audio estan cerrados. No basta con
+# el .mp4: el audio va en archivos .pcm paralelos que el grabador libera aparte,
+# y leerlos antes de tiempo revienta con "lo esta usando otro proceso" -- que es
+# como se manifestaba, con el guardado fallando dos de cada tres veces.
+#
+# Solo se usa en el camino de respaldo: con corte bajo demanda, el segmento que
+# nombra la marca esta cerrado por construccion.
+function Test-SegmentoLibre($mp4) {
+    $base = [IO.Path]::ChangeExtension($mp4, $null).TrimEnd('.')
+    foreach ($f in @($mp4, "$base.pcm", "$base.mic.pcm")) {
+        if (-not (Test-Path -LiteralPath $f)) { continue }   # el mic puede no existir
+        try {
+            # FileShare.ReadWrite, no FileShare.Read. La diferencia no es de
+            # matiz: 'Read' significa "abro para leer Y NO PERMITO que nadie
+            # escriba", asi que choca con el descriptor abierto del grabador y
+            # falla aunque el archivo sea perfectamente legible. El grabador usa
+            # File::create, que en Windows comparte lectura, escritura y borrado
+            # -- comprobado abriendo un .pcm en pleno crecimiento: con 'Read'
+            # falla, con 'ReadWrite' abre siempre.
+            #
+            # Con esto los .pcm dejan de imponer espera. El .mp4 si la necesita
+            # de verdad, porque no tiene atomo moov hasta que finish() lo cierra.
+            $s = [IO.File]::Open($f, 'Open', 'Read', 'ReadWrite')
+            $s.Close()
+        } catch { return $false }
+    }
+    return $true
+}
+
+$RING    = 12   # debe coincidir con RING en crates/shadowplay-wgc/src/main.rs
+$OBJETIVO = 30  # segundos de clip
+if ($marcado) {
+    # Seleccion POR ANILLO, hacia atras desde el segmento que acaba de cerrarse.
+    #
+    # Esto sustituye a ordenar por fecha, que tenia una trampa: el grabador vacia
+    # el hueco SIGUIENTE del anillo por adelantado, y ese archivo de 0 bytes
+    # queda con mtime fresco, o sea entre los mas nuevos al ordenar. Se colaba en
+    # la seleccion, ffmpeg lo saltaba y el clip salia de 20 s en vez de 30.
+    # Yendo hacia atras desde el indice marcado nunca se pisa: esta por delante.
+    #
+    # Y se coge POR TIEMPO ACUMULADO, no seis fijos. Seis fijos eran 30 s cuando
+    # todos los segmentos duraban 5 s; ahora el ultimo se corta a media vida y
+    # los seis daban 22-26 s (medido). El mtime de un segmento cerrado es el
+    # instante en que se cerro, asi que la distancia entre el marcado y otro es
+    # exactamente el metraje que hay entre medias -- sin ffprobe.
+    #
+    # Tope RING-1: uno de los huecos es siempre el pre-vaciado del grabador.
+    $n = [int]($marcado -replace '\D', '')
+    $sel = @()
+    $ref = $null
+    for ($k = 0; $k -lt ($RING - 1); $k++) {
+        $i = ((($n - $k) % $RING) + $RING) % $RING
+        $f = Get-Item (Join-Path $buf ('seg{0:00}.mp4' -f $i)) -EA SilentlyContinue
+        if (-not $f -or $f.Length -lt 100KB) { break }   # hueco vaciado o arranque en frio
+        $atras = if ($null -eq $ref) { $ref = $f.LastWriteTime; 0 }
+                 else { ($ref - $f.LastWriteTime).TotalSeconds }
+        # Una vuelta entera del anillo son 60 s; mas viejo que eso es de la
+        # generacion anterior, no parte de este clip.
+        if ($atras -gt 65) { break }
+        # El corte va ANTES de añadir, y esa es toda la aritmetica: el mtime de un
+        # segmento cerrado es cuando se cerro, asi que $atras de este es
+        # exactamente el metraje que suman todos los ya elegidos. Comprobarlo
+        # despues de añadir metia siempre un segmento de mas y el clip salia de
+        # 32,7-38,5 s (medido) en vez de 30.
+        if ($atras -ge $OBJETIVO) { break }
+        $sel = , $f + $sel
+    }
+    $last = $sel
+}
+else {
+    # Respaldo: grabador parado, o version vieja sin el evento. Comportamiento de
+    # antes -- filtrar por tamano (fuera los huecos vaciados) y por estar libre
+    # (fuera el que aun escribe).
+    $segs = Get-ChildItem "$buf\seg*.mp4" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Length -gt 100KB -and (Test-SegmentoLibre $_.FullName) } |
+            Sort-Object LastWriteTime
+    $last = @($segs | Select-Object -Last 6)
+}
+if ($last.Count -lt 1) { $saveLock.ReleaseMutex(); exit 1 }
+
+# Dejar por escrito hasta donde llega el clip y cuanto costo. 'espera' es el dato
+# que de verdad interesa: de la pulsacion a tener el segmento en disco.
+$finClip = $last[-1].LastWriteTime
+("{0} seleccion: {1} segmentos [{2}] | corte={3} | espera {4:N2}s | fin del clip {5:HH:mm:ss.fff} | margen {6:N1}s" -f `
+    (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $last.Count, (($last | ForEach-Object { $_.BaseName }) -join ','),
+    $(if ($marcado) { $marcado } else { 'respaldo' }), ((Get-Date) - $pulsado).TotalSeconds,
+    $finClip, ($finClip - $pulsado).TotalSeconds) |
+    Add-Content -Path (Join-Path $Rice.LogDir 'clip-share.log') -Encoding utf8
 
 # Per-run temp names under TEMP (not fixed names in the buffer dir, which the
 # recorder is also writing), cleaned up in the finally below.
@@ -85,11 +208,25 @@ $haveMic = $true
 $fsS = [System.IO.File]::Create($sysOut)
 $fsM = [System.IO.File]::Create($micOut)
 try {
+    # Copiar con FileShare.ReadWrite, NO con ReadAllBytes.
+    #
+    # Aqui estaba la ultima espera obligatoria. ReadAllBytes abre con
+    # FileShare.Read, que no significa "solo leo": significa "abro para leer Y NO
+    # PERMITO que nadie escriba". El hilo de audio del grabador rota de archivo
+    # en su siguiente lectura del tubo, ~21 ms despues del corte, asi que el .pcm
+    # del segmento recien cerrado puede seguir abierto ese instante -- y
+    # ReadAllBytes fallaba con "lo esta usando otro proceso". El grabador abre con
+    # File::create, que comparte lectura, escritura y borrado; con ReadWrite abre
+    # siempre, incluso en pleno crecimiento (comprobado en caliente).
+    function Copy-Pcm($src, $dst) {
+        $s = [IO.File]::Open($src, 'Open', 'Read', 'ReadWrite')
+        try { $s.CopyTo($dst) } finally { $s.Close() }
+    }
     foreach ($v in $last) {
         $ps = Join-Path $buf ($v.BaseName + '.pcm')
         $pm = Join-Path $buf ($v.BaseName + '.mic.pcm')
-        if (Test-Path $ps) { $b = [System.IO.File]::ReadAllBytes($ps); $fsS.Write($b, 0, $b.Length) } else { $haveSys = $false }
-        if (Test-Path $pm) { $b = [System.IO.File]::ReadAllBytes($pm); $fsM.Write($b, 0, $b.Length) } else { $haveMic = $false }
+        if (Test-Path $ps) { Copy-Pcm $ps $fsS } else { $haveSys = $false }
+        if (Test-Path $pm) { Copy-Pcm $pm $fsM } else { $haveMic = $false }
     }
 } finally { $fsS.Close(); $fsM.Close() }   # a mid-write segment must not leak handles
 $haveSys = $haveSys -and (Get-Item $sysOut).Length -gt 0

@@ -2155,6 +2155,7 @@ dependencies = [
 name = "shadowplay-wgc"
 version = "0.1.0"
 dependencies = [
+ "rice-common",
  "windows 0.62.2",
  "windows-capture",
 ]

@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# Sin features: rice-common tiene todas las suyas opcionales, asi que esto
+# compila solo win.rs y no arrastra ninguna dependencia nueva al binario.
+rice-common = { path = "../rice-common" }
 windows-capture = "2"
 # CoInitializeEx(MTA) on the finisher/maker worker threads (WinRT calls need COM).
 windows = { version = "0.62", features = ["Win32_System_Com", "Win32_System_Threading", "Win32_Foundation", "Win32_Security"] }

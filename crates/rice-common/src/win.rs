@@ -9,6 +9,10 @@ extern "system" {
     fn GetCurrentProcess() -> isize;
     fn K32EmptyWorkingSet(process: isize) -> i32;
     fn CreateMutexW(attr: *const core::ffi::c_void, owner: i32, name: *const u16) -> isize;
+    fn CreateEventW(attr: *const core::ffi::c_void, manual: i32, initial: i32, name: *const u16) -> isize;
+    fn OpenEventW(access: u32, inherit: i32, name: *const u16) -> isize;
+    fn SetEvent(h: isize) -> i32;
+    fn WaitForSingleObject(h: isize, ms: u32) -> u32;
     fn GetLastError() -> u32;
     fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
     fn SetWindowLongPtrW(hwnd: isize, index: i32, val: isize) -> isize;
@@ -54,6 +58,71 @@ pub fn single_instance(name: &str) -> bool {
 pub fn single_instance_or_exit(name: &str) {
     if !single_instance(name) {
         std::process::exit(0);
+    }
+}
+
+/// A named Win32 auto-reset event: the house pattern for "another process wants
+/// this resident tool to do something now".
+///
+/// Auto-reset because every user of this is a one-signal-one-action trigger
+/// (show the launcher, cut a segment); a manual-reset event would let a single
+/// signal fire the action repeatedly until someone remembered to clear it.
+///
+/// The point of a named event over a socket or a file poke is that the waiter
+/// costs literally nothing while nothing is happening -- it sits in
+/// `WaitForSingleObject(INFINITE)`, off the scheduler -- and wakes in
+/// microseconds. This lives here because `launcher` had it inline and
+/// `shadowplay-wgc` became the second caller; this tree already knows how
+/// copying ends (four hand-rolled IPC clients).
+#[cfg(windows)]
+pub struct NamedEvent(isize);
+
+#[cfg(windows)]
+impl NamedEvent {
+    /// Create (or open, if it already exists) the event. Call this in the
+    /// process that waits.
+    pub fn create(name: &str) -> Option<Self> {
+        unsafe {
+            let w = wide(name);
+            match CreateEventW(std::ptr::null(), 0, 0, w.as_ptr()) {
+                0 => None,
+                h => Some(Self(h)),
+            }
+        }
+    }
+
+    /// Block until someone signals. `false` means the wait itself failed, which
+    /// with a bad handle would return instantly and forever -- callers must not
+    /// turn that into a spin loop.
+    pub fn wait(&self) -> bool {
+        const WAIT_OBJECT_0: u32 = 0;
+        const INFINITE: u32 = u32::MAX;
+        unsafe { WaitForSingleObject(self.0, INFINITE) == WAIT_OBJECT_0 }
+    }
+
+    /// Signal an event owned by another process. `false` if nobody is listening,
+    /// which is the normal answer when the resident tool isn't running.
+    pub fn signal(name: &str) -> bool {
+        const EVENT_MODIFY_STATE: u32 = 0x0002;
+        unsafe {
+            let w = wide(name);
+            let h = OpenEventW(EVENT_MODIFY_STATE, 0, w.as_ptr());
+            if h == 0 {
+                return false;
+            }
+            let ok = SetEvent(h) != 0;
+            CloseHandle(h);
+            ok
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for NamedEvent {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
     }
 }
 
