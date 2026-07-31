@@ -454,6 +454,28 @@ fn handle_switch(
 // RegisterHotKey can't take them (err 1409); a WH_KEYBOARD_LL hook sees the key
 // before the shell and swallows it. It only forwards the number to the worker --
 // never animates inline -- so it returns immediately (LL hooks are time-limited).
+/// ¿Está Super pulsado DE VERDAD ahora mismo?
+///
+/// La bandera del gancho sola no vale, y el modo de fallo es feo: si un
+/// key-up de Super no llega a este gancho -- otro gancho que lo traga, un cambio
+/// de escritorio (UAC, bloqueo, sesión remota), o el gancho desenganchado un
+/// instante -- `WIN_DOWN` se queda en true PARA SIEMPRE. A partir de ahí cada
+/// pulsación pelada de 1..9 dispara un cambio de escritorio y se traga la tecla:
+/// la fila de números queda inservible hasta reiniciar el proceso.
+///
+/// Es la misma clase de desincronización que ya documentamos con AltSnap y la
+/// barra espaciadora. `GetAsyncKeyState` es el estado físico y se recupera solo;
+/// la bandera se queda como filtro rápido, pero no manda.
+///
+/// El `&& WIN_DOWN` no sobra: `GetAsyncKeyState` no distingue una pulsación
+/// inyectada de una real, y el gancho sí. Exigir las dos deja fuera tanto la
+/// bandera atascada como una Super sintética que este proceso no llegó a ver.
+unsafe fn win_held() -> bool {
+    let fisica = (GetAsyncKeyState(VK_LWIN.0 as i32) as u16 & 0x8000) != 0
+        || (GetAsyncKeyState(VK_RWIN.0 as i32) as u16 & 0x8000) != 0;
+    fisica && WIN_DOWN.load(Ordering::Relaxed)
+}
+
 unsafe extern "system" fn kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == 0 {
         // HC_ACTION
@@ -468,7 +490,7 @@ unsafe extern "system" fn kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
             } else if up {
                 WIN_DOWN.store(false, Ordering::Relaxed);
             }
-        } else if down && WIN_DOWN.load(Ordering::Relaxed) && (0x31..=0x39).contains(&vk) {
+        } else if down && win_held() && (0x31..=0x39).contains(&vk) {
             // Win+Shift+N is GlazeWM's "move window to workspace" -> leave it alone.
             let shift = (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
             if !shift {

@@ -109,6 +109,19 @@ function Step-RiceComponent {
     }
 
     if (-not $running) {
+        # El contador se OLVIDA si el componente llego a correr un buen rato.
+        #
+        # MaxRestarts existe para no insistir con algo que nunca arranca -- un
+        # bucle de caidas -- pero contaba reinicios DE POR VIDA y no se reponia
+        # nunca. Con MaxRestarts=10, un componente que se cae una vez al dia se
+        # queda muerto para siempre al decimo dia, y el supervisor ni lo intenta.
+        # Esta maquina encadena suspensiones y despertares, asi que ese caso no es
+        # teorico. Cinco minutos en pie significa que arranca bien y que esto es
+        # una caida nueva, no un bucle.
+        if ($st.StartedAt -ne [DateTime]::MinValue -and ((Get-Date) - $st.StartedAt).TotalSeconds -gt 300) {
+            if ($st.Restarts -gt 0) { Write-RiceLog "estuvo en pie >5 min; olvido $($st.Restarts) reinicios" $name }
+            $st.Restarts = 0
+        }
         $cap = if ($null -ne $Component.MaxRestarts) { $Component.MaxRestarts } else { 0 }
         if ($cap -gt 0 -and $st.Restarts -ge $cap) { return }   # stop retrying what never comes up
         if (Start-RiceComponent $Component) {

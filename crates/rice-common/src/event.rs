@@ -42,11 +42,24 @@ fn now_ms() -> u64 {
 }
 
 /// Lee el historial, de la más reciente a la más antigua.
+///
+/// `Ok(vec)` incluye el caso "no hay archivo todavía". `Err` es sólo "hay
+/// archivo y no se entiende", que es distinto y no debe tratarse igual: ver
+/// `edit_history`.
+fn read_history() -> Result<Vec<NotifRecord>, ()> {
+    let p = config_path(HISTORY_FILE);
+    let Ok(t) = std::fs::read_to_string(&p) else {
+        return Ok(Vec::new()); // aún no existe
+    };
+    if t.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str::<Vec<NotifRecord>>(&t).map_err(|_| ())
+}
+
+/// Lee el historial, de la más reciente a la más antigua.
 pub fn history() -> Vec<NotifRecord> {
-    std::fs::read_to_string(config_path(HISTORY_FILE))
-        .ok()
-        .and_then(|t| serde_json::from_str::<Vec<NotifRecord>>(&t).ok())
-        .unwrap_or_default()
+    read_history().unwrap_or_default()
 }
 
 /// Aplica un cambio al historial bajo el cerrojo, y lo deja escrito.
@@ -65,7 +78,23 @@ fn edit_history<F: FnOnce(&mut Vec<NotifRecord>)>(f: F) -> std::io::Result<()> {
             None
         }
     };
-    let mut v = history();
+    // Un archivo ilegible NO se trata como historial vacío.
+    //
+    // `history()` devuelve un vector vacío tanto si no hay archivo como si no se
+    // entiende, y escribir encima de lo segundo borraba todo el historial de
+    // golpe por un único fallo de parseo. Se aparta el archivo malo -- queda
+    // recuperable a mano -- y se empieza de cero, que es la única salida, pero
+    // dejando constancia en vez de en silencio.
+    let mut v = match read_history() {
+        Ok(v) => v,
+        Err(()) => {
+            let dst = config_path(HISTORY_FILE);
+            let malo = dst.with_extension("json.bad");
+            let _ = std::fs::rename(&dst, &malo);
+            eprintln!("historial ilegible; lo aparto en {}", malo.display());
+            Vec::new()
+        }
+    };
     f(&mut v);
     v.truncate(HISTORY_MAX);
     let dst = config_path(HISTORY_FILE);

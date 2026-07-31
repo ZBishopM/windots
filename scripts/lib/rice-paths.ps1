@@ -78,9 +78,18 @@ function Add-RiceNotifHistory {
     $tengo = $false
     try { $tengo = $m.WaitOne(2000) } catch [System.Threading.AbandonedMutexException] { $tengo = $true }
     try {
+        # Un archivo ilegible NO se trata como historial vacio: eso lo borraria
+        # entero por un unico fallo de parseo. Se aparta y queda recuperable.
         $lista = @()
         if (Test-Path $f) {
-            try { $lista = @(Get-Content $f -Raw | ConvertFrom-Json) } catch { $lista = @() }
+            $crudo = Get-Content $f -Raw -EA SilentlyContinue
+            if ($crudo -and $crudo.Trim()) {
+                try { $lista = @($crudo | ConvertFrom-Json) }
+                catch {
+                    Move-Item $f "$f.bad" -Force -EA SilentlyContinue
+                    $lista = @()
+                }
+            }
         }
         $nueva = [pscustomobject]@{
             icon = $Icon; title = $Title; body = $Body; accent = $Accent

@@ -71,7 +71,19 @@ fn main() -> Result<()> {
         }
         audioshare::Publisher::create(audioshare::SYS_NAME, OUT_RATE as u32)
     } else {
+        // Tomar PRIMARIO no basta: hay que ESPERAR a que el de respaldo se vaya.
+        //
+        // El de respaldo tiene RESPALDO, no PRIMARIO, asi que esto lo consigue
+        // siempre y se ponia a publicar en el acto. Durante los hasta 2 s que
+        // aquel tarda en mirar PRIMARIO habia DOS escribiendo el mismo anillo, y
+        // fotogramas de dos fuentes intercalados son ruido para quien lea.
+        //
+        // Tomar PRIMARIO es la senal de intencion; soltar RESPALDO es su acuse.
         rice_common::win::single_instance(PRIMARIO);
+        let espera = Instant::now();
+        while rice_common::win::mutex_taken(RESPALDO) && espera.elapsed().as_secs() < 4 {
+            std::thread::sleep(Duration::from_millis(50));
+        }
         audioshare::Publisher::create(audioshare::SYS_NAME, OUT_RATE as u32)
     };
     // Que no vuelva a fallar en silencio: la primera version pedia el mapeo en

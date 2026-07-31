@@ -109,6 +109,15 @@ if (Test-Path $sello) {
     $t = (Get-Item $sello).LastWriteTime
     # Reciente: si no, es el sello de una pulsacion vieja y no dice nada de esta.
     if (((Get-Date) - $t).TotalSeconds -lt 5) { $tSello = $t }
+    # SE CONSUME. Un sello vale para UN guardado y solo uno.
+    #
+    # Sin esto la comprobacion por edad vuelve por la puerta de atras: cualquier
+    # guardado dentro de la ventana de 5 s -- otro Alt+F10, o el boton de guardar
+    # de la barra, que no pasa por AHK ni deja sello -- se encontraba el sello
+    # ajeno, veia la marca ya posterior a el, y adoptaba el corte de la pulsacion
+    # anterior en vez de pedir el suyo. Los guardados van serializados por el
+    # mutex de mas arriba, asi que consumirlo aqui no tiene carrera.
+    Remove-Item $sello -Force -EA SilentlyContinue
 }
 $viaAhk = [bool]$tSello
 
