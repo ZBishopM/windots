@@ -2,6 +2,37 @@
 #SingleInstance Force
 
 ; ------------------------------------------------------------
+; Latido, para que se pueda SABER si esto esta vivo.
+;
+; Alt+F10 fallo dos veces sin dejar rastro: ni clip, ni aviso, ni una linea en
+; ningun log. Desde fuera, "AHK caido", "el atajo no llega" y "el guardado fallo"
+; se ven exactamente igual -- no hay nada. Esto convierte la primera en una
+; pregunta con respuesta.
+;
+; Se escribe desde un temporizador, o sea desde el bucle de mensajes: si el
+; script se cuelga o alguien lo suspende, el archivo envejece. La barra lo lee y
+; pinta el estado en el boton de guardar.
+; ------------------------------------------------------------
+global AhkLastF10 := 0
+
+AhkAlive() {
+    global AhkLastF10
+    f := EnvGet('USERPROFILE') . '\.config\ahk-alive.json'
+    ; El latido en si es la FECHA DEL ARCHIVO, no un campo dentro: A_TickCount
+    ; se reinicia al arrancar la maquina y no se puede comparar con nada de
+    ; fuera. Dentro va solo lo que la fecha no puede decir.
+    ;
+    ; suspended cuenta como caido a efectos practicos: con los atajos
+    ; suspendidos el proceso sigue vivo y respondiendo, y nada mas lo delataria.
+    txt := '{"suspended":' . (A_IsSuspended ? 'true' : 'false')
+         . ',"lastF10":' . AhkLastF10 . '}'
+    try FileDelete(f)
+    try FileAppend(txt, f)
+}
+SetTimer(AhkAlive, 5000)
+AhkAlive()
+
+; ------------------------------------------------------------
 ; Hyprland-style global hotkey to launch WezTerm.
 ;   #  = SUPER (Windows key)
 ;   SUPER + Enter  -> open a new WezTerm window
@@ -77,7 +108,7 @@
 ; ------------------------------------------------------------
 ; ShadowPlay: Alt+F10 saves the last ~30s from the rolling buffer.
 ; ------------------------------------------------------------
-!F10:: {
+$!F10:: {
     ; La aplicacion activa se lee AQUI, y se le pasa al script.
     ;
     ; Esto es lo unico que corre en el instante de la pulsacion. El script de
@@ -88,6 +119,14 @@
     ; la partida delante.
     ;
     ; De paso deja de importar cuanto tarde el script en arrancar.
+    ; Se anota que ESTA pulsacion llego. Con esto, "no guardo nada" deja de ser
+    ; ambiguo: si el sello avanza, la tecla llego y el fallo es de aqui abajo.
+    ;
+    ; Segundos desde epoch, no A_TickCount: tiene que sobrevivir a un reinicio y
+    ; poder compararse desde otro proceso.
+    global AhkLastF10 := DateDiff(A_NowUTC, '19700101000000', 'Seconds')
+    AhkAlive()
+
     proc := ""
     try proc := WinGetProcessName("A")
 

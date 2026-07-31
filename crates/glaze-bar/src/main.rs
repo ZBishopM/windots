@@ -872,6 +872,70 @@ const ACTIONS: [(&str, &str, [u8; 3]); 9] = [
 /// Cuantas notificaciones se ven de entrada; "ver mas" suma otra tanda.
 const NOTIFS_PAGE: usize = 4;
 
+/// Pasado esto sin latido, el atajo global se da por caido. El script escribe
+/// cada 5 s, asi que veinte son cuatro fallos seguidos y no una vuelta lenta.
+const AHK_STALE_SECS: u64 = 20;
+
+/// Estado del atajo global (AutoHotkey), leido de `~/.config/ahk-alive.json`.
+///
+/// EXISTE PORQUE Alt+F10 fallo dos veces sin dejar rastro. Desde fuera, "AHK
+/// caido", "la tecla no llega al script" y "el guardado fallo" se ven igual: no
+/// pasa nada. Sin una senal de vida no hay forma de saber cual de las tres es, y
+/// eso convierte cada fallo en una investigacion desde cero.
+#[derive(Clone, Copy, PartialEq)]
+enum Atajo {
+    Vivo,
+    /// Corriendo, pero con los atajos suspendidos: el proceso responde y no
+    /// haria nada, que es el caso mas engañoso de los tres.
+    Suspendido,
+    Caido,
+}
+
+impl Atajo {
+    fn color(self) -> egui::Color32 {
+        match self {
+            Atajo::Vivo => egui::Color32::from_rgb(169, 181, 106),
+            Atajo::Suspendido => egui::Color32::from_rgb(224, 163, 92),
+            Atajo::Caido => egui::Color32::from_rgb(208, 113, 112),
+        }
+    }
+}
+
+/// Lee el latido. Devuelve el estado y cuando fue el ultimo Alt+F10 (epoch, s).
+fn leer_atajo() -> (Atajo, u64) {
+    #[derive(serde::Deserialize, Default)]
+    struct F {
+        #[serde(default)]
+        suspended: bool,
+        #[serde(default)]
+        last_f10: u64,
+    }
+    let p = rice_common::config::config_path("ahk-alive.json");
+    let Ok(md) = std::fs::metadata(&p) else { return (Atajo::Caido, 0) };
+    let viejo = md
+        .modified()
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map(|d| d.as_secs() > AHK_STALE_SECS)
+        .unwrap_or(true);
+    let f: F = std::fs::read_to_string(&p)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .map(|v| F {
+            suspended: v.get("suspended").and_then(|x| x.as_bool()).unwrap_or(false),
+            last_f10: v.get("lastF10").and_then(|x| x.as_u64()).unwrap_or(0),
+        })
+        .unwrap_or_default();
+    let estado = if viejo {
+        Atajo::Caido
+    } else if f.suspended {
+        Atajo::Suspendido
+    } else {
+        Atajo::Vivo
+    };
+    (estado, f.last_f10)
+}
+
 /// "hace 3 min", "hace 2 h", "ayer". Sin dependencia de fechas: la resta de dos
 /// marcas en milisegundos da todo lo que hace falta.
 fn hace_cuanto(ahora_ms: u64, then_ms: u64) -> String {
@@ -1222,6 +1286,12 @@ struct BarApp {
     notifs_stamp: Option<std::time::SystemTime>,
     /// Cuando se miro por ultima vez la fecha del archivo.
     notifs_checked: Instant,
+    /// Estado del atajo global y cuando se miro por ultima vez.
+    atajo: Atajo,
+    atajo_f10: u64,
+    atajo_checked: Instant,
+    /// Se avisa UNA vez por transicion, no en cada sondeo.
+    atajo_avisado: bool,
     /// Cuantas se muestran ahora mismo; "ver mas" lo sube.
     notifs_shown: usize,
     want_close: bool,   // set under the shared lock, acted on after it is dropped
@@ -1290,8 +1360,8 @@ impl BarApp {
             }
             7 => {
                 let n = self.notifs.len().min(self.notifs_shown).max(1) as f32;
-                // Cabecera + filas + la barra de "ver mas / limpiar".
-                (30.0 + n * 46.0 + 34.0).min(320.0)
+                // Linea del atajo + cabecera + filas + "ver mas / limpiar".
+                (20.0 + 30.0 + n * 46.0 + 34.0).min(340.0)
             }
             _ => (ACTIONS.len() as f32 / 3.0).ceil() * 52.0 + 22.0,
         }
@@ -1421,7 +1491,44 @@ impl BarApp {
         }
     }
 
+    /// Sondea el latido del atajo global, como mucho una vez por segundo.
+    ///
+    /// Solo la barra primaria avisa por la isla: con dos monitores, avisar desde
+    /// las dos publicaria el mismo evento dos veces.
+    fn refresh_atajo(&mut self) {
+        if self.atajo_checked.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.atajo_checked = Instant::now();
+        let (estado, f10) = leer_atajo();
+        self.atajo_f10 = f10;
+        if estado != self.atajo {
+            // Una vez por transicion, no en cada sondeo: si no, un AHK caido
+            // soltaria un aviso por segundo para siempre.
+            if estado != Atajo::Vivo && !self.atajo_avisado && self.x == 0 {
+                let cuerpo = if estado == Atajo::Suspendido {
+                    "atajos suspendidos: Win+Shift+Z los devuelve"
+                } else {
+                    "AutoHotkey no responde; Alt+F10 no hara nada"
+                };
+                let _ = rice_common::event::IslandEvent::new(
+                    "warn",
+                    "Atajos globales caidos",
+                    cuerpo,
+                    "#d08770",
+                )
+                .publish();
+                self.atajo_avisado = true;
+            }
+            if estado == Atajo::Vivo {
+                self.atajo_avisado = false;
+            }
+            self.atajo = estado;
+        }
+    }
+
     fn panel_actions(&mut self, ui: &mut egui::Ui, p: &egui::Painter, rect: egui::Rect, now: Instant, ctx: &egui::Context) {
+        self.refresh_atajo();
         let slot = 52.0;
         let cols = 3usize;
         let x0 = rect.center().x - cols as f32 * slot / 2.0 + slot / 2.0;
@@ -1438,10 +1545,35 @@ impl BarApp {
             if r.hovered() {
                 self.isl_interact = now;
             }
-            let acc = egui::Color32::from_rgb(col[0], col[1], col[2]);
+            // El boton de guardar lleva el estado del atajo global encima. Es el
+            // indicador: si Alt+F10 no va a hacer nada, se ve aqui antes de
+            // pulsarlo y no despues de no ver pasar nada.
+            let es_guardar = *kind == "save";
+            let acc = if es_guardar {
+                self.atajo.color()
+            } else {
+                egui::Color32::from_rgb(col[0], col[1], col[2])
+            };
             let a = if r.hovered() { 90 } else { 42 };
             p.circle_filled(c, 17.0, egui::Color32::from_rgba_unmultiplied(acc.r(), acc.g(), acc.b(), a));
             draw_icon(p, c, glyph, 17.0, acc);
+            if es_guardar {
+                let estado = match self.atajo {
+                    Atajo::Vivo => "Alt+F10 activo",
+                    Atajo::Suspendido => "Alt+F10 SUSPENDIDO (Win+Shift+Z)",
+                    Atajo::Caido => "Alt+F10 CAIDO: AutoHotkey no responde",
+                };
+                let ultimo = if self.atajo_f10 == 0 {
+                    "sin usar desde que arranco".to_string()
+                } else {
+                    let ahora = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    format!("ultimo uso: hace {}", hace_cuanto(ahora * 1000, self.atajo_f10 * 1000))
+                };
+                r.clone().on_hover_text(format!("{estado}\n{ultimo}"));
+            }
             if r.clicked() {
                 self.isl_interact = now;
                 match *kind {
@@ -1580,6 +1712,29 @@ impl BarApp {
     /// como toast.
     fn panel_notifs(&mut self, ui: &mut egui::Ui, p: &egui::Painter, rect: egui::Rect, now: Instant) {
         self.reload_notifs(false);
+        self.refresh_atajo();
+
+        // Estado del atajo global, arriba del todo y siempre: es lo primero que
+        // uno quiere saber cuando "no paso nada". Un punto y una linea.
+        let punto = egui::pos2(rect.left() + 16.0, rect.top() + 16.0);
+        p.circle_filled(punto, 4.0, self.atajo.color());
+        let texto = match self.atajo {
+            Atajo::Vivo => "Alt+F10 activo".to_string(),
+            Atajo::Suspendido => "Alt+F10 suspendido (Win+Shift+Z)".to_string(),
+            Atajo::Caido => "Alt+F10 CAIDO: AutoHotkey no responde".to_string(),
+        };
+        p.text(
+            egui::pos2(punto.x + 10.0, punto.y),
+            egui::Align2::LEFT_CENTER,
+            texto,
+            egui::FontId::proportional(10.0),
+            if self.atajo == Atajo::Vivo { WARM_SUB } else { self.atajo.color() },
+        );
+        // Deja sitio a esa linea: la cabecera vieja empezaba donde ahora va ella.
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(rect.left(), rect.top() + 20.0),
+            rect.max,
+        );
 
         if self.notifs.is_empty() {
             p.text(
@@ -2971,6 +3126,10 @@ fn main() -> eframe::Result<()> {
                 notifs: Vec::new(),
                 notifs_stamp: None,
                 notifs_checked: Instant::now() - Duration::from_secs(2),
+                atajo: Atajo::Vivo,
+                atajo_f10: 0,
+                atajo_checked: Instant::now() - Duration::from_secs(5),
+                atajo_avisado: false,
                 notifs_shown: NOTIFS_PAGE,
                 want_close: false,
                 want_back: false,
