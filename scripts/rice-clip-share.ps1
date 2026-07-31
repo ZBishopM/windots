@@ -168,25 +168,79 @@ if ($mb -gt $tope) {
     exit 1
 }
 
-$form = @{ reqtype = 'fileupload'; fileToUpload = Get-Item -LiteralPath $subir }
-if ($esLitter) { $form.time = $cfg.litterbox_time }
+# curl.exe, NO `Invoke-RestMethod -Form`.
+#
+# Con -Form, PowerShell manda el cuerpo troceado (chunked) en cuanto pasa de unos
+# pocos KB, y sin Content-Length el PHP de catbox no llena $_FILES: contesta
+# HTTP 200 con el CUERPO VACIO. Eso es lo que llenaba el log de "respuesta
+# inesperada de catbox:" sin nada detras -- diez de trece subidas desde ayer.
+# Medido, con userhash valido y el mismo destino:
+#
+#   .txt de 22 bytes   -Form   -> https://files.catbox.moe/...   OK
+#   1 MB               -Form   -> ''            (200, cuerpo vacio)
+#   4 MB               -Form   -> ''            (200, cuerpo vacio)
+#   4 MB               curl    -> https://files.catbox.moe/...   OK, 24,1 s
+#
+# curl.exe viene con Windows desde 10 1803 y esta en system32; no es dependencia
+# nueva. --form-string para los campos de texto: con -F, un valor que empiece por
+# @ o < se interpretaria como nombre de archivo.
+#
+# El codigo HTTP se pide a proposito: catbox tambien falla a veces con 200 y
+# cuerpo vacio cuando le llegan muchas subidas seguidas, y sin el codigo las dos
+# averias -- la de chunked y la de throttling -- se ven exactamente igual en el
+# log ("respuesta inesperada", nada detras). Va en una linea aparte al final para
+# no ensuciar la URL.
+$curl = @(
+    '-s', '--show-error', '--max-time', '600',
+    '-w', "`nHTTP=%{http_code} enviado=%{size_upload}B en %{time_total}s",
+    '--form-string', 'reqtype=fileupload',
+    '-F', "fileToUpload=@$subir"
+)
+if ($esLitter) { $curl += @('--form-string', "time=$($cfg.litterbox_time)") }
 # Con userhash la subida queda asociada a la cuenta, y eso es lo que la hace
 # BORRABLE: sin el, catbox rechaza deletefiles con 412 y el archivo se queda
 # publico para siempre (o hasta 2 anos sin visitas). Litterbox no lo admite:
 # alli todo es anonimo y caduca solo, que es su forma de resolver lo mismo.
-if ($userhash -and -not $esLitter) { $form.userhash = $userhash }
+if ($userhash -and -not $esLitter) { $curl += @('--form-string', "userhash=$userhash") }
 
+# Reintentos, porque el fallo es de catbox y no nuestro.
+#
+# Medido con el mismo archivo de 6,25 MB, uno detras de otro:
+#   12:42 HTTP=200 enviado=6253695B  cuerpo vacio
+#   12:43 OK
+#   12:45 OK
+#   12:47 HTTP=200 enviado=6253695B  cuerpo vacio
+#
+# El archivo entero sale (enviado = tamano exacto) y catbox contesta 200 sin
+# cuerpo. O sea que no es codificacion del cliente: es su almacenamiento fallando
+# a ratos. Ademas acierta SIEMPRE cuando el archivo ya existia -- ahi deduplica y
+# no toca disco -- lo que apunta al mismo sitio.
+#
+# Reintentar es seguro: catbox deduplica por contenido, asi que si una subida se
+# guardo pero la respuesta se perdio, el reintento devuelve esa misma URL en vez
+# de duplicar.
 $url = $null
-try {
-    # -Form hace el multipart/form-data que pide la API (el mismo que usa la
-    # config de ShareX que publican). Timeout generoso: son decenas de MB.
-    $url = (Invoke-RestMethod -Uri $api -Method Post -Form $form -TimeoutSec 300).Trim()
-} catch { L "la subida fallo: $($_.Exception.Message)" }
+$diag = ''
+foreach ($intento in 1..3) {
+    try {
+        $salida = (& curl.exe @curl $api 2>&1) -join "`n"
+        $lineas = $salida -split "`n"
+        $diag = ($lineas | Where-Object { $_ -like 'HTTP=*' } | Select-Object -Last 1)
+        $cuerpo = (($lineas | Where-Object { $_ -notlike 'HTTP=*' }) -join '').Trim()
+        if ($LASTEXITCODE -ne 0) { L "curl salio con $LASTEXITCODE : $salida" }
+        elseif ($cuerpo -match '^https?://') { $url = $cuerpo; break }
+        else { L "intento $intento de 3 sin URL: '$cuerpo' | $diag" }
+    } catch { L "intento $intento de 3 fallo: $($_.Exception.Message)" }
+    if ($intento -lt 3) { Start-Sleep -Seconds (4 * $intento) }
+}
 
 if ($tmp) { Remove-Item $tmp -Force -EA SilentlyContinue }
 
 if (-not ($url -match '^https?://')) {
-    L "respuesta inesperada de $($cfg.host): $url"
+    # $diag trae el codigo HTTP y los bytes que salieron de verdad: un 200 con
+    # 0 bytes enviados es otra averia distinta de un 200 con el archivo entero
+    # subido, y sin este dato las dos se leian igual.
+    L "respuesta inesperada de $($cfg.host): '$url' | $diag"
     Publish-Aviso 'warn' 'Subida fallida' 'mira clip-share.log' '#d08770'
     exit 1
 }
