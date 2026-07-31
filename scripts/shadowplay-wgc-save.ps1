@@ -62,7 +62,16 @@ New-Item -ItemType Directory -Force -Path $out | Out-Null
 # Only one save at a time: Alt+F10 and the bar's save button are independent
 # triggers, and two overlapping runs used to stomp each other's temp files.
 $saveLock = New-Object System.Threading.Mutex($false, 'Global\shadowplay-save')
-try { if (-not $saveLock.WaitOne(15000)) { exit 1 } }
+try {
+    if (-not $saveLock.WaitOne(15000)) {
+        # Tampoco aqui en silencio: quince segundos esperando a otro guardado y
+        # rendirse sin decir nada se ve igual que un atajo muerto.
+        ("{0} otro guardado lleva mas de 15 s; me rindo" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')) |
+            Add-Content -Path (Join-Path $Rice.LogDir 'clip-share.log') -Encoding utf8
+        Set-RiceIsland 'warn' 'Guardado ocupado' 'ya habia uno en curso' '#d08770'
+        exit 1
+    }
+}
 catch [System.Threading.AbandonedMutexException] { }   # previous save died; we own it now
 
 # OJO: aqui NO se puede comprobar que existan segmentos. El anillo vive en RAM y
@@ -228,7 +237,23 @@ else {
             Sort-Object LastWriteTime
     $last = @($segs | Select-Object -Last 6)
 }
-if ($last.Count -lt 1) { $saveLock.ReleaseMutex(); exit 1 }
+if ($last.Count -lt 1) {
+    # NUNCA salir en silencio. Este es el camino que se toma cuando el grabador
+    # no esta corriendo, o cuando acaba de arrancar y el anillo todavia esta
+    # vacio: pulsas Alt+F10 y no pasa absolutamente nada -- ni clip, ni aviso, ni
+    # una linea en el log. Es indistinguible de "la tecla no funciona", y asi se
+    # perdio un rato averiguando si el atajo seguia activo.
+    $porque = if (Get-Process shadowplay-wgc -EA SilentlyContinue) {
+        'el buffer aun no tiene 30 s'
+    } else {
+        'el grabador no esta corriendo'
+    }
+    ("{0} sin segmentos utilizables: {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $porque) |
+        Add-Content -Path (Join-Path $Rice.LogDir 'clip-share.log') -Encoding utf8
+    Set-RiceIsland 'warn' 'No hay nada que guardar' $porque '#d08770'
+    $saveLock.ReleaseMutex()
+    exit 1
+}
 
 # Dejar por escrito hasta donde llega el clip y cuanto costo.
 #
