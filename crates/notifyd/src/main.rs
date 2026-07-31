@@ -339,6 +339,12 @@ fn show(t: &Toast, hold: f32) {
     let over_game = win::fullscreen_app_focused();
 
     let ev = IslandEvent::new(t.icon, &t.title, &t.body, &hex(theme::ACCENT));
+    // Al historial SIEMPRE, decida lo que decida el estilo. Ese es justo el
+    // problema que resuelve el centro de notificaciones: una notificacion salio,
+    // se fue sola, y no habia donde mirar que era.
+    if let Err(e) = ev.record() {
+        log(&format!("no pude anotar en el historial: {e}"));
+    }
     if want_island || over_game {
         let _ = ev.publish();
     }

@@ -10,6 +10,7 @@ extern "system" {
     fn K32EmptyWorkingSet(process: isize) -> i32;
     fn CreateMutexW(attr: *const core::ffi::c_void, owner: i32, name: *const u16) -> isize;
     fn OpenMutexW(access: u32, inherit: i32, name: *const u16) -> isize;
+    fn ReleaseMutex(h: isize) -> i32;
     fn CreateEventW(attr: *const core::ffi::c_void, manual: i32, initial: i32, name: *const u16) -> isize;
     fn OpenEventW(access: u32, inherit: i32, name: *const u16) -> isize;
     fn SetEvent(h: isize) -> i32;
@@ -80,6 +81,56 @@ pub fn mutex_taken(name: &str) -> bool {
     }
     #[cfg(not(windows))]
     false
+}
+
+/// Un cerrojo entre procesos, sobre un mutex con nombre.
+///
+/// Distinto de `single_instance`, que toma el mutex y no lo suelta jamás: esto
+/// se toma, se hace lo que sea, y se suelta al salir de ámbito. Hace falta
+/// porque el historial de notificaciones lo escriben dos partes -- `notifyd` en
+/// Rust y `Set-RiceIsland` en PowerShell -- y un escribir-y-renombrar de cada
+/// uno a la vez pierde uno de los dos.
+///
+/// El mismo nombre vale desde PowerShell con
+/// `New-Object System.Threading.Mutex($false, 'Global\...')`.
+#[cfg(windows)]
+pub struct NamedLock(isize);
+
+#[cfg(windows)]
+impl NamedLock {
+    /// Toma el cerrojo, esperando como mucho `ms`. `None` si no se pudo.
+    ///
+    /// Un mutex abandonado (quien lo tenía murió sin soltarlo) devuelve
+    /// `WAIT_ABANDONED`, y ESO CUENTA COMO TOMADO -- ignorarlo dejaría el
+    /// historial bloqueado para siempre tras un único proceso muerto.
+    pub fn acquire(name: &str, ms: u32) -> Option<Self> {
+        const WAIT_OBJECT_0: u32 = 0;
+        const WAIT_ABANDONED: u32 = 0x80;
+        unsafe {
+            let w = wide(name);
+            let h = CreateMutexW(std::ptr::null(), 0, w.as_ptr());
+            if h == 0 {
+                return None;
+            }
+            match WaitForSingleObject(h, ms) {
+                WAIT_OBJECT_0 | WAIT_ABANDONED => Some(Self(h)),
+                _ => {
+                    CloseHandle(h);
+                    None
+                }
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for NamedLock {
+    fn drop(&mut self) {
+        unsafe {
+            ReleaseMutex(self.0);
+            CloseHandle(self.0);
+        }
+    }
 }
 
 /// A named Win32 auto-reset event: the house pattern for "another process wants

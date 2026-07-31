@@ -857,7 +857,7 @@ fn short_output_name(raw: &str, want: &str) -> String {
     if inside.is_empty() { outside.to_string() } else { inside.to_string() }
 }
 
-const ACTIONS: [(&str, &str, [u8; 3]); 8] = [
+const ACTIONS: [(&str, &str, [u8; 3]); 9] = [
     ("mic", "\u{f130}", [224, 163, 92]),      // switch mic
     ("save", "\u{f03d}", [169, 181, 106]),    // save a replay clip
     ("term", "\u{f120}", [206, 150, 112]),    // open a terminal
@@ -866,7 +866,26 @@ const ACTIONS: [(&str, &str, [u8; 3]); 8] = [
     ("vol", "\u{f028}", [150, 190, 200]),     // fa-volume-up -> master + per-app volume
     ("timer", "\u{f017}", [205, 150, 170]),   // fa-clock-o -> pomodoro
     ("devices", "\u{f025}", [150, 200, 190]), // fa-headphones -> outputs + bluetooth
+    ("notifs", "\u{f0f3}", [190, 170, 210]),  // fa-bell -> centro de notificaciones
 ];
+
+/// Cuantas notificaciones se ven de entrada; "ver mas" suma otra tanda.
+const NOTIFS_PAGE: usize = 4;
+
+/// "hace 3 min", "hace 2 h", "ayer". Sin dependencia de fechas: la resta de dos
+/// marcas en milisegundos da todo lo que hace falta.
+fn hace_cuanto(ahora_ms: u64, then_ms: u64) -> String {
+    let s = ahora_ms.saturating_sub(then_ms) / 1000;
+    if s < 60 {
+        "ahora".into()
+    } else if s < 3600 {
+        format!("{} min", s / 60)
+    } else if s < 86_400 {
+        format!("{} h", s / 3600)
+    } else {
+        format!("{} d", s / 86_400)
+    }
+}
 
 
 // Run a quick-action off the UI thread. "mic" also pushes its result to the island.
@@ -1196,6 +1215,13 @@ struct BarApp {
     // ---- pomodoro ----
     isl_timer: bool,
     isl_devices: bool,
+    isl_notifs: bool,
+    /// Historial leido del disco. Se relee al abrir el panel y cuando cambia el
+    /// archivo, no en cada fotograma.
+    notifs: Vec<rice_common::event::NotifRecord>,
+    notifs_stamp: Option<std::time::SystemTime>,
+    /// Cuantas se muestran ahora mismo; "ver mas" lo sube.
+    notifs_shown: usize,
     want_close: bool,   // set under the shared lock, acted on after it is dropped
     want_back: bool,    // return to the action grid without closing
     timer_left: Duration,
@@ -1226,6 +1252,8 @@ impl BarApp {
             5
         } else if self.isl_devices {
             6
+        } else if self.isl_notifs {
+            7
         } else {
             0
         }
@@ -1239,6 +1267,7 @@ impl BarApp {
             4 => 300.0,
             5 => 230.0,
             6 => 300.0,
+            7 => 340.0,
             _ => 3.0 * 52.0 + 24.0,
         }
     }
@@ -1257,6 +1286,11 @@ impl BarApp {
                 let extra = if scanning || !near.is_empty() { near.len() as f32 * 34.0 + 30.0 } else { 0.0 };
                 (n * 38.0 + 34.0 + 30.0 + extra).min(260.0)
             }
+            7 => {
+                let n = self.notifs.len().min(self.notifs_shown).max(1) as f32;
+                // Cabecera + filas + la barra de "ver mas / limpiar".
+                (30.0 + n * 46.0 + 34.0).min(320.0)
+            }
             _ => (ACTIONS.len() as f32 / 3.0).ceil() * 52.0 + 22.0,
         }
     }
@@ -1273,6 +1307,7 @@ impl BarApp {
         self.isl_media = false;
         self.isl_timer = false;
         self.isl_devices = false;
+        self.isl_notifs = false;
         self.panel_rect = None;
         self.vol.clear();
         self.bright.clear();
@@ -1374,6 +1409,7 @@ impl BarApp {
             4 => self.panel_media(ui, &p, rect, now),
             5 => self.panel_timer(ui, &p, rect, now),
             6 => self.panel_devices(ui, &p, rect, now),
+            7 => self.panel_notifs(ui, &p, rect, now),
             _ => self.panel_actions(ui, &p, rect, now, ctx),
         }
 
@@ -1420,6 +1456,11 @@ impl BarApp {
                     "devices" => {
                         self.dev_ctl.refresh();
                         self.isl_devices = true;
+                    }
+                    "notifs" => {
+                        self.reload_notifs(true);
+                        self.notifs_shown = NOTIFS_PAGE;
+                        self.isl_notifs = true;
                     }
                     k => {
                         run_action(k, self.shared.clone(), ctx.clone());
@@ -1508,6 +1549,167 @@ impl BarApp {
         }
     }
 
+
+    /// Relee el historial si el archivo cambió (o si se fuerza al abrir).
+    fn reload_notifs(&mut self, force: bool) {
+        let path = rice_common::config::config_path(rice_common::event::HISTORY_FILE);
+        let stamp = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        if force || stamp != self.notifs_stamp {
+            self.notifs_stamp = stamp;
+            self.notifs = rice_common::event::history();
+        }
+    }
+
+    /// Centro de notificaciones: las últimas, con descartar y ver más.
+    ///
+    /// EXISTE PORQUE una notificación del sistema aparecía, se iba sola, y no
+    /// quedaba sitio donde mirar qué era. El historial lo escriben `notifyd` (y
+    /// por tanto TODAS las de Windows) y `Set-RiceIsland` (las del propio rice),
+    /// asi que aquí está todo, independientemente de si se mostró como isla o
+    /// como toast.
+    fn panel_notifs(&mut self, ui: &mut egui::Ui, p: &egui::Painter, rect: egui::Rect, now: Instant) {
+        self.reload_notifs(false);
+
+        if self.notifs.is_empty() {
+            p.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "sin notificaciones",
+                egui::FontId::proportional(11.5),
+                WARM_SUB,
+            );
+            return;
+        }
+
+        let ahora_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        // A la DERECHA: el borde izquierdo lo ocupa la flecha de volver que
+        // pinta el marco del panel, y el contador quedaba debajo de ella.
+        p.text(
+            egui::pos2(rect.right() - 16.0, rect.top() + 16.0),
+            egui::Align2::RIGHT_CENTER,
+            format!("{}", self.notifs.len()),
+            egui::FontId::proportional(10.5),
+            WARM_SUB,
+        );
+
+        let mut descartar: Option<u64> = None;
+        let visibles = self.notifs.len().min(self.notifs_shown);
+        for i in 0..visibles {
+            let nrec = self.notifs[i].clone();
+            let y = rect.top() + 34.0 + i as f32 * 46.0;
+            let fila = egui::Rect::from_min_size(
+                egui::pos2(rect.left() + 10.0, y),
+                egui::vec2(rect.width() - 20.0, 42.0),
+            );
+            let r = ui.interact(fila, egui::Id::new(("ntf", nrec.at)), egui::Sense::hover());
+            if r.hovered() {
+                self.isl_interact = now;
+                p.rect_filled(fila, egui::Rounding::same(7.0), ISL_HI);
+            }
+
+            let acc = rice_common::theme::parse_hex(&nrec.accent)
+                .map(|c| egui::Color32::from_rgb(c[0], c[1], c[2]))
+                .unwrap_or(WARM_ACCENT);
+            let ic = egui::pos2(fila.left() + 20.0, fila.center().y);
+            p.circle_filled(ic, 13.0, egui::Color32::from_rgba_unmultiplied(acc.r(), acc.g(), acc.b(), 42));
+            draw_icon(p, ic, rice_common::ui::icon_glyph(&nrec.icon), 13.0, acc);
+
+            let tx = fila.left() + 40.0;
+            p.text(
+                egui::pos2(tx, fila.top() + 13.0),
+                egui::Align2::LEFT_CENTER,
+                nrec.title.chars().take(30).collect::<String>(),
+                egui::FontId::proportional(11.5),
+                WARM_TEXT,
+            );
+            p.text(
+                egui::pos2(tx, fila.top() + 29.0),
+                egui::Align2::LEFT_CENTER,
+                nrec.body.chars().take(38).collect::<String>(),
+                egui::FontId::proportional(10.0),
+                WARM_SUB,
+            );
+            p.text(
+                egui::pos2(fila.right() - 30.0, fila.top() + 13.0),
+                egui::Align2::RIGHT_CENTER,
+                hace_cuanto(ahora_ms, nrec.at),
+                egui::FontId::proportional(9.5),
+                WARM_SUB,
+            );
+
+            // Descartar: sólo aparece al pasar por encima, para que la lista no
+            // sea una fila de aspas.
+            if r.hovered() {
+                let c = egui::pos2(fila.right() - 16.0, fila.center().y);
+                let x = ui
+                    .interact(
+                        egui::Rect::from_center_size(c, egui::vec2(22.0, 22.0)),
+                        egui::Id::new(("ntf-x", nrec.at)),
+                        egui::Sense::click(),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                draw_icon(p, c, "\u{f00d}", 11.0, if x.hovered() { WARM_ACCENT } else { WARM_SUB });
+                if x.clicked() {
+                    descartar = Some(nrec.at);
+                }
+            }
+        }
+
+        // Pie: "ver más" mientras queden, y "limpiar" siempre.
+        let by = rect.top() + 34.0 + visibles as f32 * 46.0 + 12.0;
+        if visibles < self.notifs.len() {
+            let c = egui::pos2(rect.left() + 60.0, by);
+            let r = ui
+                .interact(
+                    egui::Rect::from_center_size(c, egui::vec2(100.0, 22.0)),
+                    egui::Id::new("ntf-mas"),
+                    egui::Sense::click(),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            p.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                format!("ver {} más", (self.notifs.len() - visibles).min(NOTIFS_PAGE)),
+                egui::FontId::proportional(10.5),
+                if r.hovered() { WARM_ACCENT } else { WARM_SUB },
+            );
+            if r.clicked() {
+                self.notifs_shown += NOTIFS_PAGE;
+                self.isl_interact = now;
+            }
+        }
+        let c = egui::pos2(rect.right() - 50.0, by);
+        let r = ui
+            .interact(
+                egui::Rect::from_center_size(c, egui::vec2(80.0, 22.0)),
+                egui::Id::new("ntf-limpiar"),
+                egui::Sense::click(),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        p.text(
+            c,
+            egui::Align2::CENTER_CENTER,
+            "limpiar",
+            egui::FontId::proportional(10.5),
+            if r.hovered() { WARM_ACCENT } else { WARM_SUB },
+        );
+        if r.clicked() {
+            let _ = rice_common::event::history_clear();
+            self.reload_notifs(true);
+            self.notifs_shown = NOTIFS_PAGE;
+            self.isl_interact = now;
+        }
+
+        if let Some(at) = descartar {
+            let _ = rice_common::event::history_dismiss(at);
+            self.reload_notifs(true);
+            self.isl_interact = now;
+        }
+    }
 
     /// Media view: what is playing plus transport controls.
     fn panel_media(&mut self, ui: &mut egui::Ui, p: &egui::Painter, rect: egui::Rect, now: Instant) {
@@ -2568,6 +2770,7 @@ impl eframe::App for BarApp {
             self.isl_media = false;
             self.isl_timer = false;
             self.isl_devices = false;
+            self.isl_notifs = false;
             self.vol.clear();
             self.bright.clear();
             self.isl_interact = Instant::now();
@@ -2711,7 +2914,7 @@ fn main() -> eframe::Result<()> {
                 isl_h: 0.0,
                 isl_serial: 0,
                 isl_notif: None,
-                isl_expanded: false,
+                isl_expanded: std::env::var("GLAZEBAR_PANEL").is_ok(),
                 isl_interact: Instant::now(),
                 last_frame: Instant::now(),
                 ws_ind: None,
@@ -2750,6 +2953,13 @@ fn main() -> eframe::Result<()> {
                 isl_media: false,
                 isl_timer: false,
                 isl_devices: false,
+                // GLAZEBAR_PANEL=notifs abre ese panel al arrancar. Mismo
+                // proposito que GLAZEBAR_ICONTEST: poder mirar como queda algo
+                // sin tener que inyectar clics en el escritorio de nadie.
+                isl_notifs: std::env::var("GLAZEBAR_PANEL").as_deref() == Ok("notifs"),
+                notifs: Vec::new(),
+                notifs_stamp: None,
+                notifs_shown: NOTIFS_PAGE,
                 want_close: false,
                 want_back: false,
                 timer_left: Duration::from_secs(25 * 60),

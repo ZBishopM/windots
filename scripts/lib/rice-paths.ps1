@@ -58,4 +58,40 @@ function Set-RiceIsland {
     @{ icon = $Icon; title = $Title; body = $Body; accent = $Accent } |
         ConvertTo-Json -Compress | Set-Content $tmp -Encoding utf8
     [System.IO.File]::Move($tmp, $Rice.Island, $true)
+    Add-RiceNotifHistory $Icon $Title $Body $Accent
+}
+
+# Anota una notificacion en el historial que lee el centro de notificaciones de
+# la barra (~/.config/notifications.json).
+#
+# El cerrojo con nombre es el MISMO que usa notifyd desde Rust
+# (rice_common::event::HISTORY_LOCK): los dos escriben aqui, y dos
+# escribir-y-renombrar a la vez perderian uno.
+#
+# Un mutex abandonado -- alguien murio teniendolo -- lanza
+# AbandonedMutexException y ESO CUENTA COMO TOMADO. Tragarse esa excepcion sin
+# mas dejaria el historial bloqueado para siempre por un unico proceso muerto.
+function Add-RiceNotifHistory {
+    param([string]$Icon, [string]$Title, [string]$Body, [string]$Accent)
+    $f = Join-Path $Rice.Config 'notifications.json'
+    $m = New-Object System.Threading.Mutex($false, 'Global\rice-notif-history')
+    $tengo = $false
+    try { $tengo = $m.WaitOne(2000) } catch [System.Threading.AbandonedMutexException] { $tengo = $true }
+    try {
+        $lista = @()
+        if (Test-Path $f) {
+            try { $lista = @(Get-Content $f -Raw | ConvertFrom-Json) } catch { $lista = @() }
+        }
+        $nueva = [pscustomobject]@{
+            icon = $Icon; title = $Title; body = $Body; accent = $Accent
+            at = [long][Math]::Floor(([DateTimeOffset]::UtcNow).ToUnixTimeMilliseconds())
+        }
+        $lista = @($nueva) + $lista | Select-Object -First 50
+        $tmp = "$f.tmp"
+        # ConvertTo-Json con un solo elemento produce un objeto y no un array, y
+        # el lado de Rust espera SIEMPRE un array. -AsArray lo fuerza.
+        $lista | ConvertTo-Json -Compress -Depth 4 -AsArray | Set-Content $tmp -Encoding utf8
+        [System.IO.File]::Move($tmp, $f, $true)
+    } catch { }
+    finally { if ($tengo) { try { $m.ReleaseMutex() } catch {} }; $m.Dispose() }
 }
