@@ -9,6 +9,6 @@ edition = "2021"
 rice-common = { path = "../rice-common" }
 windows-capture = "2"
 # CoInitializeEx(MTA) on the finisher/maker worker threads (WinRT calls need COM).
-windows = { version = "0.62", features = ["Win32_System_Com", "Win32_System_Threading", "Win32_Foundation", "Win32_Security"] }
+windows = { version = "0.62", features = ["Win32_System_Com", "Win32_System_Threading", "Win32_Foundation", "Win32_Security", "Storage_Streams", "Foundation"] }
 
 # Release profile lives at the workspace root (dev/Cargo.toml).

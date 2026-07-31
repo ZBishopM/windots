@@ -65,8 +65,10 @@ $saveLock = New-Object System.Threading.Mutex($false, 'Global\shadowplay-save')
 try { if (-not $saveLock.WaitOne(15000)) { exit 1 } }
 catch [System.Threading.AbandonedMutexException] { }   # previous save died; we own it now
 
-$segs = Get-ChildItem "$buf\seg*.mp4" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime
-if ($segs.Count -lt 2) { $saveLock.ReleaseMutex(); exit 1 }
+# OJO: aqui NO se puede comprobar que existan segmentos. El anillo vive en RAM y
+# el buffer esta vacio hasta que un corte lo vuelca; una comprobacion previa
+# saldria siempre por la puerta de error. La unica comprobacion valida es
+# despues, sobre lo que el corte haya dejado.
 
 # ---------------------------------------------------------------------------
 # PEDIR EL CORTE, en vez de esperar al siguiente.

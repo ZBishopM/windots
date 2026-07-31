@@ -168,28 +168,23 @@ if ($mb -gt $tope) {
     exit 1
 }
 
-# curl.exe, NO `Invoke-RestMethod -Form`.
+# curl.exe en vez de `Invoke-RestMethod -Form`, por el -w: da el codigo HTTP y
+# los BYTES REALMENTE ENVIADOS, y sin ese par de numeros no habia forma de saber
+# por que fallaban las subidas. El log solo decia "respuesta inesperada de
+# catbox:" y nada detras -- la misma linea valia para un userhash malo, un
+# archivo rechazado, la red cortada o un fallo del servidor.
 #
-# Con -Form, PowerShell manda el cuerpo troceado (chunked) en cuanto pasa de unos
-# pocos KB, y sin Content-Length el PHP de catbox no llena $_FILES: contesta
-# HTTP 200 con el CUERPO VACIO. Eso es lo que llenaba el log de "respuesta
-# inesperada de catbox:" sin nada detras -- diez de trece subidas desde ayer.
-# Medido, con userhash valido y el mismo destino:
+# Con los numeros se vio en una sola pasada:
 #
-#   .txt de 22 bytes   -Form   -> https://files.catbox.moe/...   OK
-#   1 MB               -Form   -> ''            (200, cuerpo vacio)
-#   4 MB               -Form   -> ''            (200, cuerpo vacio)
-#   4 MB               curl    -> https://files.catbox.moe/...   OK, 24,1 s
+#   HTTP=200 enviado=6253695B en 39,8s   cuerpo vacio
+#
+# El archivo entero llega (enviado = tamano exacto), catbox contesta 200, y el
+# cuerpo viene vacio. Es de su lado. Ver los reintentos mas abajo.
 #
 # curl.exe viene con Windows desde 10 1803 y esta en system32; no es dependencia
 # nueva. --form-string para los campos de texto: con -F, un valor que empiece por
-# @ o < se interpretaria como nombre de archivo.
-#
-# El codigo HTTP se pide a proposito: catbox tambien falla a veces con 200 y
-# cuerpo vacio cuando le llegan muchas subidas seguidas, y sin el codigo las dos
-# averias -- la de chunked y la de throttling -- se ven exactamente igual en el
-# log ("respuesta inesperada", nada detras). Va en una linea aparte al final para
-# no ensuciar la URL.
+# @ o < se interpretaria como nombre de archivo. La linea de -w va al final y se
+# separa del cuerpo al leerla, para no ensuciar la URL.
 $curl = @(
     '-s', '--show-error', '--max-time', '600',
     '-w', "`nHTTP=%{http_code} enviado=%{size_upload}B en %{time_total}s",

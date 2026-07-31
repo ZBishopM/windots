@@ -1,8 +1,19 @@
 // WGC rolling-buffer recorder. Captures the primary monitor via
 // Windows.Graphics.Capture and hardware-encodes to a ring of short HEVC MP4
 // segments. System audio AND the microphone (WASAPI via two sysaudio-loopback
-// helpers, s16le 48kHz stereo) are each written to a parallel ring of raw PCM
-// files -- seg*.pcm and seg*.mic.pcm -- and mixed with the video at save time.
+// helpers, s16le 48kHz stereo) go to parallel rings of raw PCM, and are mixed
+// with the video at save time.
+//
+// ALL THREE RINGS LIVE IN RAM and only reach the disk when a cut asks for them.
+// The buffer used to write ~1.5 MB/s continuously -- 127 GB a day -- to keep 60
+// seconds of history for a feature used a handful of times a day. Measured after
+// the move: 0.1 KB/s at rest, and a cut dumps all 12 segments in 56 ms. It costs
+// ~150 MB of RAM (388 against 240 MB private).
+//
+// The dump writes plain seg{NN}.mp4 / .pcm / .mic.pcm files with each segment's
+// real close time as the mtime, so the save script sees exactly what it saw when
+// the ring was on disk and did not have to change. That mtime is not cosmetic:
+// the saver derives each segment's duration from the gap between two of them.
 //
 // Why audio is NOT muxed live through the encoder: windows-capture's MF
 // MediaStreamSource pulls audio and video samples on a shared WinRT thread pool
@@ -18,11 +29,13 @@
 //     the MP4, ~1s) off the capture callback.
 // Usage: shadowplay-wgc [buffer_dir]
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
+use windows::Storage::Streams::{DataReader, IRandomAccessStream, InMemoryRandomAccessStream};
+use windows::core::Interface;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows_capture::{
     capture::{Context, GraphicsCaptureApiHandler},
@@ -98,6 +111,8 @@ struct Flags {
     audio_idx: Arc<AtomicUsize>,
     /// Puesta a true por el hilo que escucha CUT_EVENT.
     cut: Arc<AtomicBool>,
+    ring: Ring,
+    audio: AudioRing,
     w: u32,
     h: u32,
 }
@@ -107,10 +122,12 @@ struct Rec {
     seg_start: Instant,
     idx: usize,
     // Hand finished segments off the capture thread; finish() blocks ~1s.
-    finish_tx: Sender<(VideoEncoder, usize)>,
+    finish_tx: Sender<Done>,
     // Request the next segment's encoder and receive it pre-warmed.
     make_req_tx: Sender<usize>,
-    make_ready_rx: Receiver<VideoEncoder>,
+    make_ready_rx: Receiver<(VideoEncoder, SendStream)>,
+    // Flujo en RAM donde escribe el codificador actual.
+    stream: SendStream,
     // Shared with the audio thread so its PCM file rotates in lockstep with video.
     audio_idx: Arc<AtomicUsize>,
     // Raised from outside (Alt+F10) to close this segment early.
@@ -129,38 +146,162 @@ struct Rec {
     sent: u32,
 }
 
-fn make_encoder(dir: &str, idx: usize, w: u32, h: u32) -> Result<VideoEncoder, Err> {
-    let path = format!("{dir}\\seg{idx:02}.mp4");
-    let _ = std::fs::remove_file(&path);
-    Ok(VideoEncoder::new(
+/// Carries a WinRT stream between threads.
+///
+/// windows-rs 0.62 does not mark interface pointers `Send`, and rightly so in
+/// general. It is sound HERE for a specific reason: only two threads ever CALL a
+/// method on the stream -- the maker (which creates it) and the finisher (which
+/// reads it out) -- and both run `CoInitializeEx(MTA)`. Inside one MTA any
+/// object is callable from any thread with no marshalling. The capture thread
+/// touches the handle but never calls through it: it only moves it from the
+/// maker's channel to the finisher's, and moving a pointer is not a call.
+///
+/// The crate does the same thing for its D3D surfaces (`SendDirectX` in
+/// encoder.rs) for the same reason.
+struct SendStream(IRandomAccessStream);
+unsafe impl Send for SendStream {}
+
+/// A finished segment, still in RAM.
+struct Seg {
+    /// The complete MP4, moov included. Bytes and not the stream: the finisher
+    /// reads it out once, right after `finish()`, instead of every cut re-reading
+    /// all twelve streams through a `DataReader`.
+    bytes: Vec<u8>,
+    /// When it was closed. Written back as the file's mtime on dump, because the
+    /// save script derives each segment's duration from the gap between two
+    /// mtimes; dumping the whole ring at once would otherwise stamp them all with
+    /// the same instant and collapse a 30s clip down to one segment.
+    closed: SystemTime,
+}
+
+/// The ring, in RAM. `None` is a slot not filled yet (cold start) or one whose
+/// encoder is currently writing into it.
+type Ring = Arc<std::sync::Mutex<Vec<Option<Seg>>>>;
+
+fn make_encoder(w: u32, h: u32) -> Result<(VideoEncoder, SendStream), Err> {
+    // In RAM, not on disk. This buffer used to write ~1.5 MB/s continuously --
+    // 127 GB a day -- for a feature used a handful of times a day. Nothing
+    // reaches the disk now until a cut asks for it.
+    let stream: IRandomAccessStream = InMemoryRandomAccessStream::new()?.cast()?;
+    let enc = VideoEncoder::new_from_stream(
         VideoSettingsBuilder::new(w, h).frame_rate(TARGET_FPS).bitrate(BITRATE),
         // Audio muxed separately at save time (see file header) -> disable here.
         AudioSettingsBuilder::default().disabled(true),
         ContainerSettingsBuilder::default(),
-        &path,
-    )?)
+        stream.clone(),
+    )?;
+    Ok((enc, SendStream(stream)))
+}
+
+/// Read a finished stream out to a `Vec`. The crate itself shows this idiom in
+/// `encoder.rs`; there is no cheaper way -- a WinRT stream does not expose its
+/// backing buffer.
+fn stream_bytes(s: &IRandomAccessStream) -> Result<Vec<u8>, Err> {
+    let size = s.Size()?;
+    let reader = DataReader::CreateDataReader(&s.GetInputStreamAt(0)?)?;
+    reader.LoadAsync(size as u32)?.join()?;
+    let mut bytes = vec![0u8; size as usize];
+    reader.ReadBytes(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Write the whole ring to disk as `segNN.mp4`, plus the audio rings as
+/// `segNN.pcm` / `segNN.mic.pcm`. Only ever called on a cut.
+///
+/// Slots holding nothing get their stale file removed, so the save script can
+/// never pick up a segment left over from a previous lap of the ring.
+fn dump_ring(dir: &str, ring: &Ring, audio: &AudioRing) -> usize {
+    let mut written = 0;
+    let guard = ring.lock().unwrap();
+    let a = audio.lock().unwrap();
+    for (i, slot) in guard.iter().enumerate() {
+        let mp4 = format!("{dir}\\seg{i:02}.mp4");
+        let pcm = format!("{dir}\\seg{i:02}.pcm");
+        let mic = format!("{dir}\\seg{i:02}.mic.pcm");
+        match slot {
+            Some(seg) => {
+                if std::fs::write(&mp4, &seg.bytes).is_ok() {
+                    // La fecha ES el dato del que el script de guardado saca la
+                    // duracion. Sin esto los doce archivos saldrian con la misma
+                    // y el clip quedaria en un solo segmento.
+                    if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&mp4) {
+                        let _ = f.set_times(std::fs::FileTimes::new().set_modified(seg.closed));
+                    }
+                    written += 1;
+                }
+                let _ = std::fs::write(&pcm, &a.sys[i]);
+                let _ = std::fs::write(&mic, &a.mic[i]);
+            }
+            None => {
+                let _ = std::fs::remove_file(&mp4);
+                let _ = std::fs::remove_file(&pcm);
+                let _ = std::fs::remove_file(&mic);
+            }
+        }
+    }
+    written
+}
+
+/// The audio rings, in RAM alongside the video one. `sys` is system audio,
+/// `mic` the microphone; both s16le 48k stereo, one `Vec` per segment slot.
+struct Audio {
+    sys: Vec<Vec<u8>>,
+    mic: Vec<Vec<u8>>,
+}
+type AudioRing = Arc<std::sync::Mutex<Audio>>;
+
+/// What the capture thread hands over at a boundary.
+struct Done {
+    enc: VideoEncoder,
+    idx: usize,
+    stream: SendStream,
+    /// True when this boundary came from Alt+F10 rather than the 5s timer, and
+    /// so the ring has to reach the disk.
+    cut: bool,
 }
 
 // Background worker: finalize (flush + write moov) encoders handed to it. This is
 // the ~1s blocking call that must stay off the capture callback thread.
-fn spawn_finisher(dir: String) -> Sender<(VideoEncoder, usize)> {
-    let (tx, rx) = channel::<(VideoEncoder, usize)>();
+fn spawn_finisher(dir: String, ring: Ring, audio: AudioRing) -> Sender<Done> {
+    let (tx, rx) = channel::<Done>();
     std::thread::spawn(move || {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
-        while let Ok((enc, idx)) = rx.recv() {
+        while let Ok(d) = rx.recv() {
             let t = Instant::now();
-            match enc.finish() {
+            match d.enc.finish() {
                 Ok(()) => {
-                    // Escribir-y-renombrar: quien guarda sondea este archivo y no
-                    // puede leerlo a medio escribir.
-                    let tmp = format!("{dir}\\{CUT_MARK}.tmp");
-                    let dst = format!("{dir}\\{CUT_MARK}");
-                    if std::fs::write(&tmp, format!("seg{idx:02}")).is_ok() {
-                        let _ = std::fs::rename(&tmp, &dst);
+                    // El flujo ya tiene el MP4 entero, atomo moov incluido.
+                    match stream_bytes(&d.stream.0) {
+                        Ok(bytes) => {
+                            if let Ok(mut g) = ring.lock() {
+                                g[d.idx] = Some(Seg { bytes, closed: SystemTime::now() });
+                            }
+                        }
+                        Err(e) => eprintln!("seg{:02} read from RAM failed: {e}", d.idx),
                     }
-                    eprintln!("seg{idx:02} finished in {} ms", t.elapsed().as_millis());
+                    let fin = t.elapsed().as_millis();
+                    if d.cut {
+                        // Solo aqui se toca el disco.
+                        let w = Instant::now();
+                        let n = dump_ring(&dir, &ring, &audio);
+                        // Escribir-y-renombrar: quien guarda sondea este archivo
+                        // y no puede leerlo a medio escribir. Va DESPUES del
+                        // volcado: es la senal de que el anillo ya esta en disco.
+                        let tmp = format!("{dir}\\{CUT_MARK}.tmp");
+                        let dst = format!("{dir}\\{CUT_MARK}");
+                        if std::fs::write(&tmp, format!("seg{:02}", d.idx)).is_ok() {
+                            let _ = std::fs::rename(&tmp, &dst);
+                        }
+                        eprintln!(
+                            "seg{:02} finished in {fin} ms; dumped {n} segments in {} ms",
+                            d.idx,
+                            w.elapsed().as_millis()
+                        );
+                    } else {
+                        eprintln!("seg{:02} finished in {fin} ms", d.idx);
+                    }
                 }
                 Err(e) => eprintln!("segment finish failed: {e}"),
             }
@@ -171,9 +312,9 @@ fn spawn_finisher(dir: String) -> Sender<(VideoEncoder, usize)> {
 
 // Background worker: pre-build encoders for requested segment indices. Creating an
 // encoder blocks on PrepareTranscodeAsync, so we do it ~5s ahead of the boundary.
-fn spawn_maker(dir: String, w: u32, h: u32) -> (Sender<usize>, Receiver<VideoEncoder>) {
+fn spawn_maker(w: u32, h: u32) -> (Sender<usize>, Receiver<(VideoEncoder, SendStream)>) {
     let (req_tx, req_rx) = channel::<usize>();
-    let (ready_tx, ready_rx) = channel::<VideoEncoder>();
+    let (ready_tx, ready_rx) = channel::<(VideoEncoder, SendStream)>();
     std::thread::spawn(move || {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -183,7 +324,7 @@ fn spawn_maker(dir: String, w: u32, h: u32) -> (Sender<usize>, Receiver<VideoEnc
             // repo era un "~1s" en un comentario, sin medicion detras -- y de su
             // coste depende que un corte bajo demanda sea seguro.
             let t = Instant::now();
-            match make_encoder(&dir, idx, w, h) {
+            match make_encoder(w, h) {
                 Ok(e) => {
                     eprintln!("seg{idx:02} encoder ready in {} ms", t.elapsed().as_millis());
                     if ready_tx.send(e).is_err() {
@@ -213,14 +354,26 @@ impl GraphicsCaptureApiHandler for Rec {
         // Stale marker from a previous run: the saver would otherwise read it as
         // an answer to the cut it is about to ask for.
         let _ = std::fs::remove_file(format!("{dir}\\{CUT_MARK}"));
+        // Con el anillo en RAM, los archivos del arranque anterior sobran y solo
+        // pueden confundir al que guarda: se limpian de una.
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let n = e.file_name();
+                let n = n.to_string_lossy();
+                if n.starts_with("seg") {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
         // seg 0 built inline (capture isn't running yet, so no stall to hide).
-        let enc = make_encoder(&dir, 0, w, h)?;
-        let finish_tx = spawn_finisher(dir.clone());
-        let (make_req_tx, make_ready_rx) = spawn_maker(dir, w, h);
+        let (enc, stream) = make_encoder(w, h)?;
+        let finish_tx = spawn_finisher(dir.clone(), ctx.flags.ring, ctx.flags.audio);
+        let (make_req_tx, make_ready_rx) = spawn_maker(w, h);
         // Pre-warm seg 1 so the first boundary swap is instant.
         make_req_tx.send(1).ok();
         Ok(Self {
             enc: Some(enc),
+            stream,
             seg_start: Instant::now(),
             idx: 0,
             finish_tx,
@@ -281,10 +434,13 @@ impl GraphicsCaptureApiHandler for Rec {
             self.sent = 0;
             // Swap in the pre-warmed encoder (requested ~5s ago -> recv is instant),
             // then hand the old one to the finisher. The whole boundary is O(1).
-            let next = self.make_ready_rx.recv()?;
+            let (next, next_stream) = self.make_ready_rx.recv()?;
             let old = self.enc.replace(next).unwrap();
+            let old_stream = std::mem::replace(&mut self.stream, next_stream);
             let old_idx = self.idx;
-            self.finish_tx.send((old, old_idx)).ok();
+            self.finish_tx
+                .send(Done { enc: old, idx: old_idx, stream: old_stream, cut: asked })
+                .ok();
             self.idx = (self.idx + 1) % RING;
             // Move the audio PCM file to the same index (keeps A/V aligned).
             self.audio_idx.store(self.idx, Ordering::Relaxed);
@@ -304,16 +460,19 @@ impl GraphicsCaptureApiHandler for Rec {
     }
 }
 
-// Read s16le PCM from a sysaudio-loopback child and write it to a per-segment file,
-// reopening a fresh one whenever the capture thread advances audio_idx at a segment
-// boundary. mic=false captures system audio -> seg{idx}.pcm; mic=true captures the
-// microphone (--mic) -> seg{idx}.mic.pcm. Both are wallclock-paced (silence-filled
-// when idle), so they line up with the video and with each other; the save step
-// mixes them. Mixing at save (not live) is why the mic can't drag the framerate.
-fn spawn_audio(dir: String, audio_idx: Arc<AtomicUsize>, mic: bool) {
+// Read s16le PCM from a sysaudio-loopback child into the RAM ring, moving to a
+// fresh slot whenever the capture thread advances audio_idx at a segment
+// boundary. mic=false captures system audio; mic=true captures the microphone
+// (--mic). Both are wallclock-paced (silence-filled when idle), so they line up
+// with the video and with each other; the save step mixes them. Mixing at save
+// (not live) is why the mic can't drag the framerate.
+//
+// A slot is a `Vec` that gets cleared, not reallocated: after one lap of the ring
+// every slot has grown to a full segment's worth (~960 KB) and stays there, so
+// the steady state does no allocation at all.
+fn spawn_audio(audio: AudioRing, audio_idx: Arc<AtomicUsize>, mic: bool) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let ext = if mic { "mic.pcm" } else { "pcm" };
     let lb = std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(|p| p.join("sysaudio-loopback.exe")))
@@ -332,20 +491,20 @@ fn spawn_audio(dir: String, audio_idx: Arc<AtomicUsize>, mic: bool) {
         };
         let Some(mut out) = child.stdout.take() else { return };
         let mut cur = usize::MAX;
-        let mut file: Option<std::fs::File> = None;
         let mut buf = [0u8; 4096];
         loop {
             match out.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     let want = audio_idx.load(Ordering::Relaxed);
+                    let Ok(mut g) = audio.lock() else { break };
+                    let ring = if mic { &mut g.mic } else { &mut g.sys };
                     if want != cur {
-                        file = std::fs::File::create(format!("{dir}\\seg{want:02}.{ext}")).ok();
+                        // Slot nuevo: se vacia, conservando su capacidad.
+                        ring[want].clear();
                         cur = want;
                     }
-                    if let Some(f) = file.as_mut() {
-                        let _ = f.write_all(&buf[..n]);
-                    }
+                    ring[want].extend_from_slice(&buf[..n]);
                 }
             }
         }
@@ -380,8 +539,14 @@ fn main() {
     std::fs::create_dir_all(&dir).ok();
 
     let audio_idx = Arc::new(AtomicUsize::new(0));
-    spawn_audio(dir.clone(), audio_idx.clone(), false); // system audio -> seg*.pcm
-    spawn_audio(dir.clone(), audio_idx.clone(), true); //  microphone   -> seg*.mic.pcm
+    // Los tres anillos viven en RAM y solo se vuelcan a disco en un corte.
+    let ring: Ring = Arc::new(std::sync::Mutex::new((0..RING).map(|_| None).collect()));
+    let audio: AudioRing = Arc::new(std::sync::Mutex::new(Audio {
+        sys: vec![Vec::new(); RING],
+        mic: vec![Vec::new(); RING],
+    }));
+    spawn_audio(audio.clone(), audio_idx.clone(), false); // audio del sistema
+    spawn_audio(audio.clone(), audio_idx.clone(), true); //  microfono
 
     // Cut-on-demand listener. Costs nothing while idle: parked in
     // WaitForSingleObject(INFINITE), never scheduled until someone signals.
@@ -440,7 +605,7 @@ fn main() {
         min_update,
         DirtyRegionSettings::Default,
         ColorFormat::Rgba8,
-        Flags { dir, audio_idx, cut, w, h },
+        Flags { dir, audio_idx, cut, ring, audio, w, h },
     );
     eprintln!("wgc recorder (video + parallel-pcm audio) started");
     Rec::start(settings).expect("capture failed");
