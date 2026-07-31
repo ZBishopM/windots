@@ -132,7 +132,12 @@ function Step-RiceComponent {
     if ($st.Fails -lt $need) { return }
 
     Write-RiceLog "unhealthy for $($st.Fails) checks -> restarting" $name
-    Get-Process $Component.Match -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+    # Kill propio cuando el componente lo trae. Hace falta siempre que Match no
+    # sea un nombre de proceso -- con Check='Mutex' lo que hay ahi es el nombre
+    # de un mutex, y `Get-Process` sobre eso no mata nada: la instancia vieja
+    # seguiria parada, y la nueva se suicidaria al no poder tomar el mutex.
+    if ($Component.Kill) { & $Component.Kill }
+    else { Get-Process $Component.Match -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue }
     Start-Sleep -Milliseconds 600
     if (Start-RiceComponent $Component) { $st.StartedAt = Get-Date }
     $st.Fails = 0

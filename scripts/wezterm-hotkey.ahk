@@ -90,6 +90,23 @@
     ; De paso deja de importar cuanto tarde el script en arrancar.
     proc := ""
     try proc := WinGetProcessName("A")
+
+    ; El corte se pide AQUI, antes de lanzar nada.
+    ;
+    ; El grabador cierra el segmento en el fotograma siguiente y vuelca el anillo
+    ; a disco; eso son ~300 ms que hasta ahora empezaban a contar DESPUES de que
+    ; arrancara pwsh (~250 ms). Pidiendolo desde aqui, las dos cosas corren a la
+    ; vez y el segmento suele estar listo antes de que el script pregunte.
+    ;
+    ; 0x0002 es EVENT_MODIFY_STATE, lo justo para SetEvent. Si el grabador no
+    ; esta, OpenEventW devuelve 0 y no pasa nada: el script lo intenta por su
+    ; cuenta como antes.
+    h := DllCall("OpenEventW", "UInt", 0x0002, "Int", 0, "Str", "Global\rice-shadowplay-cut", "Ptr")
+    if h {
+        DllCall("SetEvent", "Ptr", h)
+        DllCall("CloseHandle", "Ptr", h)
+    }
+
     Run('pwsh -NoProfile -WindowStyle Hidden -File "' . EnvGet('USERPROFILE') . '\.config\shadowplay-wgc-save.ps1" -Foreground "' . proc . '"', , 'Hide')
 }
 

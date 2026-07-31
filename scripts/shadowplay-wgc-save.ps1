@@ -91,17 +91,32 @@ $marca   = Join-Path $buf 'last-finished.txt'
 function Get-Marca { if (Test-Path $marca) { (Get-Content $marca -Raw -EA SilentlyContinue).Trim() } else { '' } }
 $antes   = Get-Marca
 $marcado = ''
-try {
-    $ev = [System.Threading.EventWaitHandle]::OpenExisting('Global\rice-shadowplay-cut')
-    [void]$ev.Set()
-    $ev.Dispose()
-    $tope = (Get-Date).AddSeconds(4)
-    while ((Get-Date) -lt $tope) {
-        $ahora = Get-Marca
-        if ($ahora -and $ahora -ne $antes) { $marcado = $ahora; break }
-        Start-Sleep -Milliseconds 20
-    }
-} catch { }   # grabador parado o sin el evento: se cae al camino de respaldo
+
+# Puede que el corte YA este pedido y hasta servido: wezterm-hotkey.ahk señaliza
+# el evento en el instante de la pulsacion, en paralelo con el arranque de pwsh.
+#
+# Se distingue por la EDAD de la marca. Es fiable porque el grabador solo la
+# escribe en un corte -- las rotaciones normales cada 5 s no la tocan -- asi que
+# una marca de hace menos de 2 s solo puede ser la respuesta a esta pulsacion. Y
+# los guardados van serializados por el mutex de mas arriba, asi que tampoco
+# puede ser la de otro.
+$edad = if (Test-Path $marca) { ((Get-Date) - (Get-Item $marca).LastWriteTime).TotalSeconds } else { 999 }
+$viaAhk = $edad -lt 2.0
+if ($viaAhk) { $marcado = $antes }
+
+if (-not $marcado) {
+    try {
+        $ev = [System.Threading.EventWaitHandle]::OpenExisting('Global\rice-shadowplay-cut')
+        [void]$ev.Set()
+        $ev.Dispose()
+        $tope = (Get-Date).AddSeconds(4)
+        while ((Get-Date) -lt $tope) {
+            $ahora = Get-Marca
+            if ($ahora -and $ahora -ne $antes) { $marcado = $ahora; break }
+            Start-Sleep -Milliseconds 20
+        }
+    } catch { }   # grabador parado o sin el evento: se cae al camino de respaldo
+}
 
 # Un segmento esta listo cuando su video Y su audio estan cerrados. No basta con
 # el .mp4: el audio va en archivos .pcm paralelos que el grabador libera aparte,
@@ -183,13 +198,24 @@ else {
 }
 if ($last.Count -lt 1) { $saveLock.ReleaseMutex(); exit 1 }
 
-# Dejar por escrito hasta donde llega el clip y cuanto costo. 'espera' es el dato
-# que de verdad interesa: de la pulsacion a tener el segmento en disco.
+# Dejar por escrito hasta donde llega el clip y cuanto costo.
+#
+# 'desfase' NO es una medida de perdida. Es la distancia entre el final del clip
+# y el arranque de ESTE script, y su signo dice por que camino se fue:
+#
+#   positivo  el corte se pidio aqui, o sea despues de arrancar -> el clip
+#             termina un poco despues (0,1-0,8 s medidos)
+#   negativo  lo pidio AHK en el instante de la pulsacion, antes de que pwsh
+#             existiera -> el clip termina ANTES de que este script arranque,
+#             que es exactamente lo que se buscaba
+#
+# En los dos casos el clip llega hasta el momento de la pulsacion; lo que cambia
+# es cuanto sobra por detras.
 $finClip = $last[-1].LastWriteTime
-("{0} seleccion: {1} segmentos [{2}] | corte={3} | espera {4:N2}s | fin del clip {5:HH:mm:ss.fff} | margen {6:N1}s" -f `
+("{0} seleccion: {1} segmentos [{2}] | corte={3} ({4}) | espera {5:N2}s | fin del clip {6:HH:mm:ss.fff} | desfase {7:N1}s" -f `
     (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $last.Count, (($last | ForEach-Object { $_.BaseName }) -join ','),
-    $(if ($marcado) { $marcado } else { 'respaldo' }), ((Get-Date) - $pulsado).TotalSeconds,
-    $finClip, ($finClip - $pulsado).TotalSeconds) |
+    $(if ($marcado) { $marcado } else { 'respaldo' }), $(if ($viaAhk) { 'ahk' } else { 'aqui' }),
+    ((Get-Date) - $pulsado).TotalSeconds, $finClip, ($finClip - $pulsado).TotalSeconds) |
     Add-Content -Path (Join-Path $Rice.LogDir 'clip-share.log') -Encoding utf8
 
 # Per-run temp names under TEMP (not fixed names in the buffer dir, which the

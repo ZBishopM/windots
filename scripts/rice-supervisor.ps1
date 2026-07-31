@@ -115,6 +115,17 @@ $Components = @(
 # The old check was `count -lt 2 -> launch both`, which on a single-monitor
 # machine (or with the second display asleep) never reached 2 and therefore
 # spawned two processes every 30s forever.
+#
+# Y con comprobacion de salud, porque una barra puede quedarse VIVA Y PARADA. Le
+# paso: el reloj se quedo congelado en 03:11 mientras el proceso seguia con
+# Responding=True y su mutex tomado, o sea invisible para las dos formas de
+# comprobar que habia aqui. La barra escribe bar-alive-<x>.txt desde su bucle de
+# dibujo cada 5 s; si ese archivo envejece, es que dejo de pintar.
+#
+# Kill propio: el reinicio generico hace `Get-Process $Match`, y aqui Match es el
+# nombre de un mutex, no de un proceso -- no mataria nada, y la instancia nueva
+# se suicidaria contra el mutex de la vieja. Ademas hay que matar SOLO la barra
+# de este monitor, que se distingue por su --x en la linea de comandos.
 foreach ($m in $Rice.Monitors) {
     $mon = $m
     $Components += @{
@@ -123,6 +134,16 @@ foreach ($m in $Rice.Monitors) {
         Path        = { Get-RiceExe 'glaze-bar.exe' }
         Args        = { @('--x', $mon.X, '--width', $mon.Width) }.GetNewClosure()
         MaxRestarts = 10
+        Health      = {
+            $f = Join-Path $Rice.Config "bar-alive-$($mon.X).txt"
+            if (-not (Test-Path $f)) { return $true }   # version vieja sin latido
+            ((Get-Date) - (Get-Item $f).LastWriteTime).TotalSeconds -lt 30
+        }.GetNewClosure()
+        Kill        = {
+            Get-CimInstance Win32_Process -Filter "Name='glaze-bar.exe'" -EA SilentlyContinue |
+                Where-Object { $_.CommandLine -match "--x\s+$($mon.X)\b" } |
+                ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }
+        }.GetNewClosure()
     }
 }
 

@@ -27,9 +27,32 @@ pub struct NowPlaying {
     pub can_prev: bool,
 }
 
+/// The session manager, built once per thread and kept.
+///
+/// `Manager::RequestAsync()` is not a cheap accessor: it crosses to NPSMSvc (the
+/// Now Playing Session Manager service) and waits. Calling it on every poll made
+/// that service the busiest thing on an idle desktop -- 427 s of CPU in 2h20m
+/// measured, with two bars asking every 1.5 s each. The manager stays valid for
+/// the life of the process and raises its own change events, so rebuilding it was
+/// pure waste.
+///
+/// Thread-local, not a global: the WinRT object is not `Sync` and every caller
+/// here already runs on its own polling thread.
+fn manager() -> Option<Manager> {
+    thread_local! {
+        static MGR: std::cell::RefCell<Option<Manager>> = const { std::cell::RefCell::new(None) };
+    }
+    MGR.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.is_none() {
+            *m = Manager::RequestAsync().ok()?.get().ok();
+        }
+        m.clone()
+    })
+}
+
 fn session() -> Option<Session> {
-    let mgr = Manager::RequestAsync().ok()?.get().ok()?;
-    mgr.GetCurrentSession().ok()
+    manager()?.GetCurrentSession().ok()
 }
 
 /// The current session's metadata, or None when nothing is playing or paused.

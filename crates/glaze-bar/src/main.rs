@@ -1205,6 +1205,8 @@ struct BarApp {
     win_h: i32,              // last window height requested
     panel_rect: Option<egui::Rect>, // where the bubble is, for outside-click hit testing
     last_opacity_write: Instant,
+    /// Ultimo latido escrito para el supervisor. Ver `update`.
+    last_beat: Instant,
 }
 
 
@@ -1900,6 +1902,23 @@ impl eframe::App for BarApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Latido para el supervisor, escrito DESDE EL BUCLE DE DIBUJO y no desde
+        // un hilo aparte, porque lo que hay que poder detectar es exactamente
+        // que el dibujo se pare.
+        //
+        // Paso de verdad: el reloj de la barra se quedo congelado en 03:11
+        // mientras el proceso seguia vivo y con Responding=True, o sea invisible
+        // para toda comprobacion por proceso o por mutex. Un hilo aparte habria
+        // seguido latiendo tan tranquilo. Reiniciar la barra lo arreglo.
+        //
+        // Cada 5 s: sys_thread pide un repintado cada 1,5 s pase lo que pase, asi
+        // que un latido de mas de 30 s de antiguedad significa parada de verdad y
+        // no escritorio quieto.
+        if self.last_beat.elapsed() >= Duration::from_secs(5) {
+            self.last_beat = Instant::now();
+            let p = rice_common::config::config_path(&format!("bar-alive-{}.txt", self.x));
+            let _ = std::fs::write(p, "1");
+        }
         if !self.sized {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(self.width, 34.0)));
             self.sized = true;
@@ -2740,6 +2759,7 @@ fn main() -> eframe::Result<()> {
                 win_h: 0,
                 panel_rect: None,
                 last_opacity_write: Instant::now(),
+                last_beat: Instant::now(),
             }))
         }),
     )
