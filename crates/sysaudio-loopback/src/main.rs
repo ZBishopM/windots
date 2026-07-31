@@ -18,6 +18,7 @@
 
 use std::io::Write;
 use std::time::{Duration, Instant};
+use rice_common::audioshare;
 use windows::core::*;
 use windows::Win32::Media::Audio::*;
 use windows::Win32::System::Com::*;
@@ -26,14 +27,60 @@ const OUT_RATE: f64 = 48000.0;
 
 fn main() -> Result<()> {
     let mic = std::env::args().any(|a| a == "--mic");
+    // --publish-only: no hay nadie al otro lado de stdout. Lo lanzan las barras
+    // cuando el grabador no esta corriendo y por tanto nadie publica el audio del
+    // sistema. Se apaga solo cuando dejan de leerle, para no quedar de huerfano
+    // si muere quien lo lanzo (que puede morir sin correr su Drop).
+    let solo_publicar = std::env::args().any(|a| a == "--publish-only");
+
+    // El audio del sistema se publica SIEMPRE en memoria compartida, lo lea
+    // alguien o no. Antes cada consumidor abria su propia captura WASAPI: dos
+    // barras (para el espectro) mas el grabador, tres clientes del mismo
+    // endpoint. El microfono no se comparte porque solo lo usa el grabador.
+    // UN SOLO escritor en el anillo, y con prioridad clara.
+    //
+    // Hay dos clases de instancia y no da igual cual publique: la del grabador
+    // vive siempre (esta supervisada) y ya captura de todas formas para los
+    // clips; la de --publish-only solo existe para tapar el hueco cuando el
+    // grabador no esta. Sin desempate, la barra arranca antes en el login,
+    // levanta la suya, y luego llega la del grabador y quedan DOS escribiendo el
+    // mismo anillo -- que es peor que las tres capturas que esto venia a quitar
+    // (paso, medido: tres procesos donde deberian ser dos).
+    //
+    // Asi que la del grabador toma PRIMARIO y publica; la de --publish-only se
+    // aparta en cuanto ese mutex aparece, al arrancar y cada dos segundos.
+    const PRIMARIO: &str = "Global\rice-audio-primary";
+    let publicador = if mic {
+        None
+    } else if solo_publicar {
+        if rice_common::win::mutex_taken(PRIMARIO) {
+            return Ok(()); // ya publica el del grabador: sobramos
+        }
+        audioshare::Publisher::create(audioshare::SYS_NAME, OUT_RATE as u32)
+    } else {
+        rice_common::win::single_instance(PRIMARIO);
+        audioshare::Publisher::create(audioshare::SYS_NAME, OUT_RATE as u32)
+    };
+    // Que no vuelva a fallar en silencio: la primera version pedia el mapeo en
+    // Global\, que un proceso sin elevar no puede crear, y el unico sintoma era
+    // que las barras se quedaban sin espectro.
+    if !mic && publicador.is_none() {
+        eprintln!("no pude crear el anillo compartido {}", audioshare::SYS_NAME);
+    }
+
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
         let stdout = std::io::stdout();
-        let mut out = std::io::BufWriter::with_capacity(1 << 16, stdout.lock());
+        let mut sink = Sink {
+            out: std::io::BufWriter::with_capacity(1 << 16, stdout.lock()),
+            stage: Vec::with_capacity(4096),
+            publicador,
+            a_stdout: !solo_publicar,
+        };
         // Reopen on any capture error (device invalidated / format change) so the
         // pipe to the reader never permanently closes.
         loop {
-            if let Err(e) = capture(&mut out, mic) {
+            if let Err(e) = capture(&mut sink, mic, solo_publicar) {
                 eprintln!("{}: {e:?}; reopening endpoint", if mic { "mic" } else { "loopback" });
                 std::thread::sleep(Duration::from_millis(300));
             }
@@ -41,7 +88,52 @@ fn main() -> Result<()> {
     }
 }
 
-unsafe fn capture<W: Write>(out: &mut W, mic: bool) -> Result<()> {
+/// Salida doble: el tubo de siempre y el anillo compartido.
+struct Sink<W: Write> {
+    out: W,
+    /// Fotogramas acumulados desde el ultimo volcado, para publicar por lotes en
+    /// vez de fotograma a fotograma (48.000 escrituras por segundo a memoria
+    /// compartida no tendrian sentido).
+    stage: Vec<i16>,
+    publicador: Option<audioshare::Publisher>,
+    a_stdout: bool,
+}
+
+impl<W: Write> Sink<W> {
+    fn frame(&mut self, l: f32, r: f32) {
+        let li = (l.clamp(-1.0, 1.0) * 32767.0) as i16;
+        let ri = (r.clamp(-1.0, 1.0) * 32767.0) as i16;
+        if self.a_stdout {
+            // One 4-byte write per frame, not two 2-byte ones: at 48 kHz stereo
+            // that halves the call count on the hottest path in the project.
+            let mut buf = [0u8; 4];
+            buf[0..2].copy_from_slice(&li.to_le_bytes());
+            buf[2..4].copy_from_slice(&ri.to_le_bytes());
+            let _ = self.out.write_all(&buf);
+        }
+        if self.publicador.is_some() {
+            self.stage.push(li);
+            self.stage.push(ri);
+        }
+    }
+
+    /// Devuelve false si el tubo se cerro, que es como se detecta que el lector
+    /// se fue.
+    fn flush(&mut self) -> bool {
+        if let Some(p) = &self.publicador {
+            if !self.stage.is_empty() {
+                p.write(&self.stage);
+                self.stage.clear();
+            }
+        }
+        if !self.a_stdout {
+            return true;
+        }
+        self.out.flush().is_ok()
+    }
+}
+
+unsafe fn capture<W: Write>(out: &mut Sink<W>, mic: bool, solo_publicar: bool) -> Result<()> {
     let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
     // Mic = default capture endpoint, no loopback flag. Otherwise = default render
     // endpoint captured in loopback mode.
@@ -95,6 +187,9 @@ unsafe fn capture<W: Write>(out: &mut W, mic: bool) -> Result<()> {
     let mut frames_out: u64 = 0;
     let mut last_packet = Instant::now();
     let mut last_dev_check = start;
+    // Solo se usan en --publish-only; ver el final del bucle.
+    let mut ultimas_lecturas = 0u64;
+    let mut sin_lectores = start;
     const IDLE_SECS: f64 = 0.15;
 
     loop {
@@ -129,12 +224,12 @@ unsafe fn capture<W: Write>(out: &mut W, mic: bool) -> Result<()> {
                 }
                 // Linear resample from in_rate -> OUT_RATE.
                 if (ratio - 1.0).abs() < 1e-6 {
-                    write_frame(out, l, r)?;
+                    out.frame(l, r);
                     frames_out += 1;
                 } else {
                     while resamp_pos < 1.0 {
                         let t = resamp_pos as f32;
-                        write_frame(out, prev_l + (l - prev_l) * t, prev_r + (r - prev_r) * t)?;
+                        out.frame(prev_l + (l - prev_l) * t, prev_r + (r - prev_r) * t);
                         frames_out += 1;
                         resamp_pos += 1.0 / ratio;
                     }
@@ -155,7 +250,7 @@ unsafe fn capture<W: Write>(out: &mut W, mic: bool) -> Result<()> {
             // starves and the whole recording freezes).
             let expected = (now.duration_since(start).as_secs_f64() * OUT_RATE) as u64;
             while frames_out < expected {
-                write_frame(out, 0.0, 0.0)?;
+                out.frame(0.0, 0.0);
                 frames_out += 1;
             }
         }
@@ -175,8 +270,31 @@ unsafe fn capture<W: Write>(out: &mut W, mic: bool) -> Result<()> {
         // flushes/s is cheap; the per-frame writes were the expensive part.
         // It doubles as the liveness check: once the reader (cava / ffmpeg) is
         // gone the write fails and we exit instead of running on as an orphan.
-        if out.flush().is_err() {
+        if !out.flush() {
             std::process::exit(0);
+        }
+        // En --publish-only no hay tubo que se cierre, asi que la senal de que
+        // sobramos es que nadie lea el anillo. Sin esto, un helper lanzado por
+        // una barra que luego muere de golpe se quedaria capturando para nadie.
+        if solo_publicar {
+            // Llego el del grabador: nos apartamos para no escribir dos en el
+            // mismo anillo.
+            if now.duration_since(last_dev_check).as_secs_f64() > 2.0
+                && rice_common::win::mutex_taken("Global\rice-audio-primary")
+            {
+                std::process::exit(0);
+            }
+            if let Some(p) = &out.publicador {
+                let r = p.reads();
+                if r == ultimas_lecturas {
+                    if now.duration_since(sin_lectores).as_secs() >= 30 {
+                        std::process::exit(0);
+                    }
+                } else {
+                    ultimas_lecturas = r;
+                    sin_lectores = now;
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -189,18 +307,4 @@ unsafe fn endpoint_id(dev: &IMMDevice) -> Option<String> {
     let s = p.to_string().ok();
     CoTaskMemFree(Some(p.0 as *const core::ffi::c_void));
     s
-}
-
-#[inline]
-fn write_frame<W: Write>(out: &mut W, l: f32, r: f32) -> Result<()> {
-    // One 4-byte write per frame, not two 2-byte ones: at 48 kHz stereo that
-    // halves the call count on the hottest path in the project (96k -> 48k per
-    // second, per instance, and three instances run permanently).
-    let li = (l.clamp(-1.0, 1.0) * 32767.0) as i16;
-    let ri = (r.clamp(-1.0, 1.0) * 32767.0) as i16;
-    let mut buf = [0u8; 4];
-    buf[0..2].copy_from_slice(&li.to_le_bytes());
-    buf[2..4].copy_from_slice(&ri.to_le_bytes());
-    out.write_all(&buf).ok();
-    Ok(())
 }

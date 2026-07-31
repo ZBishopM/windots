@@ -9,6 +9,7 @@ extern "system" {
     fn GetCurrentProcess() -> isize;
     fn K32EmptyWorkingSet(process: isize) -> i32;
     fn CreateMutexW(attr: *const core::ffi::c_void, owner: i32, name: *const u16) -> isize;
+    fn OpenMutexW(access: u32, inherit: i32, name: *const u16) -> isize;
     fn CreateEventW(attr: *const core::ffi::c_void, manual: i32, initial: i32, name: *const u16) -> isize;
     fn OpenEventW(access: u32, inherit: i32, name: *const u16) -> isize;
     fn SetEvent(h: isize) -> i32;
@@ -59,6 +60,26 @@ pub fn single_instance_or_exit(name: &str) {
     if !single_instance(name) {
         std::process::exit(0);
     }
+}
+
+/// Is somebody else already holding this named mutex?
+///
+/// Distinto de `single_instance`, que TOMA el mutex. Esto sólo mira, para poder
+/// preguntar "¿hay ya un dueño para esto?" sin convertirse en el dueño.
+pub fn mutex_taken(name: &str) -> bool {
+    #[cfg(windows)]
+    unsafe {
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        let w = wide(name);
+        let h = OpenMutexW(SYNCHRONIZE, 0, w.as_ptr());
+        if h == 0 {
+            return false;
+        }
+        CloseHandle(h);
+        true
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 /// A named Win32 auto-reset event: the house pattern for "another process wants

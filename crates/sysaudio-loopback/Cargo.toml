@@ -5,6 +5,8 @@ edition = "2021"
 
 # WASAPI capture (loopback or microphone) -> s16le on stdout.
 [dependencies]
+# Sin features: solo se usa `audioshare`, que es Win32 a pelo.
+rice-common = { path = "../rice-common" }
 windows = { version = "0.58", features = [
   "Win32_Foundation",
   "Win32_Media_Audio",

@@ -36,3 +36,8 @@ pub mod media;
 
 #[cfg(feature = "spectrum")]
 pub mod spectrum;
+
+/// Anillo de audio en memoria compartida: un capturador, varios lectores.
+/// Sin dependencias -- Win32 a pelo, como `win` -- asi que va sin feature.
+#[cfg(windows)]
+pub mod audioshare;
