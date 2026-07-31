@@ -2457,6 +2457,14 @@ impl eframe::App for BarApp {
         let anim = rice_common::settings::Settings::live().animation.clone();
         let anim_ws = anim.workspace_ease;
         let bar_strip_h = self.bar_h();
+        // ANTES de tomar el cerrojo de `shared`: esto necesita `&mut self` y ese
+        // cerrojo mantiene prestado `self` durante todo el dibujado.
+        //
+        // Se sondea aqui y no solo al abrir un panel porque el indicador vive
+        // ahora en la fila de stats, siempre a la vista, y tiene que estar al dia
+        // sin que nadie abra nada. Dentro se limita a una lectura por segundo.
+        self.refresh_atajo();
+        let atajo = self.atajo;
         let s = self.shared.lock().unwrap();
         // Translucent bar (live-adjustable) so the desktop / a borderless game shows through.
         // Derived from BAR_BG rather than re-typing its channels, so the palette
@@ -2511,6 +2519,7 @@ impl eframe::App for BarApp {
                 let now_i = Instant::now();
                 let dt = (now_i - self.last_frame).as_secs_f32().clamp(0.0, 0.05);
                 self.last_frame = now_i;
+
 
                 // Workspaces, clock and metrics are the bar. Over a fullscreen
                 // application none of them are worth covering a pixel of it, so
@@ -2596,6 +2605,25 @@ impl eframe::App for BarApp {
                         if !self.tray.is_empty() {
                             ui.add_space(10.0);
                         }
+
+                        // Estado de Alt+F10, junto al resto de indicadores.
+                        //
+                        // Estaba solo dentro del centro de notificaciones, o sea
+                        // a un clic de distancia -- y la pregunta que resuelve
+                        // ("¿va a hacer algo si lo pulso?") uno se la hace ANTES
+                        // de pulsar, no despues de que no pase nada. El color ya
+                        // lo dice de un vistazo; el texto exacto, al pasar por
+                        // encima.
+                        let (rect_a, resp_a) =
+                            ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+                        draw_icon(ui.painter(), rect_a.center(), "\u{f03d}", 13.0, atajo.color());
+                        resp_a.on_hover_text(match atajo {
+                            Atajo::Vivo => "Alt+F10 activo",
+                            Atajo::Suspendido => "Alt+F10 suspendido — Win+Shift+Z lo devuelve",
+                            Atajo::Caido => "Alt+F10 CAIDO — AutoHotkey no responde",
+                        });
+                        ui.add_space(12.0);
+
                         let dim = egui::Color32::from_rgb(180, 180, 195);
                         if !s.gpu.is_empty() {
                             ui.colored_label(egui::Color32::from_rgb(255, 205, 120), format!("GPU {}", s.gpu));
