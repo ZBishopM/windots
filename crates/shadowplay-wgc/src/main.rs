@@ -37,6 +37,26 @@ use windows_capture::{
 };
 
 const SEG_SECS: u64 = 5;
+/// Fotogramas por segundo del clip. UN solo numero: lo usa el codificador y lo
+/// usa el marcapasos de `on_frame_arrived`. Que fueran dos cosas distintas es
+/// justo lo que estaba roto.
+///
+/// El monitor primario de esta maquina va a 165 Hz, asi que WGC entrega ~165
+/// fotogramas por segundo y hasta ahora TODOS se mandaban al codificador, que
+/// estaba configurado a 60. Quien decidia cuales sobrevivian era el sumidero de
+/// Media Foundation, y lo hace de la forma ingenua: se queda uno solo si su
+/// marca de tiempo esta a mas de 1/60 s del ultimo que guardo. Con una fuente de
+/// 165 Hz eso nunca se cumple a los 2 tics (12,1 ms < 16,7 ms), asi que siempre
+/// espera 3 -> 165/3 = 55 fps. De ahi el "~55 fps" que ya estaba anotado en la
+/// cabecera de este archivo sin explicacion, y los 51,9 unicos medidos sobre un
+/// clip real de partida.
+const TARGET_FPS: u32 = 60;
+/// Periodo objetivo en unidades de 100 ns, que es lo que usa `SystemRelativeTime`.
+const FRAME_PERIOD_100NS: i64 = 10_000_000 / TARGET_FPS as i64;
+/// Si la captura se para (juego minimizado, pantalla en reposo) el vencimiento
+/// se queda atras y al volver mandaria una rafaga intentando recuperar. Pasado
+/// este hueco se resincroniza en vez de recuperar.
+const PACER_RESYNC_100NS: i64 = 10_000_000; // 1 s
 // 12 slots = ~60s of history for a 30s clip. It used to be 8 (~40s), which was
 // enough only while every segment lasted the full SEG_SECS. Cut-on-demand ends
 // segments early, so each save spends a slot on a partial one and the buffer
@@ -95,13 +115,25 @@ struct Rec {
     audio_idx: Arc<AtomicUsize>,
     // Raised from outside (Alt+F10) to close this segment early.
     cut: Arc<AtomicBool>,
+    // Marcapasos: marca de tiempo a partir de la cual toca mandar el siguiente
+    // fotograma. Avanza SIEMPRE un periodo exacto, nunca se reengancha a la
+    // marca del fotograma que acaba de pasar -- esa es toda la diferencia entre
+    // 60 fps y 55. Reengancharse haria que dos tics de una fuente de 165 Hz
+    // (12,1 ms) nunca alcanzaran el periodo de 16,7 ms y siempre se esperaran 3.
+    // Dejandolo avanzar en firme, el vencimiento se desliza dentro del tic y el
+    // patron sale 3,3,3,2,3,3,3,2... que promedia 2,75 tics = 60,000 fps.
+    next_due: Option<i64>,
+    // Cuantos entran y cuantos salen, para poder decir el numero en vez de
+    // suponerlo. Se vuelca cada SEG_SECS.
+    seen: u32,
+    sent: u32,
 }
 
 fn make_encoder(dir: &str, idx: usize, w: u32, h: u32) -> Result<VideoEncoder, Err> {
     let path = format!("{dir}\\seg{idx:02}.mp4");
     let _ = std::fs::remove_file(&path);
     Ok(VideoEncoder::new(
-        VideoSettingsBuilder::new(w, h).frame_rate(60).bitrate(BITRATE),
+        VideoSettingsBuilder::new(w, h).frame_rate(TARGET_FPS).bitrate(BITRATE),
         // Audio muxed separately at save time (see file header) -> disable here.
         AudioSettingsBuilder::default().disabled(true),
         ContainerSettingsBuilder::default(),
@@ -196,6 +228,9 @@ impl GraphicsCaptureApiHandler for Rec {
             make_ready_rx,
             audio_idx,
             cut,
+            next_due: None,
+            seen: 0,
+            sent: 0,
         })
     }
 
@@ -204,6 +239,21 @@ impl GraphicsCaptureApiHandler for Rec {
         frame: &mut Frame,
         _ctrl: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
+        // Marcapasos a TARGET_FPS. Sin esto se le mandaban al codificador los
+        // ~165 fps del monitor y era el sumidero de MF quien elegia cuales
+        // sobrevivian, con la regla ingenua que acaba dando 55. Ver TARGET_FPS.
+        self.seen += 1;
+        let ts = frame.timestamp()?.Duration;
+        let due = *self.next_due.get_or_insert(ts);
+        if ts < due {
+            return Ok(()); // demasiado pronto para el objetivo: se descarta
+        }
+        self.next_due = Some(if ts - due > PACER_RESYNC_100NS {
+            ts + FRAME_PERIOD_100NS // hubo parada larga: reenganchar
+        } else {
+            due + FRAME_PERIOD_100NS // avance en firme
+        });
+        self.sent += 1;
         self.enc.as_mut().unwrap().send_frame(frame)?;
 
         // A cut requested from outside (Alt+F10) closes the segment right here
@@ -219,6 +269,16 @@ impl GraphicsCaptureApiHandler for Rec {
             if asked {
                 self.cut.store(false, Ordering::Relaxed);
             }
+            let secs = age.as_secs_f32().max(0.001);
+            eprintln!(
+                "seg{:02} {:.2}s  wgc {:.1}/s -> codificados {:.1}/s",
+                self.idx,
+                secs,
+                self.seen as f32 / secs,
+                self.sent as f32 / secs
+            );
+            self.seen = 0;
+            self.sent = 0;
             // Swap in the pre-warmed encoder (requested ~5s ago -> recv is instant),
             // then hand the old one to the finisher. The whole boundary is O(1).
             let next = self.make_ready_rx.recv()?;
@@ -349,12 +409,35 @@ fn main() {
     // crate's padded-surface fallback (an extra per-frame GPU copy).
     let w = monitor.width().unwrap_or(FALLBACK_W);
     let h = monitor.height().unwrap_or(FALLBACK_H);
+    // El aviso de arriba, en codigo: si la propiedad no existe (Windows
+    // anterior), crear la sesion con Custom falla entera, asi que se comprueba.
+    let min_update = if windows_capture::graphics_capture_api::GraphicsCaptureApi::
+        is_minimum_update_interval_supported()
+        .unwrap_or(false)
+    {
+        MinimumUpdateIntervalSettings::Custom(std::time::Duration::from_micros(100))
+    } else {
+        eprintln!("MinUpdateInterval no soportado: el techo se queda en refresco/3");
+        MinimumUpdateIntervalSettings::Default
+    };
     let settings = Settings::new(
         monitor,
         CursorCaptureSettings::Default,
         DrawBorderSettings::WithoutBorder,
         SecondaryWindowSettings::Default,
-        MinimumUpdateIntervalSettings::Default,
+        // NO Default. Ese es el techo de 55 fps.
+        //
+        // Medido: con Default, WGC entrega exactamente 55,0 fotogramas por
+        // segundo, tres segmentos seguidos sin variacion, con el escritorio
+        // cambiando a tope. 55,0 = 165/3, y el monitor primario va a 165 Hz. El
+        // intervalo minimo por defecto es 1/60 s, y en una pantalla de 165 Hz el
+        // primer refresco que pasa de 16,67 ms es el TERCERO (18,18 ms), asi que
+        // el techo cae a 165/3 en vez de quedarse en 60.
+        //
+        // Con el minimo casi a cero WGC entrega los 165 y el marcapasos de
+        // on_frame_arrived elige 60 exactos. Los otros dos tercios se descartan
+        // antes de tocar el codificador, asi que no cuestan codificacion.
+        min_update,
         DirtyRegionSettings::Default,
         ColorFormat::Rgba8,
         Flags { dir, audio_idx, cut, w, h },
