@@ -1068,6 +1068,21 @@ const ACTIONS: [(&str, &str, [u8; 3]); 9] = [
 /// Cuantas notificaciones se ven de entrada; "ver mas" suma otra tanda.
 const NOTIFS_PAGE: usize = 4;
 
+/// Margen a los lados de la barra: cuanto se separan del borde de la pantalla
+/// los workspaces (izquierda) y los stats con la bandeja (derecha).
+///
+/// Era 10 y estaba pegado al canto. Contra el borde cuesta leer el icono y
+/// cuesta acertarle, porque el raton se para ahi y no se ve bien donde cae.
+///
+/// TRES SITIOS LO USAN y tienen que cuadrar, que es justo por lo que ahora es
+/// una constante: el margen del marco, el alto util (que resta el vertical dos
+/// veces) y el rectangulo del fondo (que lo suma dos veces para volver a tocar
+/// los bordes). Cambiar uno solo dejaba una franja sin pintar en un lado.
+const BAR_PAD_H: f32 = 22.0;
+/// Margen arriba y abajo. Separado del horizontal porque el alto de la barra es
+/// fijo y este si es un compromiso con el tamano de la fuente.
+const BAR_PAD_V: f32 = 5.0;
+
 /// Pasado esto sin latido, el atajo global se da por caido. El script escribe
 /// cada 5 s, asi que veinte son cuatro fallos seguidos y no una vuelta lenta.
 const AHK_STALE_SECS: u64 = 20;
@@ -2722,7 +2737,7 @@ impl eframe::App for BarApp {
             self.want_close = true;
         }
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(10.0, 5.0)))
+            .frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(BAR_PAD_H, BAR_PAD_V)))
             .show(ctx, |ui| {
                 // The window is TALLER than the bar whenever the bubble is open, so
                 // ui.max_rect() is not the bar. Everything here is positioned against
@@ -2732,15 +2747,15 @@ impl eframe::App for BarApp {
                 let win = ui.max_rect();
                 let full = egui::Rect::from_min_size(
                     win.min,
-                    egui::vec2(win.width(), (bar_strip_h - 10.0).max(1.0)),
+                    egui::vec2(win.width(), (bar_strip_h - BAR_PAD_V * 2.0).max(1.0)),
                 );
                 // Only the strip gets the bar colour. Anything below it belongs to
                 // the bubble and must stay transparent so the island is the only
                 // thing drawn there.
                 ui.painter().rect_filled(
                     egui::Rect::from_min_size(
-                        win.min - egui::vec2(10.0, 5.0),
-                        egui::vec2(win.width() + 20.0, bar_strip_h),
+                        win.min - egui::vec2(BAR_PAD_H, BAR_PAD_V),
+                        egui::vec2(win.width() + BAR_PAD_H * 2.0, bar_strip_h),
                     ),
                     egui::Rounding::ZERO,
                     bar_bg,

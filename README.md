@@ -205,7 +205,8 @@ nadie ajusta dos veces. Todos en `crates/glaze-bar/src/main.rs`.
 
 | Qué | Dónde | Ojo |
 |---|---|---|
-| Padding global de la barra | `Frame::none().inner_margin(Margin::symmetric(10.0, 5.0))` | **Acoplado**: el `- 10.0` del alto útil y el `+ 20.0` del fondo compensan ese mismo margen. Si cambias el 10/5 hay que cambiar los tres |
+| **Separación de los bordes de pantalla** | `const BAR_PAD_H` (22.0) | Cuánto se apartan del canto los workspaces y los stats/bandeja. Era 10 y quedaba pegado, difícil de leer y de acertar |
+| Margen arriba/abajo | `const BAR_PAD_V` (5.0) | Compromiso con el tamaño de la fuente; el alto de la barra es fijo |
 | Hueco entre workspaces | `ui.add_space(5.0)` tras cada pill | |
 | Padding del pill de workspace | `Margin::symmetric(9.0, 2.0)` | Es lo que hace los números anchos o estrechos |
 | Hueco entre métricas | seis `ui.add_space(12.0)` seguidos en el bloque `right_to_left` | Están los seis juntos; cámbialos a la vez |
