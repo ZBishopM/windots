@@ -130,6 +130,24 @@ mod rclick {
     pub type SubclassProc =
         unsafe extern "system" fn(isize, u32, usize, isize, usize, usize) -> isize;
 
+    /// La barra entera deja pasar el raton (pantalla completa debajo).
+    ///
+    /// AQUI Y NO EN `WS_EX_TRANSPARENT`, y esto costo una medicion: ese bit
+    /// SOLO no hace click-through. Comprobado con una ventana de 1920x1080
+    /// enfocada y el bit puesto -- `WindowFromPoint(400,10)` seguia devolviendo
+    /// glaze-bar, o sea que el clic era suyo. Funciona acompañado de
+    /// `WS_EX_LAYERED` (asi lo hace ws-slide), pero anadir LAYERED a una ventana
+    /// con contexto OpenGL obliga a mantener sus atributos y puede romper el
+    /// dibujado.
+    ///
+    /// Responder al hit-testing no tiene ese problema y es exactamente la misma
+    /// pregunta: `WM_NCHITTEST` es lo que Windows usa para decidir de quien es
+    /// el clic, y `HTTRANSPARENT` significa "no es mio, mira debajo".
+    pub static PASAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    /// HWND de la barra, para el hilo vigilante. 0 = todavia no resuelto.
+    pub static HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
     pub unsafe extern "system" fn proc_(
         hwnd: isize,
         msg: u32,
@@ -138,8 +156,14 @@ mod rclick {
         _id: usize,
         _refdata: usize,
     ) -> isize {
-        if msg == WM_NCHITTEST && (GetAsyncKeyState(VK_RBUTTON) as u16 & 0x8000) != 0 {
-            return HTTRANSPARENT;
+        if msg == WM_NCHITTEST {
+            let pasar = PASAR.load(std::sync::atomic::Ordering::Relaxed);
+            // El derecho SIEMPRE atraviesa, mande lo que mande PASAR: la barra no
+            // hace nada con el boton secundario.
+            let derecho = (GetAsyncKeyState(VK_RBUTTON) as u16 & 0x8000) != 0;
+            if pasar || derecho {
+                return HTTRANSPARENT;
+            }
         }
         DefSubclassProc(hwnd, msg, w, l)
     }
@@ -320,6 +344,33 @@ unsafe fn fullscreen_on_monitor(my: isize) -> bool {
         w = GetWindow(w, GW_HWNDNEXT);
     }
     false
+}
+
+/// Vigila si toca dejar pasar el raton, en su propio hilo y cada 150 ms.
+///
+/// POR QUE NO EN `update()`: la decision estaba atada al repintado, y la barra
+/// en reposo repinta una vez por segundo. Sumando la puerta de 0,5 s del tick,
+/// entre poner una aplicacion a pantalla completa y que la barra dejase de comer
+/// clics pasaba hasta segundo y medio -- justo el rato en que uno hace el clic
+/// que se pierde.
+///
+/// Aqui no se toca egui ni nada suyo: solo se lee la geometria de las ventanas y
+/// se escribe un atomico que consulta el hit-test. Por eso puede ir en un hilo
+/// aparte sin sincronizar con el dibujado.
+#[cfg(windows)]
+fn spawn_clickthrough_watcher() {
+    std::thread::spawn(|| loop {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let hwnd = rclick::HWND.load(std::sync::atomic::Ordering::Relaxed);
+        if hwnd == 0 {
+            continue;
+        }
+        let want = unsafe { should_clickthrough(hwnd) };
+        if want != rclick::PASAR.load(std::sync::atomic::Ordering::Relaxed) {
+            rclick::PASAR.store(want, std::sync::atomic::Ordering::Relaxed);
+            unsafe { set_clickthrough(hwnd, want) };
+        }
+    });
 }
 
 /// Should the bar ignore mouse input right now?
@@ -2450,6 +2501,9 @@ impl eframe::App for BarApp {
                         unsafe {
                             rclick::SetWindowSubclass(self.hwnd, rclick::proc_, rclick::ID, 0);
                         }
+                        // El vigilante trabaja sobre este HWND. Se republica al
+                        // cambiar porque eframe puede recrear la ventana.
+                        rclick::HWND.store(self.hwnd, std::sync::atomic::Ordering::Relaxed);
                     }
                     // Re-assert TOPMOST too. The style bit survives an explorer
                     // restart but the z-band ordering does not: measured, a bar
@@ -2463,7 +2517,7 @@ impl eframe::App for BarApp {
                         const SWP: u32 = 0x0001 | 0x0002 | 0x0010; // NOSIZE NOMOVE NOACTIVATE
                         SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP);
                     }
-                    let want = unsafe { should_clickthrough(self.hwnd) };
+                    let want = rclick::PASAR.load(std::sync::atomic::Ordering::Relaxed);
                     if want != self.clickthrough {
                         // Solo al cambiar: registrarlo dos veces por segundo
                         // llenaria el archivo y no diria nada. Se anota QUIEN lo
@@ -2499,7 +2553,8 @@ impl eframe::App for BarApp {
                     // nunca sobre un juego: la unica forma de quitarla era
                     // esperar los 4 s. Aqui recupera el raton exactamente
                     // mientras hay algo que descartar, y solo entonces.
-                    unsafe { set_clickthrough(self.hwnd, want) };
+                    // Aplicarlo ya no se hace aqui: lo hace el vigilante cada
+                    // 150 ms. Este tick solo lo lee para el log y para `hidden`.
                 }
                 // Live-reload bar opacity from the file (so editing it directly also
                 // updates in real time), except while the slider owns the value.
@@ -3289,6 +3344,8 @@ fn main() -> eframe::Result<()> {
             let s4 = shared.clone();
             let ctx4 = cc.egui_ctx.clone();
             std::thread::spawn(move || island_watcher(s4, ctx4));
+            #[cfg(windows)]
+            spawn_clickthrough_watcher();
             Ok(Box::new(BarApp {
                 shared,
                 width,
