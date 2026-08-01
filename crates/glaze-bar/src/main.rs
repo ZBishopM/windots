@@ -89,6 +89,7 @@ extern "system" {
 #[cfg(windows)]
 extern "system" {
     fn SetWindowRgn(hwnd: isize, rgn: isize, redraw: i32) -> i32;
+    fn SetLayeredWindowAttributes(hwnd: isize, key: u32, alpha: u8, flags: u32) -> i32;
     fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
 }
 
@@ -147,6 +148,10 @@ mod rclick {
 
     /// HWND de la barra, para el hilo vigilante. 0 = todavia no resuelto.
     pub static HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+    /// Opacidad de la barra en 0..255, publicada para que el modo en capas la
+    /// use y no cambie de aspecto al entrar y salir de click-through.
+    pub static ALPHA: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(200);
 
     pub unsafe extern "system" fn proc_(
         hwnd: isize,
@@ -437,13 +442,55 @@ extern "system" {
     fn DwmSetWindowAttribute(hwnd: isize, attr: u32, val: *const core::ffi::c_void, len: u32) -> i32;
 }
 
+/// Dejar pasar el raton A OTRO PROCESO exige LAYERED + TRANSPARENT juntos.
+///
+/// Los dos intentos anteriores fallaron por la misma razon y conviene que quede
+/// escrito:
+///
+/// 1. `WS_EX_TRANSPARENT` solo: el bit se pone, pero la barra se sigue quedando
+///    el clic. Medido con `SendMessage(WM_NCHITTEST)`, devolvia HTCLIENT.
+/// 2. Responder `HTTRANSPARENT` al hit-test: la barra deja de quedarselo -- eso
+///    si funciona -- pero el clic **no llega a nadie**. HTTRANSPARENT continua
+///    la busqueda entre las ventanas del MISMO hilo; cruzar de proceso no lo
+///    hace. Medido sinteticamente: un clic en (400,400) llego a la ventana de
+///    debajo y el de (400,10) se perdio.
+///
+/// La pareja LAYERED + TRANSPARENT es la que Windows enruta de verdad, y es la
+/// que ya usa ws-slide para su superposicion.
+///
+/// LAYERED solo se pone MIENTRAS hace falta. Una ventana en capas sin atributos
+/// no se compone -- se queda invisible -- asi que hay que fijar
+/// `SetLayeredWindowAttributes`, y eso sustituye el alfa por pixel de la barra
+/// por uno uniforme. Ponerlo siempre cambiaria como se ve en el escritorio
+/// normal; ponerlo solo sobre una aplicacion a pantalla completa lo limita a los
+/// ratos en que lo que importa es que el clic pase.
 #[cfg(windows)]
 unsafe fn set_clickthrough(hwnd: isize, on: bool) {
     const GWL_EXSTYLE: i32 = -20;
     const WS_EX_TRANSPARENT: isize = 0x20;
+    const WS_EX_LAYERED: isize = 0x0008_0000;
+    const LWA_ALPHA: u32 = 0x2;
     let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-    let new = if on { ex | WS_EX_TRANSPARENT } else { ex & !WS_EX_TRANSPARENT };
+    let new = if on {
+        ex | WS_EX_TRANSPARENT | WS_EX_LAYERED
+    } else {
+        ex & !WS_EX_TRANSPARENT & !WS_EX_LAYERED
+    };
+    if new == ex {
+        return;
+    }
     SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new);
+    if on {
+        // Sin esto la ventana en capas no se dibuja en absoluto. El alfa se deja
+        // en la opacidad configurada de la barra, que es lo mas parecido a como
+        // se veia antes de entrar en este modo.
+        let a = rclick::ALPHA.load(std::sync::atomic::Ordering::Relaxed);
+        SetLayeredWindowAttributes(hwnd, 0, a, LWA_ALPHA);
+    }
+    // FRAMECHANGED: sin el, Windows sigue usando las metricas viejas y el cambio
+    // de estilo puede no aplicarse hasta el siguiente evento de ventana.
+    const SWP: u32 = 0x0002 | 0x0001 | 0x0004 | 0x0020 | 0x0010;
+    SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP);
 }
 
 // Environment flags are read once, not per call / per frame: dlog ran an
@@ -2411,6 +2458,10 @@ impl BarApp {
         if wrote && now.duration_since(self.last_opacity_write).as_secs_f32() > 0.12 {
             self.last_opacity_write = now;
             write_opacity("bar-opacity.txt", self.bar_opacity);
+            rclick::ALPHA.store(
+                (self.bar_opacity.clamp(0.05, 1.0) * 255.0) as u8,
+                std::sync::atomic::Ordering::Relaxed,
+            );
             write_opacity("term-opacity.txt", self.term_opacity);
         }
     }
