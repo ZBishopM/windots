@@ -7,7 +7,7 @@
   "mics": ["hyperx", "snowball"],
   "outputs": ["hyperx", "vg270", "airpods"],
   "clickthrough_apps": ["league of legends", "valorant"],
-  "hide_bar_on_fullscreen": true,
+  "hide_bar_on_fullscreen": false,
 
   "clips": {
     "upload": true,

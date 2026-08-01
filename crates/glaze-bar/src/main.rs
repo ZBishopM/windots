@@ -50,6 +50,10 @@ extern "system" {
     fn GetWindowLongPtrW(hwnd: isize, idx: i32) -> isize;
     fn SetWindowLongPtrW(hwnd: isize, idx: i32, new: isize) -> isize;
     fn GetClassNameW(hwnd: isize, buf: *mut u16, n: i32) -> i32;
+    // Recorrido del orden Z, para saber quien cubre un monitor sin depender de
+    // quien tiene el foco. Ver `fullscreen_on_monitor`.
+    fn GetTopWindow(parent: isize) -> isize;
+    fn GetWindow(hwnd: isize, cmd: u32) -> isize;
 }
 #[cfg(windows)]
 extern "system" {
@@ -86,6 +90,59 @@ extern "system" {
 extern "system" {
     fn SetWindowRgn(hwnd: isize, rgn: isize, redraw: i32) -> i32;
     fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
+}
+
+/// El clic DERECHO atraviesa la barra siempre.
+///
+/// La barra no hace absolutamente nada con el boton secundario: cero
+/// `secondary_clicked`, cero menus contextuales en todo el crate. Se lo tragaba
+/// y punto, asi que el menu contextual de lo que hubiera debajo -- el escritorio,
+/// una pestaña del navegador, el reproductor -- no salia nunca en los 34 px de
+/// arriba.
+///
+/// `WS_EX_TRANSPARENT` deja pasar los dos botones, pero solo esta puesto sobre
+/// pantalla completa. Para el resto del tiempo hace falta responder al
+/// hit-testing: `WM_NCHITTEST` llega ANTES de que se despache el mensaje del
+/// boton, y en ese instante `GetAsyncKeyState` ya ve el derecho pulsado.
+/// Devolver `HTTRANSPARENT` manda ese clic a la ventana de debajo.
+///
+/// Estrecho a proposito: solo con el derecho fisicamente pulsado. El izquierdo,
+/// el hover y el resto de mensajes caen en `DefSubclassProc` sin tocar.
+#[cfg(windows)]
+mod rclick {
+    pub const WM_NCHITTEST: u32 = 0x0084;
+    pub const HTTRANSPARENT: isize = -1;
+    pub const VK_RBUTTON: i32 = 0x02;
+    /// Identificador del subclaseo. Cualquier valor sirve; solo tiene que ser
+    /// el mismo para poner y quitar.
+    pub const ID: usize = 0x9146;
+
+    #[link(name = "comctl32")]
+    extern "system" {
+        pub fn SetWindowSubclass(hwnd: isize, proc_: SubclassProc, id: usize, refdata: usize) -> i32;
+        pub fn DefSubclassProc(hwnd: isize, msg: u32, w: usize, l: isize) -> isize;
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        pub fn GetAsyncKeyState(vk: i32) -> i16;
+    }
+
+    pub type SubclassProc =
+        unsafe extern "system" fn(isize, u32, usize, isize, usize, usize) -> isize;
+
+    pub unsafe extern "system" fn proc_(
+        hwnd: isize,
+        msg: u32,
+        w: usize,
+        l: isize,
+        _id: usize,
+        _refdata: usize,
+    ) -> isize {
+        if msg == WM_NCHITTEST && (GetAsyncKeyState(VK_RBUTTON) as u16 & 0x8000) != 0 {
+            return HTTRANSPARENT;
+        }
+        DefSubclassProc(hwnd, msg, w, l)
+    }
 }
 
 /// Clip the window to the bar strip plus an optional bubble.
@@ -202,26 +259,67 @@ unsafe fn fullscreen_on_monitor(my: isize) -> bool {
     if GetMonitorInfoW(mon, &mut mi) == 0 {
         return false;
     }
-    let fg = GetForegroundWindow();
-    if fg == 0 || fg == my {
-        return false;
-    }
-    if is_shell_surface(&class_of(fg)) {
-        return false;
-    }
-    let mut r = Rect { left: 0, top: 0, right: 0, bottom: 0 };
-    if GetWindowRect(fg, &mut r) == 0 {
-        return false;
-    }
     // A tiled/maximised window sits BELOW the bar; only a true fullscreen window
     // covers the monitor's top strip too. A few pixels of slack, because some
     // borderless windows land a hair inside the monitor rect and an exact
     // comparison then misses them.
     const SLACK: i32 = 4;
-    r.left <= mi.rc_monitor.left + SLACK
-        && r.top <= mi.rc_monitor.top + SLACK
-        && r.right >= mi.rc_monitor.right - SLACK
-        && r.bottom >= mi.rc_monitor.bottom - SLACK
+    let cubre = |w: isize| -> bool {
+        let mut r = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+        if GetWindowRect(w, &mut r) == 0 {
+            return false;
+        }
+        r.left <= mi.rc_monitor.left + SLACK
+            && r.top <= mi.rc_monitor.top + SLACK
+            && r.right >= mi.rc_monitor.right - SLACK
+            && r.bottom >= mi.rc_monitor.bottom - SLACK
+    };
+
+    // Primero la ventana en primer plano, que es el caso normal y el barato.
+    let fg = GetForegroundWindow();
+    if fg != 0 && fg != my && !is_shell_surface(&class_of(fg)) && cubre(fg) {
+        return true;
+    }
+
+    // Y si no, se busca QUIEN CUBRE ESTE MONITOR, tenga el foco o no.
+    //
+    // Mirar solo el primer plano fallaba en el caso que mas molesta: video a
+    // pantalla completa en un monitor mientras el juego tiene el foco en el
+    // otro. Para la barra del video, la ventana enfocada esta en la otra
+    // pantalla y no cubre nada suyo, asi que nunca recibia click-through y se
+    // comia los clics del reproductor.
+    //
+    // Se recorre el orden Z de arriba abajo y se para en la primera ventana
+    // visible que no sea de las nuestras. Si esa cubre el monitor, el clic tiene
+    // que atravesar.
+    const GW_HWNDNEXT: u32 = 2;
+    const GWL_EXSTYLE_: i32 = -20;
+    const WS_EX_TOOLWINDOW_: isize = 0x80;
+    const WS_EX_TRANSPARENT_: isize = 0x20;
+    let mut w = GetTopWindow(0);
+    let mut vistas = 0;
+    while w != 0 && vistas < 40 {
+        vistas += 1;
+        if w != my && IsWindowVisible(w) != 0 {
+            let ex = GetWindowLongPtrW(w, GWL_EXSTYLE_);
+            // Se saltan overlays: barras, toasts y cualquier cosa ya
+            // click-through. Si no, la primera ventana del orden Z seria
+            // siempre la otra barra.
+            let overlay = ex & (WS_EX_TOOLWINDOW_ | WS_EX_TRANSPARENT_) != 0;
+            if !overlay && !is_shell_surface(&class_of(w)) {
+                let mut r = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+                if GetWindowRect(w, &mut r) != 0 && r.right > r.left && r.bottom > r.top {
+                    // La primera ventana real de este monitor manda: si no cubre,
+                    // hay algo normal delante y la barra debe seguir pulsable.
+                    if MonitorFromWindow(w, 2) == mon {
+                        return cubre(w);
+                    }
+                }
+            }
+        }
+        w = GetWindow(w, GW_HWNDNEXT);
+    }
+    false
 }
 
 /// Should the bar ignore mouse input right now?
@@ -2321,11 +2419,38 @@ impl eframe::App for BarApp {
                 // Re-resolve every tick, not just once: eframe can recreate the
                 // window, and a stale handle means click-through silently stops
                 // being applied to anything.
+                let antes = self.hwnd;
                 self.hwnd = find_own_window(self.x, self.width as i32);
                 if self.hwnd != 0 {
                     // Cheap no-op once done, but re-asserted because eframe can
                     // recreate the window under us.
                     unsafe { strip_native_frame(self.hwnd) };
+
+                    // NO ROBAR EL FOCO. Es la causa raiz del sintoma "hago clic
+                    // arriba y la barra se queda comiendo clics".
+                    //
+                    // Sin WS_EX_NOACTIVATE, un clic en la barra la pone en
+                    // primer plano. Y should_clickthrough devuelve false cuando
+                    // la ventana en primer plano es ella misma, asi que el
+                    // click-through se apagaba y NO se volvia a encender hasta
+                    // que otra ventana recuperaba el foco. Medido en su propio
+                    // log: una vez se quedo asi 2 min 19 s.
+                    //
+                    // NOACTIVATE deja llegar los clics a egui igual -- los
+                    // workspaces se siguen pulsando -- pero sin activar la
+                    // ventana. El cierre del panel no depende del foco: ya
+                    // sondea el cursor globalmente.
+                    unsafe { rice_common::win::harden_overlay(self.hwnd) };
+
+                    // El subclaseo va con el HWND, asi que se rehace si eframe
+                    // recrea la ventana. SetWindowSubclass con el mismo id es
+                    // idempotente, pero se limita al cambio para no llamarlo
+                    // dos veces por segundo para nada.
+                    if self.hwnd != antes {
+                        unsafe {
+                            rclick::SetWindowSubclass(self.hwnd, rclick::proc_, rclick::ID, 0);
+                        }
+                    }
                     // Re-assert TOPMOST too. The style bit survives an explorer
                     // restart but the z-band ordering does not: measured, a bar
                     // with WS_EX_TOPMOST still set sat UNDER a plain Firefox
@@ -2374,7 +2499,7 @@ impl eframe::App for BarApp {
                     // nunca sobre un juego: la unica forma de quitarla era
                     // esperar los 4 s. Aqui recupera el raton exactamente
                     // mientras hay algo que descartar, y solo entonces.
-                    unsafe { set_clickthrough(self.hwnd, want && self.isl_notif.is_none()) };
+                    unsafe { set_clickthrough(self.hwnd, want) };
                 }
                 // Live-reload bar opacity from the file (so editing it directly also
                 // updates in real time), except while the slider owns the value.
@@ -3058,7 +3183,13 @@ impl eframe::App for BarApp {
                     !(in_strip || in_bubble)
                 }
             };
-            let down = unsafe { (GetAsyncKeyState(0x01) as u16 & 0x8000) != 0 }; // VK_LBUTTON
+            // Los DOS botones. Solo con el izquierdo, un clic derecho fuera del
+            // panel no lo cerraba y ademas se perdia: la barra se lo tragaba sin
+            // hacer nada con el.
+            let down = unsafe {
+                (GetAsyncKeyState(0x01) as u16 & 0x8000) != 0   // VK_LBUTTON
+                    || (GetAsyncKeyState(0x02) as u16 & 0x8000) != 0 // VK_RBUTTON
+            };
             if down && outside {
                 self.close_panel();
                 ctx.request_repaint();

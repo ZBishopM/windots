@@ -76,6 +76,14 @@ if (-not (Get-Command cargo -EA SilentlyContinue)) {
 # most likely to fail on a fresh machine (missing/misresolved toolchain), and a
 # failure there used to abort the installer before a single config was written.
 Say '2/8  Deploy configs'
+# rice.json PRIMERO, y no es un detalle de orden: es la unica configuracion del
+# escritorio y hasta ahora este instalador NUNCA la desplegaba. Estaba solo en el
+# mapa de sync.ps1, que va en la direccion contraria (vivo -> repo). En una
+# maquina limpia no habia ~\.config\rice.json, asi que corrian los valores por
+# defecto de Rust en vez de estos, no habia nada que editar en caliente, y el
+# esquema tampoco llegaba -- o sea que el editor no autocompletaba ni validaba.
+Deploy "$repo\config\rice.json"                           "$home_\.config\rice.json"
+Deploy "$repo\config\rice.schema.json"                    "$home_\.config\rice.schema.json"
 Deploy "$repo\wezterm\.wezterm.lua"                       "$home_\.wezterm.lua"
 Deploy "$repo\config\fastfetch\config.jsonc"              "$home_\.config\fastfetch\config.jsonc"
 Deploy "$repo\config\fastfetch\duck.txt"                  "$home_\.config\fastfetch\duck.txt"
@@ -96,7 +104,7 @@ Deploy "$repo\nushell\config.nu"                          "$home_\AppData\Roamin
 # only meant re-deriving them by hand on the next machine.
 foreach ($f in 'glazewm-dwindle.ps1', 'glazewm-animcheck.ps1', 'rice-accent.ps1', 'wezterm-hotkey.ahk', 'shadowplay-record.ps1', 'shadowplay-record.vbs', 'shadowplay-wgc-save.ps1', 'shadowplay-wgc.vbs', 'rice-supervisor.ps1', 'rice-supervisor.vbs', 'rice-autostart.ps1', 'rice-autostart.vbs', 'rice-llm.ps1', 'rice-uninstall.ps1',
                'rice-trim-background.ps1', 'rice-trim-run.ps1', 'rice-tame-startup.ps1', 'rice-retire-replaced.ps1', 'rice-boot-report.ps1', 'rice-notif-banners.ps1', 'rice-tray-promote.ps1',
-               'rice-clip-share.ps1') {
+               'rice-clip-share.ps1', 'rice-onedrive-purge.ps1') {
     Deploy "$repo\scripts\$f" "$home_\.config\$f"
 }
 # Shared library dot-sourced by the scripts above (paths, GlazeWM IPC, process

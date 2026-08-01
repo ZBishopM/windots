@@ -44,6 +44,56 @@
       "description": "Hide the bar while a fullscreen application covers its monitor. It used to only go click-through there: still drawn, still on top of the game, just not clickable. Notifications are the exception -- the island still appears over a game, because the point of a notification is to be seen. Set false to go back to a bar that is always drawn."
     },
 
+    "notification_style": {
+      "type": "string",
+      "enum": ["toast", "island", "both"],
+      "default": "toast",
+      "description": "How notifyd redraws a Windows notification. \"toast\" pops the standalone window, \"island\" grows the bar's pill, \"both\" does the two. Over a fullscreen game it ALWAYS uses the island whatever this says: a toast is a new top-level window, and a new window over an exclusive-fullscreen game forces a display mode change that minimises it. Independent of this, every notification is recorded in notifications.json for the bar's notification centre."
+    },
+
+    "clips": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Alt+F10 replay clips. Read by the PowerShell side (rice-clip-share.ps1, shadowplay-wgc-save.ps1), not by the Rust binaries -- which is why it lives here but has no equivalent in settings.rs. The webhook URL is deliberately NOT here: this repo is public, so it goes in the gitignored rice-secrets.json.",
+      "properties": {
+        "upload": {
+          "type": "boolean",
+          "default": false,
+          "description": "Upload the clip after saving. Defaults to false on purpose: if this file is missing or unreadable the safe failure is to publish nothing, because an anonymous catbox upload cannot be deleted afterwards."
+        },
+        "host": {
+          "type": "string",
+          "enum": ["catbox", "litterbox"],
+          "default": "catbox",
+          "description": "catbox keeps the file indefinitely; litterbox expires it on its own and takes no userhash."
+        },
+        "litterbox_time": {
+          "type": "string",
+          "enum": ["1h", "12h", "24h", "72h"],
+          "default": "72h",
+          "description": "How long litterbox keeps it. Ignored when host is catbox."
+        },
+        "transcode": {
+          "type": "boolean",
+          "default": true,
+          "description": "Re-encode HEVC to H.264 before uploading. Discord is Chromium and does not decode H.265, so an untranscoded clip arrives as a download instead of playing in the channel. Costs ~6s with NVENC; buys playback, not size -- the file can come out bigger."
+        },
+        "cq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 51,
+          "default": 26,
+          "description": "NVENC quality for that re-encode. Lower is better and bigger."
+        },
+        "discord_when_focused": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Post the link to Discord only when one of these was the focused application at the moment Alt+F10 was pressed. Substring match, lowercased. The in-game process is 'League of Legends'; the launcher is 'LeagueClientUx' and deliberately does not match, because a lobby clip is not a play."
+        }
+      }
+    },
+
     "launcher": {
       "type": "object",
       "additionalProperties": false,

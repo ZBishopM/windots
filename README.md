@@ -126,14 +126,107 @@ la del Explorador, que siguen dependiendo de él.
 
 | Archivo | Para qué |
 |---|---|
-| `~/.config/rice.json` | Altura de la barra, lista de micros, URL del IPC. Se lee en caliente por los binarios; sin el archivo se usan los valores por defecto |
+| `~/.config/rice.json` | **Toda la configuración.** Ver [la tabla completa](#ricejson-todas-las-claves) |
+| `~/.config/rice.schema.json` | Esquema JSON del anterior: tu editor autocompleta y valida. Cada clave lleva su `description` |
 | `~/.config/lib/*.ps1` | Librería común de los scripts: rutas (`rice-paths`), cliente IPC de GlazeWM (`rice-ipc`), helpers de procesos (`rice-proc`) |
+| `~/.config/rice-secrets.json` | **No versionado.** Webhook de Discord y userhash de catbox. Este repo es público |
 | `sync.ps1` | Copia el sistema vivo → repo (lo inverso de `install.ps1`). `-Check` sólo reporta diferencias y sale con código 1 |
 
-Los binarios Rust viven en un **workspace cargo** (`~/dev/Cargo.toml`, **13 crates**):
+#### Dónde está el código de verdad
+
+**`~/dev/crates` es el árbol vivo. `dotfiles/crates` es una copia** que mueve
+`sync.ps1`. Se edita y se compila en `~/dev`; el repo se actualiza después.
+Editar dentro de `dotfiles/` y compilar allí no cambia nada de lo que corre.
+
+```
+editar ~/dev/crates/...  →  cd ~/dev; cargo build --release  →  reiniciar el
+proceso  →  pwsh dotfiles/sync.ps1   (trae el cambio al repo)
+```
+
+Los binarios viven en un **workspace cargo** (`~/dev/Cargo.toml`, **13 crates**):
 `rice-common` (la librería compartida, no produce ejecutable) más doce binarios que
 compilan juntos a `~/dev/target/release/`. Al estar en el mismo directorio, el
 grabador y `cava` encuentran a su hermano `sysaudio-loopback.exe` sin paso de copia.
+
+---
+
+### rice.json: todas las claves
+
+La columna que importa es la última. **En caliente** significa que guardas el
+archivo y el cambio se ve en ≤2 s sin reiniciar nada — lo hace
+`Settings::live()` (`rice-common/src/settings.rs`), que mira la fecha del archivo
+como mucho una vez por segundo y sólo relee si cambió. **Reinicio** significa que
+el valor se lee una vez con `Settings::get()` (un `OnceLock` que no revalida
+nunca) y hay que reiniciar el proceso que lo usa.
+
+| Clave | Tipo | Por defecto | Cuándo se aplica |
+|---|---|---|---|
+| `ipc_url` | string | `ws://127.0.0.1:6123` | Reinicio. **Nunca `localhost`**: resuelve a `::1` primero y cada conexión pierde ~2,1 s esperando el timeout de IPv6 |
+| `bar_height` | 16–120 | `34` | **Reinicio de la barra.** Lo usan también `ws-slide` (filas que la animación no toca) y el recorte de la ventana |
+| `mics` | string[] | `["hyperx","snowball"]` | Reinicio. Orden de preferencia de `micswitch` |
+| `outputs` | string[] | `["hyperx","vg270","airpods"]` | En caliente, al reabrir el panel de dispositivos |
+| `clickthrough_apps` | string[] | `[]` | Reinicio. Aplicaciones sobre las que la barra deja pasar los clics aunque la geometría no diga "pantalla completa" |
+| `hide_bar_on_fullscreen` | bool | `true` | **En caliente.** `false` = la barra se sigue dibujando sobre una aplicación a pantalla completa (los clics la atraviesan igual) |
+| `notification_style` | `toast` \| `island` \| `both` | `toast` | En caliente. Sobre un juego a pantalla completa usa SIEMPRE la isla, diga lo que diga |
+| `launcher.index_store_apps` | bool | `false` | Reinicio del launcher |
+| `launcher.index_files` | bool | `true` | Reinicio del launcher |
+| `launcher.file_skip` | string[] | 23 rutas | Reinicio. Subcadenas en minúsculas; una ruta que contenga cualquiera no se indexa |
+| `launcher.file_roots` | string[] | `[]` | Reinicio. Vacío = todas las unidades fijas |
+| `launcher.file_limit` | int | `4000000` | Reinicio. Tope de entradas del índice |
+| `clips.*` | — | — | Por guardado. Lo leen los **scripts**, no los binarios: ver el esquema |
+| `animation.*` | — | — | **En caliente**, ver abajo |
+
+---
+
+### Cambiar la barra
+
+#### Animación — sin recompilar
+
+Edita `~/.config/rice.json` y guarda. El efecto tarda ≤2 s: hasta 1 s del sondeo
+por fecha y hasta 1 s del repintado en reposo. Si la barra está animando algo
+(espectro sonando, panel abierto) es inmediato.
+
+| Clave | Por defecto | Qué mueve |
+|---|---|---|
+| `pill_ease` | `15.0` | Velocidad con la que la píldora central crece y encoge (ancho **y** alto). Más alto = más seco |
+| `spring_stiffness` | `300.0` | Rigidez del muelle vertical del panel desplegable |
+| `spring_damping` | `23.0` | Amortiguación de ese muelle. **Deliberadamente subamortiguado**: rebota y se asienta, que es lo que lo hace parecer una burbuja saliendo de la barra y no un menú apareciendo. Subirlo lo vuelve sobrio; bajarlo, gomoso |
+| `workspace_ease` | `16.0` | Deslizamiento del indicador ámbar entre workspaces |
+| `text_ease` | `14.0` | Reloj creciendo y desplazándose al centro cuando se abre el panel |
+| `notification_hold_secs` | `4.0` | Segundos que una notificación se queda en la isla |
+| `panel_timeout_secs` | `6.0` | Inactividad tras la que el panel se cierra solo |
+| `spectrum_fps` | `30` | Refresco del visualizador. Es lo único de esta tabla con coste de CPU real |
+
+#### Espaciado y geometría — recompilando
+
+Están **cableados en el código a propósito**: son decisiones de diseño, no
+preferencias, y sacarlos a `rice.json` daría una superficie de configuración que
+nadie ajusta dos veces. Todos en `crates/glaze-bar/src/main.rs`.
+
+| Qué | Dónde | Ojo |
+|---|---|---|
+| Padding global de la barra | `Frame::none().inner_margin(Margin::symmetric(10.0, 5.0))` | **Acoplado**: el `- 10.0` del alto útil y el `+ 20.0` del fondo compensan ese mismo margen. Si cambias el 10/5 hay que cambiar los tres |
+| Hueco entre workspaces | `ui.add_space(5.0)` tras cada pill | |
+| Padding del pill de workspace | `Margin::symmetric(9.0, 2.0)` | Es lo que hace los números anchos o estrechos |
+| Hueco entre métricas | seis `ui.add_space(12.0)` seguidos en el bloque `right_to_left` | Están los seis juntos; cámbialos a la vez |
+| Hueco entre iconos de bandeja | `vec2(side + 6.0, side)` en `tray.rs` | |
+| Padding de la píldora | `let pad = 14.0;` | |
+| Hueco reloj → notificación | `let div_gap = 22.0;` | |
+| Alto de la píldora | `if has_extra { 30.0 } else { 24.0 }` | 24 en reposo, 30 con contenido |
+| Separación isla ↔ stats | `sl - 12.0 - left_anchor` | La isla **no crece por encima de los stats**; se detiene aquí y el texto lleva puntos suspensivos |
+| Radios | `Rounding::same(5.0)` en workspaces, y el `h/2.0 → 20.0` de la píldora | |
+| Tamaño de cada panel | `panel_width()` y `panel_target_h()` | Una rama por vista |
+
+Búscalos por el literal, no por número de línea: el archivo se mueve.
+
+Después: `cd ~/dev; cargo build --release`, reinicia la barra, y `sync.ps1`.
+
+> **Reiniciar la barra**: mátala y el supervisor la relanza en ≤30 s. O
+> `Get-Process glaze-bar | Stop-Process -Force`.
+>
+> `GLAZEBAR_PANEL=notifs` abre ese panel al arrancar, para mirar cómo queda sin
+> tener que ir clicando. Una instancia de prueba con la misma `--x` que una barra
+> real se suicida contra el mutex de instancia única: usa otra `--x`.
 
 ---
 
@@ -187,11 +280,43 @@ la pantalla y ningún hook lo intercepta); cycle-focus en `SUPER+Shift+Space` po
 | Menos RAM al grabar | `shadowplay-record.ps1` → `-preset p6` → `p4`, o `-cq 19` → `23` |
 | Balancear juego/mic | `shadowplay-record.ps1` → `amix ... normalize=0` → pesos |
 | Micrófono preferido | `shadowplay-record.ps1` → `$prefer = @('Blue Snowball','HyperX')` |
-| Duración del replay | `shadowplay-wgc-save.ps1` → `Select-Object -Last 6` (6 × 5 s = 30 s) |
-| Módulos de la barra | `glaze-bar/src/main.rs`, luego `cargo build --release` |
+| Duración del replay | `shadowplay-wgc-save.ps1` → `$OBJETIVO = 30` (segundos). La selección va por tiempo acumulado, no por número de segmentos |
+| Cuánto historial guarda el búfer | `shadowplay-wgc/src/main.rs` → `RING = 12` (× 5 s ≈ 60 s). **Duplicado**: hay que cambiar también `$RING` en `shadowplay-wgc-save.ps1` |
+| Animación de la barra | `~/.config/rice.json` → bloque `animation`, en caliente. [Tabla](#animación--sin-recompilar) |
+| Espaciado de la barra | `glaze-bar/src/main.rs`. [Mapa de qué toca qué](#espaciado-y-geometría--recompilando) |
 
-Tras editar un binario Rust: `cd ~/dev; cargo build --release` y reinicia GlazeWM
-(`Alt+Shift+E`) o el proceso.
+Tras editar un binario Rust: `cd ~/dev; cargo build --release` y reinicia el
+proceso (o GlazeWM con `Alt+Shift+E` si es suyo).
+
+---
+
+## Cuando algo no responde
+
+Casi todo el rice es residente, así que "no pasó nada" es el síntoma habitual y
+no dice nada por sí solo. Estos archivos existen para que sí lo diga. Todos en
+`~/.config/` salvo donde se indique.
+
+| Archivo | Lo escribe | Qué significa |
+|---|---|---|
+| `ahk-alive.json` | AutoHotkey, cada 5 s | **Su FECHA es el latido**, no un campo de dentro. Rancio = los atajos globales están caídos. Dentro: `suspended` y `lastF10` (cuándo disparó Alt+F10 de verdad) |
+| `bar-alive-<x>.txt` | cada barra, desde su bucle de dibujo | Rancio >30 s = la barra está viva pero **dejó de pintar**. El supervisor la reinicia sola |
+| `ShadowPlay/wgc-buffer/cut-requested.txt` | AHK al pulsar Alt+F10 | Si no existe o es viejo tras pulsar, **el atajo no llegó a ejecutarse**: el fallo está por encima del script de guardado |
+| `ShadowPlay/wgc-buffer/last-finished.txt` | el grabador, sólo al cortar | Qué segmento acaba de cerrarse. No lo tocan las rotaciones normales |
+| `notifications.json` | notifyd y `Set-RiceIsland` | Historial del centro de notificaciones. **Si una notificación del sistema se fue y no supiste qué era, está aquí** |
+| `logs/glaze-bar.log` | la barra | Cada cambio de click-through, con quién lo provocó |
+| `logs/supervisor.log` | el supervisor | Qué relanzó y por qué |
+| `logs/clip-share.log` | el guardado de clips | Selección, espera, y el resultado de la subida con su código HTTP |
+
+**El indicador de Alt+F10** está en la fila de stats de la barra: una cámara
+verde (activo), ámbar (atajos suspendidos → `Win+Shift+Z`) o roja (AutoHotkey no
+responde). Pasa el ratón por encima para el detalle y el último uso.
+
+Orden de comprobación cuando **Alt+F10 no hace nada**:
+
+1. La cámara de la barra: ¿de qué color está?
+2. `cut-requested.txt`: ¿es de hace un momento? Si no, la tecla no llegó.
+3. `logs/clip-share.log`: ya no hay salidas mudas — si el script corrió, dejó una
+   línea, y si no había nada que guardar sale un aviso en la isla.
 
 ---
 

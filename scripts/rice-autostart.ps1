@@ -47,12 +47,31 @@ function Focus($n) {
 # `move --workspace` window rules in its config), so order stops mattering and
 # they can all start together. On this hardware they genuinely do run in
 # parallel; the old script was not CPU-bound, it was waiting.
+#
+# `Proceso` = no lanzarlo si ya esta corriendo. Es la misma guarda que hubo que
+# ponerle a taskbar.exe (ver el comentario mas abajo, y el commit c7f0ac7): en el
+# inicio de sesion pueden coincidir dos vias -- esta y el arranque propio de la
+# aplicacion -- y entonces salen dos ventanas.
+#
+# El caso de Firefox: el trim borro su entrada Run\Mozilla-Firefox-... pero dejo
+# el visto bueno en StartupApproved marcado como HABILITADO, y Firefox reescribe
+# esa entrada cuando quiere. Ya paso con OneDrive, que se actualizo y se volvio a
+# poner solo en el arranque.
 $parallel = @(
-    @{ Path = 'shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude' }
-    @{ Path = "$env:LOCALAPPDATA\Programs\Zed\Zed.exe" }
-    @{ Path = 'C:\Program Files\Firefox Developer Edition\firefox.exe' }
+    @{ Path = 'shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude'; Proceso = 'Claude' }
+    @{ Path = "$env:LOCALAPPDATA\Programs\Zed\Zed.exe";       Proceso = 'Zed' }
+    @{ Path = 'C:\Program Files\Firefox Developer Edition\firefox.exe'; Proceso = 'firefox' }
 )
 foreach ($a in $parallel) {
+    if ($a.Proceso) {
+        $ya = @(Get-Process $a.Proceso -EA SilentlyContinue)
+        if ($ya.Count) {
+            # Se deja dicho: si esto sale en el log al iniciar sesion, hay una
+            # segunda via de arranque y hay que buscarla, no taparla.
+            Write-Host ("ya corria {0} ({1} procesos): no lo lanzo" -f $a.Proceso, $ya.Count)
+            continue
+        }
+    }
     if ($a.Args) { Start-Process $a.Path -ArgumentList $a.Args -EA SilentlyContinue }
     else         { Start-Process $a.Path -EA SilentlyContinue }
 }
