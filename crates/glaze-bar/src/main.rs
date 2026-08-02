@@ -149,9 +149,23 @@ mod rclick {
     /// HWND de la barra, para el hilo vigilante. 0 = todavia no resuelto.
     pub static HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
-    /// Opacidad de la barra en 0..255, publicada para que el modo en capas la
-    /// use y no cambie de aspecto al entrar y salir de click-through.
-    pub static ALPHA: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(200);
+    /// Por que se decidio lo ultimo. Se registra en el log al cambiar: mirar
+    /// solo el resultado obligaba a reconstruir el razonamiento desde fuera, y
+    /// eso costo una tarde con un flip-flop que no se explicaba.
+    ///
+    /// 0 nadie cubre | 1 el primer plano cubre | 2 lo cubre otra del orden Z
+    /// 3 esta en clickthrough_apps | 4 hay una ventana normal delante que no cubre
+    pub static MOTIVO: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+    pub fn motivo_txt(c: u8) -> &'static str {
+        match c {
+            1 => "el primer plano cubre el monitor",
+            2 => "otra ventana del orden Z lo cubre",
+            3 => "coincide con clickthrough_apps",
+            4 => "hay una ventana normal delante que NO cubre",
+            _ => "nadie cubre el monitor",
+        }
+    }
 
     pub unsafe extern "system" fn proc_(
         hwnd: isize,
@@ -307,6 +321,7 @@ unsafe fn fullscreen_on_monitor(my: isize) -> bool {
     // Primero la ventana en primer plano, que es el caso normal y el barato.
     let fg = GetForegroundWindow();
     if fg != 0 && fg != my && !is_shell_surface(&class_of(fg)) && cubre(fg) {
+        rclick::MOTIVO.store(1, std::sync::atomic::Ordering::Relaxed);
         return true;
     }
 
@@ -341,13 +356,16 @@ unsafe fn fullscreen_on_monitor(my: isize) -> bool {
                     // La primera ventana real de este monitor manda: si no cubre,
                     // hay algo normal delante y la barra debe seguir pulsable.
                     if MonitorFromWindow(w, 2) == mon {
-                        return cubre(w);
+                        let c = cubre(w);
+                        rclick::MOTIVO.store(if c { 2 } else { 4 }, std::sync::atomic::Ordering::Relaxed);
+                        return c;
                     }
                 }
             }
         }
         w = GetWindow(w, GW_HWNDNEXT);
     }
+    rclick::MOTIVO.store(0, std::sync::atomic::Ordering::Relaxed);
     false
 }
 
@@ -481,11 +499,14 @@ unsafe fn set_clickthrough(hwnd: isize, on: bool) {
     }
     SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new);
     if on {
-        // Sin esto la ventana en capas no se dibuja en absoluto. El alfa se deja
-        // en la opacidad configurada de la barra, que es lo mas parecido a como
-        // se veia antes de entrar en este modo.
-        let a = rclick::ALPHA.load(std::sync::atomic::Ordering::Relaxed);
-        SetLayeredWindowAttributes(hwnd, 0, a, LWA_ALPHA);
+        // 255, NO la opacidad de la barra.
+        //
+        // El alfa de la capa MULTIPLICA lo ya pintado, y el fondo de la barra ya
+        // lleva bar_opacity dentro. Poner aqui esa misma opacidad la aplicaba dos
+        // veces (0,78 x 0,78 = 0,61) y la barra se veia mas transparente justo al
+        // entrar en este modo -- que es lo que se noto desde fuera. Con 255 la
+        // capa no altera nada y se ve igual que antes.
+        SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
     }
     // FRAMECHANGED: sin el, Windows sigue usando las metricas viejas y el cambio
     // de estilo puede no aplicarse hasta el siguiente evento de ventana.
@@ -2473,10 +2494,6 @@ impl BarApp {
         if wrote && now.duration_since(self.last_opacity_write).as_secs_f32() > 0.12 {
             self.last_opacity_write = now;
             write_opacity("bar-opacity.txt", self.bar_opacity);
-            rclick::ALPHA.store(
-                (self.bar_opacity.clamp(0.05, 1.0) * 255.0) as u8,
-                std::sync::atomic::Ordering::Relaxed,
-            );
             write_opacity("term-opacity.txt", self.term_opacity);
         }
     }
@@ -2594,10 +2611,13 @@ impl eframe::App for BarApp {
                             let mut r = Rect { left: 0, top: 0, right: 0, bottom: 0 };
                             GetWindowRect(fg, &mut r);
                             elog(&format!(
-                                "x={} clickthrough {} -> {}  foco: clase='{}' proc={:?} rect={},{} {}x{}",
+                                "x={} clickthrough {} -> {}  motivo: {}  foco: clase='{}' proc={:?} rect={},{} {}x{}",
                                 self.x,
                                 self.clickthrough,
                                 want,
+                                rclick::motivo_txt(
+                                    rclick::MOTIVO.load(std::sync::atomic::Ordering::Relaxed)
+                                ),
                                 class_of(fg),
                                 win::foreground_process_name(),
                                 r.left,
