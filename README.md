@@ -206,6 +206,7 @@ nadie ajusta dos veces. Todos en `crates/glaze-bar/src/main.rs`.
 | Qué | Dónde | Ojo |
 |---|---|---|
 | **Separación de los bordes de pantalla** | `const BAR_PAD_H` (22.0) | Cuánto se apartan del canto los workspaces y los stats/bandeja. Era 10 y quedaba pegado, difícil de leer y de acertar |
+| **Aire entre la barra y las ventanas** | `outer_gap.top` en `config/glazewm/config.yaml` (8px) | **Acoplado a la reserva**: la barra registra sus `bar_height` píxeles como *appbar*, así que el área de trabajo ya empieza bajo ella y aquí sólo queda el aire. Si cambias `bar_height`, esto NO hay que tocarlo; si quitaras la reserva, habría que volver a sumar la altura |
 | Margen arriba/abajo | `const BAR_PAD_V` (5.0) | Compromiso con el tamaño de la fuente; el alto de la barra es fijo |
 | Hueco entre workspaces | `ui.add_space(5.0)` tras cada pill | |
 | Padding del pill de workspace | `Margin::symmetric(9.0, 2.0)` | Es lo que hace los números anchos o estrechos |

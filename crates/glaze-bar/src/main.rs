@@ -369,6 +369,90 @@ unsafe fn fullscreen_on_monitor(my: isize) -> bool {
     false
 }
 
+/// Reserva la franja de la barra en el AREA DE TRABAJO de su monitor.
+///
+/// EL PROBLEMA: una ventana MAXIMIZADA se dimensiona con el area de trabajo, y
+/// hasta ahora esa area empezaba en y=0 -- o sea, por debajo de la barra. La
+/// barra queda encima y sus workspaces se pisan con la barra de herramientas de
+/// la aplicacion. Con ventanas teseladas no pasa porque GlazeWM deja su propio
+/// hueco arriba; con maximizadas no habia nada que lo impidiera.
+///
+/// Registrarse como appbar es el mecanismo de Windows para justo esto, el mismo
+/// que usa la barra de tareas. A partir de aqui NADA se maximiza por encima de
+/// la barra, en ninguna aplicacion.
+///
+/// NO arregla la pantalla completa de verdad, y no puede: una ventana a pantalla
+/// completa ignora el area de trabajo a proposito, porque la pantalla es suya.
+/// Ahi la barra sigue dibujandose encima -- que es lo que se pidio, visible
+/// siempre -- pero al menos los clics la atraviesan.
+///
+/// OJO con el hueco de GlazeWM: tila DENTRO del area de trabajo, asi que su
+/// `outer_gap.top` deja de tener que compensar la altura de la barra. Estaba en
+/// 42 (34 de barra + 8 de aire) y pasa a 8, o el hueco se contaria dos veces.
+#[cfg(windows)]
+mod appbar {
+    #[repr(C)]
+    pub struct Data {
+        pub cb: u32,
+        pub hwnd: isize,
+        pub callback: u32,
+        pub edge: u32,
+        pub rc: super::Rect,
+        pub lparam: isize,
+    }
+    pub const ABM_NEW: u32 = 0x0;
+    pub const ABM_REMOVE: u32 = 0x1;
+    pub const ABM_QUERYPOS: u32 = 0x2;
+    pub const ABM_SETPOS: u32 = 0x3;
+    pub const ABE_TOP: u32 = 1;
+    /// Mensaje propio con el que Windows avisa de cambios; hay que dar uno
+    /// aunque no se atienda, o el registro se rechaza.
+    pub const WM_APPBAR: u32 = 0x0400 + 0x321;
+
+    #[link(name = "shell32")]
+    extern "system" {
+        pub fn SHAppBarMessage(msg: u32, data: *mut Data) -> usize;
+    }
+
+    /// Reserva `alto` pixeles en la parte de arriba de `mon`.
+    pub unsafe fn reservar(hwnd: isize, mon: super::Rect, alto: i32) {
+        let mut d = Data {
+            cb: std::mem::size_of::<Data>() as u32,
+            hwnd,
+            callback: WM_APPBAR,
+            edge: ABE_TOP,
+            rc: super::Rect { left: 0, top: 0, right: 0, bottom: 0 },
+            lparam: 0,
+        };
+        SHAppBarMessage(ABM_NEW, &mut d);
+        d.edge = ABE_TOP;
+        d.rc = super::Rect {
+            left: mon.left,
+            top: mon.top,
+            right: mon.right,
+            bottom: mon.top + alto,
+        };
+        // QUERYPOS deja que Windows ajuste el rectangulo si otro appbar ya ocupa
+        // ese borde; saltarselo es como se acaba con dos barras solapadas.
+        SHAppBarMessage(ABM_QUERYPOS, &mut d);
+        d.rc.top = mon.top;
+        d.rc.bottom = mon.top + alto;
+        SHAppBarMessage(ABM_SETPOS, &mut d);
+    }
+
+    pub unsafe fn liberar(hwnd: isize) {
+        let mut d = Data {
+            cb: std::mem::size_of::<Data>() as u32,
+            hwnd,
+            callback: WM_APPBAR,
+            edge: ABE_TOP,
+            rc: super::Rect { left: 0, top: 0, right: 0, bottom: 0 },
+            lparam: 0,
+        };
+        SHAppBarMessage(ABM_REMOVE, &mut d);
+    }
+}
+
 /// Vigila si toca dejar pasar el raton, en su propio hilo y cada 150 ms.
 ///
 /// POR QUE NO EN `update()`: la decision estaba atada al repintado, y la barra
@@ -2587,6 +2671,23 @@ impl eframe::App for BarApp {
                         // El vigilante trabaja sobre este HWND. Se republica al
                         // cambiar porque eframe puede recrear la ventana.
                         rclick::HWND.store(self.hwnd, std::sync::atomic::Ordering::Relaxed);
+
+                        // Reservar la franja para que nada se maximice debajo.
+                        // Va aqui, con el HWND recien resuelto, porque el appbar
+                        // se registra CONTRA una ventana concreta: si eframe la
+                        // recrea hay que volver a registrarlo.
+                        unsafe {
+                            let mon = MonitorFromWindow(self.hwnd, 2);
+                            let mut mi = MonInfo {
+                                cb: std::mem::size_of::<MonInfo>() as u32,
+                                rc_monitor: Rect { left: 0, top: 0, right: 0, bottom: 0 },
+                                rc_work: Rect { left: 0, top: 0, right: 0, bottom: 0 },
+                                flags: 0,
+                            };
+                            if GetMonitorInfoW(mon, &mut mi) != 0 {
+                                appbar::reservar(self.hwnd, mi.rc_monitor, self.bar_h() as i32);
+                            }
+                        }
                     }
                     // Re-assert TOPMOST too. The style bit survives an explorer
                     // restart but the z-band ordering does not: measured, a bar

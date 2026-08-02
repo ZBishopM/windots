@@ -54,7 +54,11 @@ gaps:
 
   # Gap between windows and the screen edge.
   outer_gap:
-    top: '42px'
+    # 8, no 42. La barra ya reserva sus 34px en el AREA DE TRABAJO registrandose
+    # como appbar (ver glaze-bar/src/main.rs, mod appbar), y GlazeWM tila DENTRO
+    # de esa area -- asi que aqui solo queda el aire entre la barra y la primera
+    # ventana. Con 42 el hueco se contaba dos veces y quedaban 76px muertos.
+    top: '8px'
     right: '20px'
     # -28 y no 20: GlazeWM tila dentro del AREA DE TRABAJO, y la barra de tareas
     # de Windows -- aunque invisible -- mantiene reservados 48px abajo. Ya no se
