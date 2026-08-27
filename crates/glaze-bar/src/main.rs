@@ -819,12 +819,26 @@ enum VolMsg {
     Refresh,
     /// Empty name = master.
     Set(String, f32),
+    /// Empty name = master. El estado deseado va explicito, no se invierte en el
+    /// worker: entre el clic y la llamada COM pueden pasar milisegundos y otra
+    /// cosa puede haber cambiado el silencio por su cuenta.
+    Mute(String, bool),
     /// Flip the default output between the two devices actually in use.
     SwapOutput,
 }
 
-/// One row of the widget: label, 0..1 level. The first row is always master.
-type VolRow = (String, f32);
+/// One row of the widget. La primera fila es siempre master.
+///
+/// `muted` estaba disponible en `rice_common::audio::Session` desde el principio
+/// y esta pantalla lo tiraba: se quedaba solo con el nivel. Una app silenciada se
+/// veia igual que una al 72%, que es exactamente como se pierde media hora
+/// buscando por que no suena un juego.
+#[derive(Clone)]
+struct VolRow {
+    name: String,
+    level: f32,
+    muted: bool,
+}
 
 struct VolCtl {
     tx: std::sync::mpsc::Sender<VolMsg>,
@@ -842,8 +856,15 @@ impl VolCtl {
                 let mut refresh = matches!(first, VolMsg::Refresh);
                 let mut swap = matches!(first, VolMsg::SwapOutput);
                 let mut pending: std::collections::HashMap<String, f32> = Default::default();
-                if let VolMsg::Set(n, v) = first {
-                    pending.insert(n, v);
+                let mut mutes: std::collections::HashMap<String, bool> = Default::default();
+                match first {
+                    VolMsg::Set(n, v) => {
+                        pending.insert(n, v);
+                    }
+                    VolMsg::Mute(n, m) => {
+                        mutes.insert(n, m);
+                    }
+                    _ => {}
                 }
                 while let Ok(m) = rx.try_recv() {
                     match m {
@@ -851,6 +872,9 @@ impl VolCtl {
                         VolMsg::SwapOutput => swap = true,
                         VolMsg::Set(n, v) => {
                             pending.insert(n, v);
+                        }
+                        VolMsg::Mute(n, m) => {
+                            mutes.insert(n, m);
                         }
                     }
                 }
@@ -860,6 +884,17 @@ impl VolCtl {
                     } else {
                         rice_common::audio::set_app_volume(&name, v);
                     }
+                }
+                for (name, m) in mutes {
+                    if name.is_empty() {
+                        rice_common::audio::set_master_mute(m);
+                    } else {
+                        rice_common::audio::set_app_mute(&name, m);
+                    }
+                    // Releer siempre tras silenciar: si la llamada fallo (la app
+                    // cerro su sesion entre el clic y esto), el icono debe volver
+                    // a lo que el sistema diga, no a lo que pedimos.
+                    refresh = true;
                 }
                 if swap {
                     // micswitch owns the IPolicyConfig dance; reuse it rather
@@ -875,10 +910,17 @@ impl VolCtl {
                     refresh = true;
                 }
                 if refresh || swap {
-                    let mut rows: Vec<VolRow> =
-                        vec![("master".into(), rice_common::audio::master_volume().unwrap_or(0.0))];
+                    let mut rows: Vec<VolRow> = vec![VolRow {
+                        name: "master".into(),
+                        level: rice_common::audio::master_volume().unwrap_or(0.0),
+                        muted: rice_common::audio::master_muted(),
+                    }];
                     for s in rice_common::audio::sessions().into_iter().take(4) {
-                        rows.push((s.name.trim_end_matches(".exe").to_string(), s.volume));
+                        rows.push(VolRow {
+                            name: s.name.trim_end_matches(".exe").to_string(),
+                            level: s.volume,
+                            muted: s.muted,
+                        });
                     }
                     *out.lock().unwrap() = rows;
                     ctx.request_repaint();
@@ -892,6 +934,9 @@ impl VolCtl {
     }
     fn set(&self, name: &str, v: f32) {
         let _ = self.tx.send(VolMsg::Set(name.to_string(), v));
+    }
+    fn mute(&self, name: &str, muted: bool) {
+        let _ = self.tx.send(VolMsg::Mute(name.to_string(), muted));
     }
     fn swap_output(&self) {
         let _ = self.tx.send(VolMsg::SwapOutput);
@@ -1516,9 +1561,14 @@ fn fetch_gpu() -> Option<String> {
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = win::CREATE_NO_WINDOW;
+        // La VRAM sale en la MISMA consulta: no cuesta ni un spawn mas, y en
+        // esta maquina es el numero que de verdad importa. Con 12 GB, un LLM
+        // local y un TTS cargados a la vez, quedarse por debajo de ~500 MiB
+        // libres hace que CUDA se desborde a memoria compartida por PCIe y todo
+        // se hunde. Sin el dato a la vista, eso se descubre cuando ya va lento.
         let out = std::process::Command::new("nvidia-smi")
             .args([
-                "--query-gpu=temperature.gpu,utilization.gpu",
+                "--query-gpu=temperature.gpu,utilization.gpu,memory.used,memory.total",
                 "--format=csv,noheader,nounits",
             ])
             .creation_flags(CREATE_NO_WINDOW)
@@ -1529,7 +1579,15 @@ fn fetch_gpu() -> Option<String> {
         let mut parts = line.split(',').map(|x| x.trim());
         let temp = parts.next()?;
         let util = parts.next()?;
-        let g = format!("{temp}° {util}%");
+        // Si nvidia-smi devolviera menos campos de los pedidos, se cae al
+        // formato de antes en vez de no pintar GPU.
+        let g = match (parts.next(), parts.next()) {
+            (Some(usada), Some(total)) => {
+                let (u, t) = (usada.parse::<f32>().ok()?, total.parse::<f32>().ok()?);
+                format!("{temp}° {util}%  {:.1}/{:.0}G", u / 1024.0, t / 1024.0)
+            }
+            _ => format!("{temp}° {util}%"),
+        };
         dlog(&format!("gpu = {g}"));
         return Some(g);
     }
@@ -1666,7 +1724,11 @@ impl BarApp {
     /// Resting height of the bubble for the current sub-view.
     fn panel_target_h(&self) -> f32 {
         match self.panel_mode() {
-            1 | 2 | 3 => 140.0,
+            // Volumen necesita 16 px mas que brillo y opacidad: lleva una fila
+            // extra de botones de silencio bajo las etiquetas. Con los 140 de
+            // antes el icono quedaba a 7 px del borde.
+            1 => 156.0,
+            2 | 3 => 140.0,
             4 => 132.0,
             5 => 138.0,
             6 => {
@@ -1937,23 +1999,67 @@ impl BarApp {
         let step = 46.0;
         let x0 = rect.center().x - (n - 1.0) * step / 2.0 - 16.0;
         let mut changed: Option<(String, f32)> = None;
-        for (i, (label, val)) in self.vol.iter_mut().enumerate() {
+        let mut toggled: Option<(String, bool)> = None;
+        for (i, fila) in self.vol.iter_mut().enumerate() {
             let cx = x0 + i as f32 * step;
-            if let Some(v) = Self::vslider(ui, p, ("pvol", i), cx, top, h, *val, WARM_ACCENT) {
-                *val = v;
-                changed = Some((if i == 0 { String::new() } else { label.clone() }, v));
+            // Silenciado = barra apagada. Es la senal que se lee de un vistazo,
+            // antes de mirar iconos: una app muda no debe parecer que suena al
+            // 72% solo porque su nivel siga ahi.
+            let color = if fila.muted { WARM_SUB } else { WARM_ACCENT };
+            if let Some(v) = Self::vslider(ui, p, ("pvol", i), cx, top, h, fila.level, color) {
+                fila.level = v;
+                changed = Some((if i == 0 { String::new() } else { fila.name.clone() }, v));
             }
             p.text(
                 egui::pos2(cx, top + h + 12.0),
                 egui::Align2::CENTER_CENTER,
-                label.chars().take(7).collect::<String>(),
+                fila.name.chars().take(7).collect::<String>(),
                 egui::FontId::proportional(8.5),
-                WARM_SUB,
+                if fila.muted { WARM_SUB } else { WARM_SUB },
             );
+
+            // Boton de silencio bajo la etiqueta.
+            let bc = egui::pos2(cx, top + h + 28.0);
+            let br = ui
+                .interact(
+                    egui::Rect::from_center_size(bc, egui::vec2(22.0, 22.0)),
+                    egui::Id::new(("pvol-mute", i)),
+                    egui::Sense::click(),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if br.hovered() {
+                self.isl_interact = now;
+            }
+            if fila.muted || br.hovered() {
+                let a = if br.hovered() { 90 } else { 55 };
+                let base = if fila.muted { egui::Color32::from_rgb(200, 110, 100) } else { WARM_ACCENT };
+                p.circle_filled(
+                    bc,
+                    10.0,
+                    egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), a),
+                );
+            }
+            // f026 = volumen apagado, f028 = volumen alto. Los dos estan en el
+            // rango FA4 que esta barra ya usa para el resto de iconos.
+            let (glifo, tinte) = if fila.muted {
+                ("\u{f026}", egui::Color32::from_rgb(230, 140, 130))
+            } else {
+                ("\u{f028}", WARM_SUB)
+            };
+            draw_icon(p, bc, glifo, 10.5, tinte);
+            if br.clicked() {
+                let objetivo = !fila.muted;
+                fila.muted = objetivo;   // pintado optimista; el worker relee y corrige
+                toggled = Some((if i == 0 { String::new() } else { fila.name.clone() }, objetivo));
+            }
         }
         if let Some((name, v)) = changed {
             self.isl_interact = now;
             self.vol_ctl.set(&name, v);
+        }
+        if let Some((name, m)) = toggled {
+            self.isl_interact = now;
+            self.vol_ctl.mute(&name, m);
         }
         let c = egui::pos2(rect.right() - 24.0, top + h / 2.0);
         let r = ui
