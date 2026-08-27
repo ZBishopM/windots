@@ -202,11 +202,27 @@ if ($Limpiar) {
         'HKLM32' = 'HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
         'HKCU'   = 'HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
     }
+    $exportados = @()
     foreach ($r in $ramas.GetEnumerator()) {
         $f = "$bak-$($r.Key).reg"
         & reg.exe export $r.Value $f /y *>$null
+        if (Test-Path $f) { $exportados += $f }
         Write-Host ("  copia: {0}  ({1:N0} KB)" -f $f, ((Get-Item $f -EA SilentlyContinue).Length / 1KB))
     }
+
+    # El .reg exportado ya es un respaldo mejor que cualquier snapshot que
+    # pudiera construir el registro de deshacer: son las ramas ENTERAS y se
+    # restauran con un doble clic. Aqui solo se anota para que salga en
+    # `Get-RiceUndo` y no haya que acordarse de que existe esta carpeta.
+    . "$env:USERPROFILE\.config\lib\rice-undo.ps1"
+    Start-RiceUndo 'uninstall'
+    foreach ($f in $exportados) {
+        Register-RiceUndo -Tipo comando -Datos @{
+            comando = "& reg.exe import `"$f`""
+            nota    = "reimporta la rama exportada antes de borrar claves huerfanas"
+        }
+    }
+    Save-RiceUndo
 
     $ok = 0; $fail = 0
     foreach ($b in $basura) {

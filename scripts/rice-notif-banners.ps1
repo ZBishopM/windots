@@ -14,10 +14,19 @@
   open with Win+N if notifyd is not running.
 
   All of this is under HKCU, so no elevation.
+
+  El deshacer lo lleva lib\rice-undo.ps1, no este script. Antes -Restore hacia
+  Remove-ItemProperty ShowBanner suponiendo que el valor no existia antes de
+  tocarlo. Suele ser verdad, pero si tenias ShowBanner=1 puesto a mano para
+  alguna app, ese "restore" no te lo devolvia: te lo borraba. Ahora se apunta lo
+  que habia -- existiera o no -- y se devuelve exactamente eso.
 #>
 param([switch]$Restore, [switch]$List)
 
+. "$env:USERPROFILE\.config\lib\rice-undo.ps1"
+
 $Root = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings'
+$Ambito = 'notif-banners'
 
 # Apps whose banners notifyd replaces. Matched as substrings against the
 # registered identifiers, because those are AUMIDs and rarely guessable in full
@@ -49,21 +58,24 @@ if ($List) {
     return
 }
 
+if ($Restore) {
+    Undo-Rice $Ambito
+    Write-Host "Notifications still reach the Notification Center (Win+N)."
+    return
+}
+
 $hit = 0
-foreach ($k in Get-ChildItem $Root -ErrorAction SilentlyContinue) {
-    $name = $k.PSChildName
-    if (-not ($Apps | Where-Object { $name -like "*$_*" })) { continue }
-    $hit++
-    if ($Restore) {
-        # Remove the value rather than setting it to 1: absent means "Windows
-        # default", which is what it was before we touched anything.
-        Remove-ItemProperty $k.PSPath -Name ShowBanner -ErrorAction SilentlyContinue
-        Write-Host "  restored $name"
-    } else {
-        New-ItemProperty $k.PSPath -Name ShowBanner -PropertyType DWord -Value 0 -Force | Out-Null
+Start-RiceUndo $Ambito
+try {
+    foreach ($k in Get-ChildItem $Root -ErrorAction SilentlyContinue) {
+        $name = $k.PSChildName
+        if (-not ($Apps | Where-Object { $name -like "*$_*" })) { continue }
+        $hit++
+        Set-RegValueTracked "$Root\$name" 'ShowBanner' 0 -Kind DWord
         Write-Host "  banner off  $name"
     }
-}
+} finally { Save-RiceUndo }
+
 Write-Host ""
-Write-Host "$hit app(s) $(if ($Restore) { 'restored' } else { 'silenced' })."
+Write-Host "$hit app(s) silenced.  -Restore lo devuelve tal cual estaba."
 Write-Host "Notifications still reach the Notification Center (Win+N); only the banner is gone."

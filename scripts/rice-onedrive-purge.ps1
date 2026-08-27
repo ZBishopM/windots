@@ -124,10 +124,18 @@ foreach ($p in $procs) {
 if (-not $procs) { Write-Host '  no habia ninguno' }
 Start-Sleep -Seconds 2
 
+# Este script DESINSTALA, y eso no tiene marcha atras. Pero las partes de
+# registro y las tareas si son reversibles, asi que se apuntan: si algun dia
+# reinstalas OneDrive, `Undo-Rice onedrive` te devuelve su arranque tal cual
+# estaba en vez de tener que reconstruirlo a mano.
+. "$env:USERPROFILE\.config\lib\rice-undo.ps1"
+Start-RiceUndo 'onedrive'
+
 Titulo 'arranque'
 foreach ($e in $runOneDrive) {
-    Remove-ItemProperty $RUN -Name $e.Nombre -Force -EA SilentlyContinue
-    Write-Host ("  quitada Run\{0}" -f $e.Nombre)
+    if (Remove-RegValueTracked $RUN $e.Nombre) {
+        Write-Host ("  quitada Run\{0}" -f $e.Nombre)
+    }
 }
 # El visto bueno de Windows es una clave aparte. Dejarlo puesto hace que la
 # entrada reaparezca habilitada si algo la vuelve a escribir.
@@ -135,8 +143,9 @@ $ka = Get-Item $APROBADAS -EA SilentlyContinue
 if ($ka) {
     foreach ($n in $ka.Property) {
         if ($n -match 'OneDrive' -or $n -eq 'Microsoft.Lists') {
-            Remove-ItemProperty $APROBADAS -Name $n -Force -EA SilentlyContinue
-            Write-Host ("  quitado StartupApproved\{0}" -f $n)
+            if (Remove-RegValueTracked $APROBADAS $n) {
+                Write-Host ("  quitado StartupApproved\{0}" -f $n)
+            }
         }
     }
 }
@@ -146,10 +155,17 @@ $tareasPendientes = @()
 foreach ($t in $tareas) {
     $hecho = $false
     try {
+        # Eliminar una tarea NO se apunta: recrearla exigiria guardar su XML
+        # entero y fingir que un Register-ScheduledTask la deja igual seria
+        # mentir. Desactivarla si, porque eso es un interruptor.
         Unregister-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -Confirm:$false -EA Stop
         Write-Host ("  eliminada {0}" -f $t.TaskName); $hecho = $true
     } catch {
         try {
+            Register-RiceUndo -Tipo tarea -Datos @{
+                nombre = $t.TaskName; ruta = $t.TaskPath
+                activada = ($t.State -ne 'Disabled')
+            }
             Disable-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -EA Stop | Out-Null
             Write-Host ("  desactivada {0}" -f $t.TaskName); $hecho = $true
         } catch { }
@@ -236,6 +252,8 @@ if (-not $desinstalado) {
         Write-Host ("  borrada {0}" -f $(if (Test-Path $CARPETA) { '(quedan restos, mirala a mano)' } else { 'del todo' }))
     }
 }
+
+Save-RiceUndo
 
 Titulo 'como queda'
 Write-Host ("  procesos   {0}" -f (@(Get-Process -EA SilentlyContinue | Where-Object { $_.ProcessName -match 'OneDrive' }).Count))

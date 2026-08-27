@@ -11,10 +11,19 @@
   comandos original. Sin eso, "restaurar" seria adivinar los argumentos, que en
   varias de estas son los que las hacen arrancar silenciosas (-silent, --minimized,
   --autostarted...).
+
+  Ahora lo lleva lib\rice-undo.ps1, y eso arregla un fallo doble que tenia la
+  copia a mano: Get-ItemProperty EXPANDE las variables de entorno al leer, y el
+  -Restore reescribia siempre como String. Una entrada REG_EXPAND_SZ que valia
+  '%ProgramFiles%\X\x.exe' se guardaba ya expandida y volvia como ruta fija de
+  tipo String. Funcionaba... hasta que cambiaras algo de sitio.
 #>
 param([switch]$Restore, [switch]$List)
 
+. "$env:USERPROFILE\.config\lib\rice-undo.ps1"
+
 $Run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$Ambito = 'trim-run'
 $Bak = "$env:USERPROFILE\.config\.run-trimmed.json"
 
 # Nombres exactos de las entradas, no patrones: un patron como "steam" tambien
@@ -43,33 +52,25 @@ if ($List) {
 }
 
 if ($Restore) {
-    if (-not (Test-Path $Bak)) { Write-Host 'No hay copia que restaurar.'; return }
-    $saved = Get-Content $Bak -Raw | ConvertFrom-Json
-    foreach ($e in $saved.PSObject.Properties) {
-        New-ItemProperty $Run -Name $e.Name -Value $e.Value -PropertyType String -Force | Out-Null
-        Write-Host ("  restaurado  {0}" -f $e.Name)
-    }
-    Write-Host "`n$($saved.PSObject.Properties.Count) entrada(s) devueltas."
+    Undo-Rice $Ambito
+    # La copia vieja se queda por si hay que mirarla, pero ya no manda.
+    if (Test-Path $Bak) { Write-Host "(el antiguo $Bak sigue ahi; ya no se usa)" }
     return
 }
 
-$p = Get-ItemProperty $Run
-$saved = @{}
 $n = 0
-foreach ($name in (Get-Item $Run).Property) {
-    if ($targets -notcontains $name) { continue }
-    $saved[$name] = $p.$name
-    Remove-ItemProperty $Run -Name $name -ErrorAction SilentlyContinue
-    Write-Host ("  quitado  {0}" -f $name)
-    $n++
-}
-if ($n) {
-    # Fusionar con cualquier copia previa, para no perder una tanda anterior.
-    if (Test-Path $Bak) {
-        (Get-Content $Bak -Raw | ConvertFrom-Json).PSObject.Properties |
-          ForEach-Object { if (-not $saved.ContainsKey($_.Name)) { $saved[$_.Name] = $_.Value } }
+# Sin -Nuevo: si ya quitaste una tanda antes y no la has devuelto, esta se suma
+# en vez de pisar el undo anterior.
+Start-RiceUndo $Ambito
+try {
+    foreach ($name in (Get-Item $Run).Property) {
+        if ($targets -notcontains $name) { continue }
+        if (Remove-RegValueTracked $Run $name) {
+            Write-Host ("  quitado  {0}" -f $name)
+            $n++
+        }
     }
-    $saved | ConvertTo-Json | Set-Content $Bak -Encoding utf8
-}
-Write-Host "`n$n entrada(s) quitadas. Copia en $Bak -- '-Restore' las devuelve con sus argumentos."
+} finally { Save-RiceUndo }
+
+Write-Host "`n$n entrada(s) quitadas. '-Restore' las devuelve con sus argumentos y su tipo original."
 Write-Host "Quedan $((Get-Item $Run).Property.Count) en el autoarranque."

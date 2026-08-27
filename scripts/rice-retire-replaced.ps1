@@ -16,6 +16,15 @@
 #>
 param([switch]$Restore, [switch]$Uninstall)
 
+. "$env:USERPROFILE\.config\lib\rice-undo.ps1"
+$Ambito = 'retire-replaced'
+
+if ($Restore) {
+    Undo-Rice $Ambito
+    Write-Host "`nListo. Vuelve a lanzarlas a mano si quieres que arranquen ya."
+    return
+}
+
 # --- procesos -------------------------------------------------------------
 $procs = 'EarTrumpet', 'Twinkle Tray', 'TwinkleTray', 'AudioSwitch', 'Pomatez'
 if (-not $Restore) {
@@ -32,42 +41,39 @@ if (-not $Restore) {
 # --- autoarranque clásico (HKCU Run) --------------------------------------
 $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $bak = "$env:USERPROFILE\.config\.retired-run.json"
-Write-Host "`n=== autoarranque clasico ==="
-if ($Restore) {
-    if (Test-Path $bak) {
-        (Get-Content $bak -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object {
-            New-ItemProperty $run -Name $_.Name -Value $_.Value -PropertyType String -Force | Out-Null
-            Write-Host ("  restaurado {0}" -f $_.Name)
-        }
-    } else { Write-Host '  (no hay copia que restaurar)' }
-} else {
-    $saved = @{}
+
+Start-RiceUndo $Ambito
+try {
+    Write-Host "`n=== autoarranque clasico ==="
     $p = Get-ItemProperty $run
     foreach ($n in (Get-Item $run).Property) {
         if ($n -match 'pomatez|eartrumpet|twinkle|audioswitch' -or "$($p.$n)" -match 'pomatez|eartrumpet|twinkle|audioswitch') {
-            $saved[$n] = $p.$n
-            Remove-ItemProperty $run -Name $n -ErrorAction SilentlyContinue
-            Write-Host ("  quitado  {0}" -f $n)
+            if (Remove-RegValueTracked $run $n) { Write-Host ("  quitado  {0}" -f $n) }
         }
     }
-    if ($saved.Count) { $saved | ConvertTo-Json | Set-Content $bak -Encoding utf8 }
-}
 
-# --- autoarranque de apps de la Store -------------------------------------
-# Las apps empaquetadas no usan la clave Run: su interruptor es un DWORD `State`
-# bajo AppModel\SystemAppData\<familia>\<tarea>. 1 = activado, 0 = desactivado.
-Write-Host "`n=== autoarranque de apps de la Store ==="
-$base = 'HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\SystemAppData'
-foreach ($fam in Get-ChildItem $base -ErrorAction SilentlyContinue |
-                 Where-Object { $_.PSChildName -match 'EarTrumpet|TwinkleTray' }) {
-    foreach ($task in Get-ChildItem $fam.PSPath -ErrorAction SilentlyContinue) {
-        $cur = (Get-ItemProperty $task.PSPath -ErrorAction SilentlyContinue).State
-        if ($null -eq $cur) { continue }   # sin State no es una tarea de inicio
-        $want = if ($Restore) { 2 } else { 1 }   # 2 = habilitada por el usuario, 1 = deshabilitada
-        Set-ItemProperty $task.PSPath -Name State -Value $want -Type DWord -ErrorAction SilentlyContinue
-        Write-Host ("  {0}\{1}  State {2} -> {3}" -f $fam.PSChildName, $task.PSChildName, $cur, $want)
+    # --- autoarranque de apps de la Store ---------------------------------
+    # Las apps empaquetadas no usan la clave Run: su interruptor es un DWORD
+    # `State` bajo AppModel\SystemAppData\<familia>\<tarea>.
+    #
+    # El -Restore de antes escribia un 2 FIJO ("habilitada por el usuario") sin
+    # mirar que valia. Si la app ya estaba desactivada antes de que el rice la
+    # tocara, "restaurar" te la activaba. Ahora se apunta el valor real.
+    Write-Host "`n=== autoarranque de apps de la Store ==="
+    $base = 'HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\SystemAppData'
+    foreach ($fam in Get-ChildItem $base -ErrorAction SilentlyContinue |
+                     Where-Object { $_.PSChildName -match 'EarTrumpet|TwinkleTray' }) {
+        foreach ($task in Get-ChildItem $fam.PSPath -ErrorAction SilentlyContinue) {
+            $cur = (Get-ItemProperty $task.PSPath -ErrorAction SilentlyContinue).State
+            if ($null -eq $cur) { continue }   # sin State no es una tarea de inicio
+            $ruta = "HKCU:\" + ($task.Name -replace '^HKEY_CURRENT_USER\\', '')
+            Set-RegValueTracked $ruta 'State' 1 -Kind DWord   # 1 = deshabilitada
+            Write-Host ("  {0}\{1}  State {2} -> 1" -f $fam.PSChildName, $task.PSChildName, $cur)
+        }
     }
-}
+} finally { Save-RiceUndo }
+
+if (Test-Path $bak) { Write-Host "`n(el antiguo $bak sigue ahi; ya no se usa)" }
 
 # --- desinstalar ----------------------------------------------------------
 if ($Uninstall) {

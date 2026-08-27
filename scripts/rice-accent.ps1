@@ -7,14 +7,19 @@
 #   rice-accent.ps1            apply the warm accent
 #   rice-accent.ps1 -Restore   put back whatever was there before
 #
-# The previous values are saved next to this script the first time it runs, so
-# restoring is exact rather than a guess at the Windows default.
+# El deshacer lo lleva lib\rice-undo.ps1. Antes habia un .accent-backup.json a
+# mano que guardaba SEIS valores... y el script escribia OCHO: ColorPrevalence y
+# AccentColorIndex se quedaban puestos para siempre despues de -Restore. Ese es
+# justo el fallo que desaparece cuando la funcion que escribe es la que apunta.
 
 param([switch]$Restore)
 
+. "$env:USERPROFILE\.config\lib\rice-undo.ps1"
+
 $dwm     = 'HKCU:\Software\Microsoft\Windows\DWM'
 $accent  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Accent'
-$backup  = "$env:USERPROFILE\.config\.accent-backup.json"
+$Ambito  = 'accent'
+$viejo   = "$env:USERPROFILE\.config\.accent-backup.json"
 
 # rice-common::theme ACCENT (#e0a35c), as a ramp dark -> light. Index 5 is the
 # main accent; Windows picks lighter entries for text on accent backgrounds, so
@@ -61,42 +66,15 @@ function Broadcast {
 }
 
 if ($Restore) {
-    if (-not (Test-Path $backup)) { Write-Host 'no backup to restore from'; exit 1 }
-    $b = Get-Content $backup -Raw | ConvertFrom-Json
-    Set-ItemProperty $dwm -Name AccentColor -Value (As-Dword ([int64]$b.AccentColor)) -Type DWord
-    Set-ItemProperty $dwm -Name ColorizationColor -Value (As-Dword ([int64]$b.ColorizationColor)) -Type DWord
-    Set-ItemProperty $dwm -Name ColorizationAfterglow -Value (As-Dword ([int64]$b.ColorizationAfterglow)) -Type DWord
-    Set-ItemProperty $accent -Name AccentColorMenu -Value (As-Dword ([int64]$b.AccentColorMenu)) -Type DWord
-    Set-ItemProperty $accent -Name StartColorMenu -Value (As-Dword ([int64]$b.StartColorMenu)) -Type DWord
-    Set-ItemProperty $accent -Name AccentPalette -Value ([byte[]]$b.AccentPalette) -Type Binary
+    Undo-Rice $Ambito
     Broadcast
-    Write-Host 'accent restored'
+    if (Test-Path $viejo) {
+        Write-Host "nota: queda un $viejo del sistema antiguo de respaldo; ya no se usa."
+    }
     exit 0
 }
 
-# Save the originals once, so -Restore is exact.
-if (-not (Test-Path $backup)) {
-    $d = Get-ItemProperty $dwm
-    $a = Get-ItemProperty $accent
-    @{
-        AccentColor           = [uint32]$d.AccentColor
-        ColorizationColor     = [uint32]$d.ColorizationColor
-        ColorizationAfterglow = [uint32]$d.ColorizationAfterglow
-        AccentColorMenu       = [uint32]$a.AccentColorMenu
-        StartColorMenu        = [uint32]$a.StartColorMenu
-        AccentPalette         = @($a.AccentPalette)
-    } | ConvertTo-Json -Compress | Set-Content $backup -Encoding utf8
-    Write-Host "saved previous accent -> $backup"
-}
-
 $main = $ramp[$mainIndex]
-Set-ItemProperty $dwm    -Name AccentColor           -Value (As-Dword (To-Abgr $main)) -Type DWord
-Set-ItemProperty $dwm    -Name ColorizationColor     -Value (As-Dword (To-Argb $main)) -Type DWord
-Set-ItemProperty $dwm    -Name ColorizationAfterglow -Value (As-Dword (To-Argb $main)) -Type DWord
-# Accent on title bars (and not just the taskbar), so focused windows read warm.
-Set-ItemProperty $dwm    -Name ColorPrevalence       -Value 1 -Type DWord
-Set-ItemProperty $accent -Name AccentColorMenu       -Value (As-Dword (To-Abgr $main)) -Type DWord
-Set-ItemProperty $accent -Name StartColorMenu        -Value (As-Dword (To-Abgr $ramp[3])) -Type DWord
 
 # AccentPalette: 8 entries x 4 bytes (B,G,R,A), darkest first.
 $bytes = New-Object System.Collections.Generic.List[byte]
@@ -106,8 +84,20 @@ foreach ($h in $ramp) {
     $bytes.Add([Convert]::ToByte($h.Substring(0, 2), 16))  # R
     $bytes.Add(0xFF)
 }
-Set-ItemProperty $accent -Name AccentPalette -Value ($bytes.ToArray()) -Type Binary
-Set-ItemProperty $accent -Name AccentColorIndex -Value $mainIndex -Type DWord -EA SilentlyContinue
+
+Start-RiceUndo $Ambito
+try {
+    Set-RegValueTracked $dwm    'AccentColor'           (As-Dword (To-Abgr $main))     -Kind DWord
+    Set-RegValueTracked $dwm    'ColorizationColor'     (As-Dword (To-Argb $main))     -Kind DWord
+    Set-RegValueTracked $dwm    'ColorizationAfterglow' (As-Dword (To-Argb $main))     -Kind DWord
+    # Accent on title bars (and not just the taskbar), so focused windows read warm.
+    Set-RegValueTracked $dwm    'ColorPrevalence'       1                              -Kind DWord
+    Set-RegValueTracked $accent 'AccentColorMenu'       (As-Dword (To-Abgr $main))     -Kind DWord
+    Set-RegValueTracked $accent 'StartColorMenu'        (As-Dword (To-Abgr $ramp[3]))  -Kind DWord
+    Set-RegValueTracked $accent 'AccentPalette'         ($bytes.ToArray())             -Kind Binary
+    Set-RegValueTracked $accent 'AccentColorIndex'      $mainIndex                     -Kind DWord
+} finally { Save-RiceUndo }
 
 Broadcast
 Write-Host "accent set to #$main (rice amber)"
+Write-Host "-Restore lo devuelve todo, incluidos ColorPrevalence y AccentColorIndex."
