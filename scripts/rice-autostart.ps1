@@ -93,7 +93,7 @@ function WaitWezterm($antes, $sec = 6) {
 
 $n = (Get-Process wezterm-gui -EA SilentlyContinue | Measure-Object).Count
 Focus 2
-Start-Process $wez -ArgumentList 'start', '--', 'pwsh', '-NoExit', '-Command', 'claude'
+Start-Process $wez -ArgumentList 'start', '--', 'nu', '-e', 'claude'
 WaitWezterm $n
 $n = (Get-Process wezterm-gui -EA SilentlyContinue | Measure-Object).Count
 Focus 5
