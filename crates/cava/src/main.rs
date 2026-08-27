@@ -43,6 +43,16 @@ fn main() {
         timeBeginPeriod(1);
     }
 
+    // --log-fps <path>: append "secs_since_start,cols,rows,fps" every time the
+    // on-screen counter updates (twice a second), independent of whether it's
+    // actually shown ('f' toggle). Opt-in only, for A/B'ing wezterm front_ends
+    // from outside -- there's no way to read another process's rendered
+    // terminal content, so this is the log-file equivalent of eyeballing the
+    // 'f' readout.
+    let args: Vec<String> = std::env::args().collect();
+    let log_fps_path = args.iter().position(|a| a == "--log-fps").and_then(|i| args.get(i + 1).cloned());
+    let log_start = Instant::now();
+
     let ring = Arc::new(Mutex::new(vec![0f32; FFT_SIZE]));
     // Keep the loopback child handle so we can kill it on exit. Otherwise it
     // orphans and busy-loops forever (that was the multi-loopback CPU leak).
@@ -79,12 +89,24 @@ fn main() {
     let mut sm: Vec<f32> = Vec::new(); // spatially-smoothed target
     let mut pos: Vec<f32> = Vec::new(); // rendered bar height (spring position)
     let mut frame = String::new(); // reused every frame (see the render section)
+    let mut row_buf = String::new(); // scratch: one row, before diffing
+    let mut prev_rows: Vec<String> = Vec::new(); // last painted content per row
+    let mut last_cols = 0usize;
+    let mut last_rows = 0usize;
     let mut vel: Vec<f32> = Vec::new(); // spring velocity
     let mut agc = 1.0f32;
     let mut last = Instant::now();
     let mut show_fps = false; // toggle with 'f'
     let mut fps = 0.0f32;
     let mut fps_frames = 0u32;
+    // Split where the frame budget actually goes, accumulated over the same
+    // 0.5s window as fps: compute (FFT + per-bar math + string building) vs
+    // write+flush (the part that can block on wezterm's parser keeping up --
+    // backpressure on a full pipe). If write dominates, the bottleneck is on
+    // wezterm's side of the pipe, not cava's own math.
+    let mut compute_accum = Duration::ZERO;
+    let mut write_accum = Duration::ZERO;
+    let mut bytes_accum = 0u64;
     let mut fps_t = Instant::now();
 
     'main: loop {
@@ -97,8 +119,27 @@ fn main() {
         let fe = fps_t.elapsed().as_secs_f32();
         if fe >= 0.5 {
             fps = fps_frames as f32 / fe;
+            if let Some(path) = &log_fps_path {
+                let (lc, lr) = terminal::size().unwrap_or((0, 0));
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                    let _ = writeln!(
+                        f,
+                        "{:.2},{},{},{:.1},{:.2},{:.2},{}",
+                        log_start.elapsed().as_secs_f32(),
+                        lc,
+                        lr,
+                        fps,
+                        compute_accum.as_secs_f32() * 1000.0 / fps_frames.max(1) as f32,
+                        write_accum.as_secs_f32() * 1000.0 / fps_frames.max(1) as f32,
+                        bytes_accum / fps_frames.max(1) as u64,
+                    );
+                }
+            }
             fps_frames = 0;
             fps_t = Instant::now();
+            compute_accum = Duration::ZERO;
+            write_accum = Duration::ZERO;
+            bytes_accum = 0;
         }
 
         while event::poll(Duration::ZERO).unwrap_or(false) {
@@ -127,6 +168,13 @@ fn main() {
             sm = vec![0.0; nbars];
             pos = vec![0.0; nbars];
             vel = vec![0.0; nbars];
+        }
+        // Row content is keyed on (cols, rows) via nbars/from_bottom; on any size
+        // change the old rows no longer mean anything, so force a full repaint.
+        if cols != last_cols || rows != last_rows {
+            last_cols = cols;
+            last_rows = rows;
+            prev_rows = vec![String::new(); rows];
         }
 
         // FFT of the latest window.
@@ -197,42 +245,78 @@ fn main() {
             }
         }
 
-        // Render one string, write once. `frame` is reused across frames and the
-        // escape sequences are written in place: a `format!` per row per frame was
-        // ~8,250 heap allocations a second at 165 fps, all for fixed-shape text.
+        // Render each row into a scratch buffer, diff it against what's actually
+        // on screen, and only emit the rows that changed (absolute cursor
+        // position + content). `frame` accumulates just those.
+        //
+        // Why per-ROW and not per-cell: color is already a per-row gradient band
+        // (one escape code per row, not per bar), so a row is the natural, free
+        // diff granularity -- no extra bookkeeping to find "which cells changed
+        // color" because within a row they never do.
+        //
+        // MEDIDO, y es la razon de esto: wezterm-gui se comia un nucleo entero
+        // con cava abierto -- Y TAMBIEN EN SILENCIO ABSOLUTO, porque antes cava
+        // reenviaba la pantalla COMPLETA 165 veces por segundo pasara lo que
+        // pasara (~41 KB/fotograma) y wezterm tenia que parsear eso cada vez. El
+        // viejo fix (no reescribir un fotograma identico byte-a-byte) mataba el
+        // coste en silencio, pero con musica real CADA fotograma es distinto --
+        // aunque solo cambie 1 barra de 150 -- asi que el gasto completo volvia,
+        // y a pantalla grande + el resto del rice (scrollbar, decoraciones,
+        // opacidad) componiendo cada frame del lado de wezterm, esa manguera de
+        // ~6 MB/s sostenidos era mas de lo que el hilo que drena el pty podia
+        // seguir: el bloqueo se veia como escrituras (`write_ms`) de hasta 16 ms
+        // en vez de los ~1 ms normales, y el fps caia por debajo de 165 aunque el
+        // computo (FFT + muelles) seguia constante en <0.3 ms. Diffing por fila
+        // corta esos ~41 KB a solo las filas que de verdad cambiaron -- con el
+        // muelle-amortiguador la mayoria de barras se mueven <1 nivel por
+        // fotograma, asi que la mayoria de filas repiten y no se reenvian.
         frame.clear();
-        frame.push_str("\x1b[H");
         for tr in 0..rows {
             let from_bottom = rows - 1 - tr;
             let frac = from_bottom as f32 / (rows as f32 - 1.0).max(1.0);
             let (cr, cg, cb) = grad(frac);
-            let _ = write!(frame, "\x1b[38;2;{cr};{cg};{cb}m");
+            row_buf.clear();
+            let _ = write!(row_buf, "\x1b[38;2;{cr};{cg};{cb}m");
             for b in 0..nbars {
                 let h = (pos[b].min(1.0) * rows as f32 * 8.0) as i32;
                 let level = (h - (from_bottom as i32) * 8).clamp(0, 8) as usize;
                 let ch = blocks[level];
                 for _ in 0..BAR_W {
-                    frame.push(ch);
+                    row_buf.push(ch);
                 }
                 if b + 1 < nbars {
                     for _ in 0..GAP {
-                        frame.push(' ');
+                        row_buf.push(' ');
                     }
                 }
             }
-            frame.push_str("\x1b[0m");
-            if tr + 1 < rows {
-                frame.push_str("\r\n");
+            row_buf.push_str("\x1b[0m");
+            if prev_rows[tr] != row_buf {
+                let _ = write!(frame, "\x1b[{};1H", tr + 1);
+                frame.push_str(&row_buf);
+                prev_rows[tr].clear();
+                prev_rows[tr].push_str(&row_buf);
             }
         }
-        // FPS readout, top-right (toggle with 'f').
+        // FPS readout, top-right (toggle with 'f'). Small (~30B) and unconditional
+        // when shown, so its own digit-churn never forces a full-frame rewrite.
         if show_fps {
             let width = format!("{fps:.0}").len() + 6; // " NNN fps "
             let col = cols.saturating_sub(width).max(1);
             let _ = write!(frame, "\x1b[1;{col}H\x1b[97m {fps:.0} fps \x1b[0m");
         }
-        let _ = stdout.write_all(frame.as_bytes());
-        let _ = stdout.flush();
+        // Everything above this line is compute (FFT, per-bar math, building
+        // `frame`); everything from here to the next line is the write.
+        // Timed separately so a slowdown can be pinned on one side or the
+        // other instead of guessed at.
+        let compute_done = Instant::now();
+        compute_accum += compute_done - t0;
+        if !frame.is_empty() {
+            let _ = stdout.write_all(frame.as_bytes());
+            let _ = stdout.flush();
+            bytes_accum += frame.len() as u64;
+        }
+        write_accum += compute_done.elapsed();
 
         let elapsed = t0.elapsed();
         if elapsed < frame_time {
