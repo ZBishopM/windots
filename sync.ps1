@@ -45,7 +45,7 @@ foreach ($f in 'glazewm-dwindle.ps1', 'glazewm-animcheck.ps1', 'wezterm-hotkey.a
                'rice-trim-background.ps1', 'rice-uninstall.ps1', 'rice-llm.ps1',
                'rice-accent.ps1', 'rice-boot-report.ps1', 'rice-notif-banners.ps1',
                'rice-retire-replaced.ps1', 'rice-tame-startup.ps1', 'rice-trim-run.ps1',
-               'rice-clip-share.ps1', 'rice-onedrive-purge.ps1') {
+               'rice-clip-share.ps1', 'rice-onedrive-purge.ps1', 'rice-deshacer.ps1', 'rice-teclado.ps1') {
     $Map["scripts\$f"] = "$home_\.config\$f"
 }
 foreach ($f in Get-ChildItem "$home_\.config\lib\*.ps1" -EA SilentlyContinue) {
