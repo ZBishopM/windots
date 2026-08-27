@@ -35,11 +35,48 @@ AhkAlive()
 ; ------------------------------------------------------------
 ; Hyprland-style global hotkey to launch WezTerm.
 ;   #  = SUPER (Windows key)
-;   SUPER + Enter  -> open a new WezTerm window
+;   SUPER + Enter  -> open a new WezTerm window, instantly
 ; Runs from the Startup folder, so the hotkey is always active.
+;
+; 2026-08-27, take two. First attempt routed this through a custom mux
+; domain ('rice') -- reverted, see git history: a mux pane survives its
+; window closing (that's the whole point of mux persistence), so repeated
+; presses kept reattaching to one old, growing-stale session instead of a
+; fresh one, and detecting that from AHK cost up to 1.5s of felt delay too.
+;
+; This is the second attempt, and it's simpler: no custom domain at all.
+; `wezterm cli spawn --new-window` with NO --domain-name uses wezterm-gui's
+; own implicit default/local domain -- the one every running instance
+; already has, no config needed. Verified directly (not just read about)
+; on 2026-08-27: run against an already-open wezterm-gui, it added a SECOND
+; top-level window to that SAME process (confirmed via EnumWindows: both
+; titles' owning PID matched) -- not a new process, and NOT the "connect"
+; class of command, so no domain to persist a stale session in. Killing
+; that pane (`cli kill-pane`) made it vanish from `cli list` completely --
+; clean, no leftover state. This is the actual "same parent process,
+; separate window, instant open AND close" the mux attempt was reaching
+; for.
+;
+; Cold-start caveat (still true, same shape as before, NOT eliminated by
+; this simpler approach): with zero wezterm-gui running anywhere, there's
+; no existing process for `cli spawn` to attach a window to. Couldn't
+; verify this specific path without closing every WezTerm window including
+; the one this was written in, so: poll briefly for a new window, and if
+; none shows up, fall back to a plain `start`. That fallback is NOT the
+; mux-domain fallback that caused the stale-session bug -- `start` has no
+; persistence at all, so there's no equivalent risk here, only a slightly
+; slower cold first window (a fresh wezterm-gui.exe process, same as
+; always).
 ; ------------------------------------------------------------
 
 #Enter:: {
+    before := WinGetList('ahk_exe wezterm-gui.exe').Length
+    RunWait('"C:\Program Files\WezTerm\wezterm.exe" cli spawn --new-window', , 'Hide')
+    Loop 10 {
+        if (WinGetList('ahk_exe wezterm-gui.exe').Length > before)
+            return
+        Sleep(50)
+    }
     Run('"C:\Program Files\WezTerm\wezterm-gui.exe" start')
 }
 

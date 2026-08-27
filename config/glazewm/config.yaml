@@ -321,6 +321,11 @@ keybindings:
   # Close focused window. SUPER+Q (either Win key) plus the original Alt+Shift+Q.
   # This is a REQUEST (WM_CLOSE): the app may show "save changes?", minimise to
   # tray, or ignore it. That is the right default.
+  #
+  # Also used to close the extra WezTerm windows Win+Enter opens (`cli spawn
+  # --new-window`, see wezterm-hotkey.ahk) -- those are separate top-level
+  # windows on the SAME wezterm-gui process, so closing one doesn't touch the
+  # others. No separate SUPER+W: same command, no reason for two bindings.
   - commands: ['close']
     bindings: ['lwin+q', 'rwin+q']
 

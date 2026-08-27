@@ -11,6 +11,16 @@ local config = wezterm.config_builder()
 -- interactive shell is. To get a pwsh prompt, just run `pwsh`.
 config.default_prog = { 'nu.exe' }
 
+-- A unix_domains ('rice') + mux experiment for Win+Enter lived here
+-- 2026-08-27, trying to share one backend across repeated presses instead of
+-- a plain process each time. Reverted: mux panes persist past their window
+-- closing (the whole point of mux), so the fallback path kept reattaching to
+-- an old, stale session instead of ever giving a fresh one, and detecting
+-- that from the AHK side added a real, felt delay on top. See
+-- wezterm-hotkey.ahk's #Enter:: comment for the full account. Back to plain
+-- `wezterm-gui.exe start` -- instant, always fresh, and nu.exe's own
+-- footprint was never the actual memory cost on this machine anyway.
+
 -- Launch menu: pick a shell from the tab-bar '+' dropdown (right-click it).
 config.launch_menu = {
   { label = 'nushell', args = { 'nu.exe' } },
@@ -35,7 +45,7 @@ config.initial_rows = 30
 -- terminal until a manual resize recreates the surface. OpenGL composites
 -- transparency correctly on resize, so the box never appears.
 config.max_fps = 165
-config.animation_fps = 165
+config.animation_fps = 1
 config.front_end = 'OpenGL'
 config.webgpu_power_preference = 'HighPerformance'
 
@@ -49,6 +59,9 @@ config.webgpu_power_preference = 'HighPerformance'
 config.set_environment_variables = { FASTFETCH_SHOWN = '' }
 
 config.window_decorations = 'RESIZE'
+-- Explicito por GlazeWM: con nil wezterm autodetecta el mosaico, y si falla
+-- pelea con el WM redimensionando la ventana al cambiar el tamano de fuente.
+config.adjust_window_size_when_changing_font_size = false
 config.hide_tab_bar_if_only_one_tab = true
 config.use_fancy_tab_bar = false
 -- The scroll bar is drawn INSIDE the right padding, so that padding has to be
