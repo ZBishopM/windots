@@ -173,8 +173,97 @@ nunca) y hay que reiniciar el proceso que lo usa.
 | `launcher.file_skip` | string[] | 23 rutas | Reinicio. Subcadenas en minúsculas; una ruta que contenga cualquiera no se indexa |
 | `launcher.file_roots` | string[] | `[]` | Reinicio. Vacío = todas las unidades fijas |
 | `launcher.file_limit` | int | `4000000` | Reinicio. Tope de entradas del índice |
-| `clips.*` | — | — | Por guardado. Lo leen los **scripts**, no los binarios: ver el esquema |
+| `clips.*` | — | — | Por guardado. Lo leen los **scripts**, no los binarios: ver [Compartir clips](#compartir-clips-catbox--discord) |
 | `animation.*` | — | — | **En caliente**, ver abajo |
+
+---
+
+### Compartir clips: catbox + Discord
+
+No es un bot: es un **webhook**. Publica en un canal y nada más — no lee, no
+responde, no tiene comandos.
+
+#### Qué pasa al pulsar Alt+F10
+
+```
+Alt+F10
+  └─ shadowplay-wgc-save.ps1        corta ~30 s del búfer en RAM
+     │                              y mira QUÉ APP TENÍA EL FOCO en ese instante
+     └─ rice-clip-share.ps1         (en segundo plano: tarda ~15 s)
+        ├─ transcodifica HEVC → H.264
+        ├─ sube a catbox (o litterbox)
+        ├─ enlace al portapapeles          ← inmediato
+        ├─ publica el enlace en Discord    ← inmediato, sólo si el foco era un juego
+        └─ aviso en tu pantalla            ← APLAZADO hasta que sueltes el juego
+```
+
+Tres decisiones que explican el diseño:
+
+**Se transcodifica** porque Discord es Chromium y no decodifica H.265. Un clip
+subido tal cual le llega a tus amigos como una descarga en vez de reproducirse
+en el canal. Cuesta ~6 s con NVENC y **no** ahorra tamaño: medido aquí, un clip
+bajó de 25,9 a 13,8 MB y otro **subió** de 24,5 a 27,3. Si el H.264 engorda más
+de la mitad, se descarta y se sube el original.
+
+**Se publica el enlace, no el archivo.** El webhook usa el nivel de *boost* del
+servidor (10 MB sin boost, 50 en nivel 2, 100 en nivel 3) y un clip medio son
+~26 MB. Un enlace cabe siempre, y Discord previsualiza el `.mp4` en el canal.
+
+**A Discord se publica YA; el aviso en tu pantalla espera.** Publicar no te
+interrumpe —aparece en la pantalla de otros— y el sentido de compartir una
+jugada es que la vean mientras sigues jugando. Lo que se aplaza es la
+notificación local, que expande la barra y minimizaba el juego en pantalla
+completa. Tope de 15 min: pasado eso avisa igual.
+
+#### Dónde se configura
+
+| Archivo | Qué lleva | Versionado |
+|---|---|---|
+| `~/.config/rice.json` → `clips` | Si sube, a dónde, si transcodifica, en qué juegos avisa | Sí |
+| `~/.config/rice-secrets.json` | **La URL del webhook y el userhash de catbox** | **No** |
+| `~/.config/logs/clip-share.log` | Qué pasó en cada guardado, con el código HTTP | No |
+
+Las claves de `clips.*` están documentadas una a una en `rice.schema.json`; tu
+editor las autocompleta. Resumen: `upload`, `host` (`catbox`\|`litterbox`),
+`litterbox_time`, `transcode`, `cq`, y `discord_when_focused`.
+
+`discord_when_focused` es una lista de subcadenas en minúsculas comparadas
+contra el **nombre del proceso enfocado** al pulsar Alt+F10. `League of Legends`
+es el juego; `LeagueClientUx` es el lanzador y **no** hace match a propósito,
+porque un clip del lobby no es una jugada.
+
+#### rice-secrets.json
+
+**Fuera del repo a propósito**: con la URL del webhook cualquiera puede publicar
+en tu canal, y este repo es público. Está en `.gitignore`, no está en el mapa de
+`sync.ps1`, y `install.ps1` sólo crea una plantilla vacía.
+
+```jsonc
+{
+  "discord_webhook": "https://discord.com/api/webhooks/<id>/<token>",
+  "catbox_userhash": "<32 caracteres>"
+}
+```
+
+| Clave | Dónde se saca | Si falta |
+|---|---|---|
+| `discord_webhook` | Discord → Ajustes del servidor → Integraciones → Webhooks → Nuevo webhook → Copiar URL | Sube igual y deja el enlace en el portapapeles; el log dice `era League pero no hay discord_webhook` |
+| `catbox_userhash` | catbox.moe → Manage account → User hash | La subida es **anónima y NO SE PUEDE BORRAR**: la API de borrado exige userhash y responde 412 |
+
+Ese último punto es el motivo de que **`clips.upload` venga en `false` por
+defecto**: si el archivo de configuración falta o no se puede leer, el fallo
+seguro es no publicar nada.
+
+#### Cuando no llega a Discord
+
+Mira `~/.config/logs/clip-share.log`. Ya no hay salidas mudas: si el script
+corrió, dejó una línea. Las tres que importan:
+
+| Línea | Significa |
+|---|---|
+| `no era League: no aviso a Discord` | El foco al pulsar Alt+F10 no coincidía con `discord_when_focused` |
+| `era League pero no hay discord_webhook en rice-secrets.json` | Falta el secreto |
+| `Discord fallo: …` | El webhook existe pero la petición falló — webhook borrado, canal borrado, o sin red |
 
 ---
 

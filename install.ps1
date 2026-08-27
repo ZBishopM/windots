@@ -112,6 +112,31 @@ foreach ($f in 'glazewm-dwindle.ps1', 'glazewm-animcheck.ps1', 'rice-accent.ps1'
 foreach ($f in Get-ChildItem "$repo\scripts\lib\*.ps1") {
     Deploy $f.FullName "$home_\.config\lib\$($f.Name)"
 }
+# Plantilla de secretos, VACIA y solo si no existe.
+#
+# Este archivo no se versiona -- con la URL del webhook cualquiera publica en tu
+# canal y el repo es publico -- asi que en una maquina limpia sencillamente NO
+# ESTA, y hasta ahora nada lo decia. El resultado era un fallo mudo perfecto:
+# Alt+F10 graba, sube a catbox, y no avisa nunca a Discord sin que nada explique
+# por que. Peor: su documentacion vivia DENTRO del propio archivo, que es
+# justamente el que no tienes.
+#
+# Se crea vacio, nunca se pisa uno existente, y lleva las instrucciones dentro.
+$secrets = "$home_\.config\rice-secrets.json"
+if (Test-Path $secrets) {
+    Ok 'rice-secrets.json ya existe - no se toca'
+} else {
+    @'
+{
+  "_nota": "Fuera del repo a proposito: con la URL del webhook cualquiera puede publicar en tu canal, y dotfiles es publico. No esta en el mapa de sync.ps1 y esta en .gitignore.",
+  "_como": "Discord > Ajustes del servidor > Integraciones > Webhooks > Nuevo webhook > Copiar URL",
+  "discord_webhook": "",
+  "_catbox": "Opcional pero recomendado: sin userhash las subidas son anonimas y NO SE PUEDEN BORRAR (la API devuelve 412). Saca el tuyo en catbox.moe > Manage account > User hash.",
+  "catbox_userhash": ""
+}
+'@ | Set-Content -Path $secrets -Encoding utf8
+    Ok "plantilla creada: $secrets  (rellena discord_webhook para que avise a Discord)"
+}
 # Firefox AutoConfig -- the only two files in this repo that do NOT live under
 # $home_. AutoConfig is read from the application directory next to firefox.exe,
 # which is how it gets to override @mozilla.org/alerts-service;1 before any
