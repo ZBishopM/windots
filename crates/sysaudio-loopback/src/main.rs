@@ -167,7 +167,19 @@ unsafe fn capture<W: Write>(out: &mut Sink<W>, mic: bool, solo_publicar: bool) -
     } else {
         (eRender, AUDCLNT_STREAMFLAGS_LOOPBACK)
     };
-    let device = enumerator.GetDefaultAudioEndpoint(flow, eConsole)?;
+    // Con `record_mic` puesto se busca ese microfono por nombre; si no esta
+    // conectado se cae al predeterminado, que es peor que nada pero mejor que
+    // no grabar. Ver el comentario del ajuste en rice-common/settings.rs.
+    let preferido = if mic { rice_common::settings::Settings::load().record_mic } else { String::new() };
+    let device = match buscar_endpoint(&enumerator, flow, &preferido) {
+        Some(d) => d,
+        None => {
+            if !preferido.is_empty() {
+                eprintln!("mic: no encontre ninguno que contenga {preferido:?}; uso el predeterminado");
+            }
+            enumerator.GetDefaultAudioEndpoint(flow, eConsole)?
+        }
+    };
     let dev_id = endpoint_id(&device); // to detect a later default-device switch
     let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
 
@@ -338,6 +350,31 @@ unsafe fn endpoint_id(dev: &IMMDevice) -> Option<String> {
     let s = p.to_string().ok();
     CoTaskMemFree(Some(p.0 as *const core::ffi::c_void));
     s
+}
+
+/// Primer endpoint ACTIVO cuyo nombre contenga `quiere` (sin distinguir
+/// mayusculas). `quiere` vacio devuelve None, que el llamador trata como
+/// "usa el predeterminado" -- asi el camino de siempre no cambia.
+unsafe fn buscar_endpoint(
+    enumerator: &IMMDeviceEnumerator,
+    flow: EDataFlow,
+    quiere: &str,
+) -> Option<IMMDevice> {
+    if quiere.is_empty() {
+        return None;
+    }
+    let quiere = quiere.to_lowercase();
+    // Solo DEVICE_STATE_ACTIVE: un endpoint deshabilitado o desconectado se
+    // enumera igual y activarlo falla, que es exactamente el caso del headset
+    // inalambrico apagado.
+    let col = enumerator.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE).ok()?;
+    for i in 0..col.GetCount().ok()? {
+        let d = col.Item(i).ok()?;
+        if endpoint_name(&d).is_some_and(|n| n.to_lowercase().contains(&quiere)) {
+            return Some(d);
+        }
+    }
+    None
 }
 
 /// Nombre legible del endpoint, p. ej. "Microfono (HyperX Cloud II Wireless)".

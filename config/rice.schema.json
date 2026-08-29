@@ -25,6 +25,11 @@
       "default": ["hyperx", "snowball"],
       "description": "Substrings matched against capture-device names. micswitch cycles through the matching devices in this order."
     },
+    "record_mic": {
+      "type": "string",
+      "default": "",
+      "description": "Which microphone ShadowPlay records, as a substring of the device name (\"hyperx\"). Empty = whatever Windows has as default, which is how clips silently ended up recording the room instead of the headset. No equivalent for output on purpose: the loopback should follow the default so it captures whatever is actually playing."
+    },
     "outputs": {
       "type": "array",
       "items": { "type": "string" },

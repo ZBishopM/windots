@@ -210,6 +210,27 @@ pub struct Settings {
     #[serde(default = "default_mics")]
     pub mics: Vec<String>,
 
+    /// Which microphone ShadowPlay records, as a substring of the device's
+    /// friendly name ("hyperx"). Empty = whatever Windows has as default.
+    ///
+    /// Exists because "whatever Windows has as default" quietly stopped being
+    /// the right answer: this machine has six capture endpoints, and when the
+    /// wireless headset is off Windows falls back to the condenser mic across
+    /// the desk — which keeps recording, just of the room, ~25 dB below
+    /// speech. From outside that is indistinguishable from a dead microphone,
+    /// and it ate the voice track of several clips before anyone noticed.
+    ///
+    /// Deliberately NOT reusing `mics`: that list is micswitch's cycling
+    /// order, and a device being in it doesn't mean it's the one to record.
+    /// Deliberately empty by default so nothing changes for a machine where
+    /// the default endpoint was already correct.
+    ///
+    /// There is no matching setting for the loopback side on purpose —
+    /// following the default *render* device is right there, since the point
+    /// is to capture whatever is actually playing.
+    #[serde(default)]
+    pub record_mic: String,
+
     /// Substrings matched against playback-device names, in the order they
     /// should appear in the island's device page.
     ///
@@ -276,6 +297,7 @@ impl Default for Settings {
         Self {
             bar_height: default_bar_height(),
             mics: default_mics(),
+            record_mic: String::new(), // vacio = el predeterminado de Windows
             outputs: default_outputs(),
             notification_style: default_notification_style(),
             ipc_url: default_ipc(),

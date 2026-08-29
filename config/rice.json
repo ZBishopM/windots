@@ -5,6 +5,7 @@
   "bar_height": 34,
 
   "mics": ["hyperx", "snowball"],
+  "record_mic": "hyperx",
   "outputs": ["hyperx", "vg270", "airpods"],
   "clickthrough_apps": ["league of legends", "valorant"],
   "hide_bar_on_fullscreen": false,
