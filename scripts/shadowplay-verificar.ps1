@@ -36,9 +36,18 @@ public static extern bool SetEvent(System.IntPtr h);
     Start-Sleep -Seconds 4
 }
 
-$segs = @(Get-ChildItem (Join-Path $buf 'seg*.pcm') -EA SilentlyContinue |
-          Where-Object { $_.Name -notlike '*.mic.pcm' } | Sort-Object LastWriteTime)
-if (-not $segs) { throw "No hay nada en $buf. Corre sin -SinCorte para forzar un corte." }
+# Ordenar por los .mp4, NUNCA por los .pcm.
+#
+# dump_ring vuelca los doce .pcm de golpe en el corte, asi que todos quedan con
+# la misma marca de tiempo y ordenarlos por ella da un orden arbitrario: el
+# audio sale troceado y fuera de secuencia, y al escucharlo parece que hubiera
+# un desfase enorme cuando lo unico que pasa es que los pedazos estan
+# barajados. Los .mp4 se cierran de a uno, asi que su mtime SI es el instante
+# real de cada segmento. Es el mismo criterio que usa shadowplay-wgc-save.ps1.
+$videos = @(Get-ChildItem (Join-Path $buf 'seg*.mp4') -EA SilentlyContinue |
+            Where-Object { $_.Length -gt 100KB } | Sort-Object LastWriteTime)
+if (-not $videos) { throw "No hay nada en $buf. Corre sin -SinCorte para forzar un corte." }
+$segs = @($videos | ForEach-Object { Get-Item (Join-Path $buf ($_.BaseName + '.pcm')) -EA SilentlyContinue })
 
 New-Item -ItemType Directory -Force -Path $salida | Out-Null
 $sis = Join-Path $salida 'sistema.pcm'
