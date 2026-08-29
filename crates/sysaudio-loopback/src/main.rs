@@ -190,10 +190,19 @@ unsafe fn capture<W: Write>(out: &mut Sink<W>, mic: bool, solo_publicar: bool) -
     let bits = wf.wBitsPerSample;
     let is_float = wf.wFormatTag == 3 /* IEEE_FLOAT */
         || (wf.wFormatTag == 0xFFFE /* EXTENSIBLE */ && bits == 32);
+    let nombre = endpoint_name(&device).unwrap_or_else(|| "(sin nombre)".into());
     eprintln!(
-        "{}: \"{}\" | {in_rate} Hz, {in_ch} ch, {bits} bit, float={is_float}",
-        if mic { "mic" } else { "loopback" },
-        endpoint_name(&device).unwrap_or_else(|| "(sin nombre)".into())
+        "{}: \"{nombre}\" | {in_rate} Hz, {in_ch} ch, {bits} bit, float={is_float}",
+        if mic { "mic" } else { "loopback" }
+    );
+    // Dejar el nombre en un archivo, no solo en stderr: el grabador se traga el
+    // stderr de sus hijos, asi que desde fuera no habia forma de saber de que
+    // dispositivo salio un clip. Se reescribe en cada apertura, incluida la
+    // reapertura por cambio de predeterminado, asi que siempre refleja lo que
+    // se esta capturando AHORA. El guardado lo sella en los metadatos del mp4.
+    let _ = std::fs::write(
+        rice_common::config::config_path(if mic { "audio-endpoint-mic.txt" } else { "audio-endpoint-loopback.txt" }),
+        &nombre,
     );
 
     // 200ms shared buffer.

@@ -39,7 +39,7 @@ $Map = [ordered]@{
 # are exactly the ones that get edited live and never copied back, because nobody
 # runs them twice in the same week.
 foreach ($f in 'glazewm-dwindle.ps1', 'glazewm-animcheck.ps1', 'wezterm-hotkey.ahk',
-               'shadowplay-record.ps1', 'shadowplay-record.vbs', 'shadowplay-wgc-save.ps1',
+               'shadowplay-record.ps1', 'shadowplay-record.vbs', 'shadowplay-wgc-save.ps1', 'shadowplay-verificar.ps1',
                'shadowplay-wgc.vbs', 'rice-supervisor.ps1', 'rice-supervisor.vbs',
                'rice-autostart.ps1', 'rice-autostart.vbs', 'rice-tray-promote.ps1',
                'rice-trim-background.ps1', 'rice-uninstall.ps1', 'rice-llm.ps1',

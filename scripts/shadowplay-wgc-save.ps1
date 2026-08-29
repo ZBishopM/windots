@@ -320,20 +320,46 @@ $haveMic = $haveMic -and (Get-Item $micOut).Length -gt 0
 $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
 $dest = Join-Path $out "replay_$ts.mp4"
 $pcm = @('-f', 's16le', '-ar', '48000', '-ac', '2')  # raw-PCM input flags
+
+# Sellar en el propio clip DE DONDE salio cada pista y a que nivel.
+#
+# El audio del escritorio se cayo de forma intermitente durante semanas (12 de
+# agosto, otra vez el 22-23) y no habia manera de saberlo sin abrir los clips a
+# mano y medirlos uno por uno con ffmpeg -- que es literalmente como se acabo
+# encontrando. La captura loopback sigue al dispositivo de salida
+# PREDETERMINADO, y ese cambia solo (hibernacion, el headset inalambrico que se
+# apaga, el monitor que suspende), asi que un clip puede salir mudo sin que
+# nada falle visiblemente. Con esto cada clip se autodocumenta: `ffprobe` sobre
+# el archivo dice que endpoints se capturaron y con que niveles, y "se me fue
+# el audio" pasa a ser una pregunta con respuesta.
+function NivelDe($ruta) {
+    if (-not (Test-Path -LiteralPath $ruta) -or (Get-Item -LiteralPath $ruta).Length -eq 0) { return 'ausente' }
+    $m = & $ff -hide_banner -f s16le -ar 48000 -ac 2 -i $ruta -af volumedetect -f null - 2>&1 |
+         Select-String 'mean_volume:\s*(\S+)|max_volume:\s*(\S+)' -AllMatches
+    $vals = @($m | ForEach-Object { $_.Line -replace '.*volume:\s*', '' })
+    if ($vals.Count -ge 2) { "medio $($vals[0]) / pico $($vals[1])" } else { 'sin medir' }
+}
+$cfgDir = Join-Path $env:USERPROFILE '.config'
+$epMic = try { (Get-Content (Join-Path $cfgDir 'audio-endpoint-mic.txt') -Raw -EA Stop).Trim() } catch { 'desconocido' }
+$epSis = try { (Get-Content (Join-Path $cfgDir 'audio-endpoint-loopback.txt') -Raw -EA Stop).Trim() } catch { 'desconocido' }
+$meta = @(
+    '-metadata', "comment=sistema: $epSis [$(NivelDe $sysOut)] | microfono: $epMic [$(NivelDe $micOut)]"
+)
+
 if ($haveSys -and $haveMic) {
     # Mix system audio + mic into one track. normalize=0 keeps both at full level
     # (edit the amix weights here to rebalance game vs voice).
     & $ff -hide_banner -loglevel error -f concat -safe 0 -i $listFile `
         @pcm -i $sysOut @pcm -i $micOut `
         -filter_complex '[1:a][2:a]amix=inputs=2:duration=longest:normalize=0[a]' `
-        -map 0:v:0 -map '[a]' -c:v copy -c:a aac -b:a 160k -shortest -y $dest 2>$null
+        -map 0:v:0 -map '[a]' -c:v copy -c:a aac -b:a 160k -shortest @meta -y $dest 2>$null
 }
 elseif ($haveSys) {
     & $ff -hide_banner -loglevel error -f concat -safe 0 -i $listFile `
-        @pcm -i $sysOut -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -b:a 160k -shortest -y $dest 2>$null
+        @pcm -i $sysOut -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -b:a 160k -shortest @meta -y $dest 2>$null
 }
 else {
-    & $ff -hide_banner -loglevel error -f concat -safe 0 -i $listFile -c copy -y $dest 2>$null
+    & $ff -hide_banner -loglevel error -f concat -safe 0 -i $listFile -c copy @meta -y $dest 2>$null
 }
 # Feedback goes to the dynamic island only. The standalone toast used to fire as
 # well, because the bar was hidden under a fullscreen game -- but the game runs
