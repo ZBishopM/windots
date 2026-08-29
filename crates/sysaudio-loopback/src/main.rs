@@ -179,8 +179,9 @@ unsafe fn capture<W: Write>(out: &mut Sink<W>, mic: bool, solo_publicar: bool) -
     let is_float = wf.wFormatTag == 3 /* IEEE_FLOAT */
         || (wf.wFormatTag == 0xFFFE /* EXTENSIBLE */ && bits == 32);
     eprintln!(
-        "{}: {in_rate} Hz, {in_ch} ch, {bits} bit, float={is_float}",
-        if mic { "mic" } else { "loopback" }
+        "{}: \"{}\" | {in_rate} Hz, {in_ch} ch, {bits} bit, float={is_float}",
+        if mic { "mic" } else { "loopback" },
+        endpoint_name(&device).unwrap_or_else(|| "(sin nombre)".into())
     );
 
     // 200ms shared buffer.
@@ -337,4 +338,22 @@ unsafe fn endpoint_id(dev: &IMMDevice) -> Option<String> {
     let s = p.to_string().ok();
     CoTaskMemFree(Some(p.0 as *const core::ffi::c_void));
     s
+}
+
+/// Nombre legible del endpoint, p. ej. "Microfono (HyperX Cloud II Wireless)".
+///
+/// Existe porque su ausencia costo una tarde: esta maquina tiene SEIS entradas
+/// de captura (HyperX, Blue Snowball, VB-Cable, Oculus, Steam, RODE) y aqui se
+/// abre la que Windows tenga como predeterminada. Si esa no es la que el
+/// usuario usa, se graba ruido de sala -- indistinguible desde fuera de "el
+/// microfono no funciona", porque el log solo decia el formato (48000 Hz,
+/// 2 ch) y eso es identico en todas.
+unsafe fn endpoint_name(dev: &IMMDevice) -> Option<String> {
+    use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
+    use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
+    let store = dev.OpenPropertyStore(STGM_READ).ok()?;
+    let mut v = store.GetValue(&PKEY_Device_FriendlyName).ok()?;
+    let s = v.to_string();
+    let _ = PropVariantClear(&mut v);
+    Some(s)
 }

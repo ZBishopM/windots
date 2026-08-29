@@ -11,4 +11,10 @@ windows = { version = "0.58", features = [
   "Win32_Foundation",
   "Win32_Media_Audio",
   "Win32_System_Com",
+  # Solo para leer el nombre legible del endpoint en el log (endpoint_name):
+  # PKEY_Device_FriendlyName vive en FunctionDiscovery, el PROPVARIANT que lo
+  # devuelve en StructuredStorage, y OpenPropertyStore en PropertiesSystem.
+  "Win32_Devices_FunctionDiscovery",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_UI_Shell_PropertiesSystem",
 ] }
