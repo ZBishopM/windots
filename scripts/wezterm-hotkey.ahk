@@ -38,47 +38,26 @@ AhkAlive()
 ;   SUPER + Enter  -> open a new WezTerm window, instantly
 ; Runs from the Startup folder, so the hotkey is always active.
 ;
-; 2026-08-27, take two. First attempt routed this through a custom mux
-; domain ('rice') -- reverted, see git history: a mux pane survives its
-; window closing (that's the whole point of mux persistence), so repeated
-; presses kept reattaching to one old, growing-stale session instead of a
-; fresh one, and detecting that from AHK cost up to 1.5s of felt delay too.
+; 2026-08-28: back to plain `start`, no `cli spawn` at all. Two earlier
+; attempts both used something that persists behind the window closing --
+; a custom mux domain first, then `wezterm cli spawn --new-window` -- and
+; both bit us for the same underlying reason. The mux domain kept
+; reattaching to a stale session. `cli spawn --new-window`, when NO
+; wezterm-gui is already running, turned out to silently start its OWN
+; wezterm-mux-server.exe as an implicit fallback and then hang on it --
+; reproduced directly: a single cold call sat for 80+ seconds and left an
+; orphaned mux-server process behind. Nine of those had piled up in the
+; background before this was caught, each having blocked RunWait for that
+; same long hang -- that IS the "Win+Enter takes forever" symptom.
 ;
-; This is the second attempt, and it's simpler: no custom domain at all.
-; `wezterm cli spawn --new-window` with NO --domain-name uses wezterm-gui's
-; own implicit default/local domain -- the one every running instance
-; already has, no config needed. Verified directly (not just read about)
-; on 2026-08-27: run against an already-open wezterm-gui, it added a SECOND
-; top-level window to that SAME process (confirmed via EnumWindows: both
-; titles' owning PID matched) -- not a new process, and NOT the "connect"
-; class of command, so no domain to persist a stale session in. Killing
-; that pane (`cli kill-pane`) made it vanish from `cli list` completely --
-; clean, no leftover state. This is the actual "same parent process,
-; separate window, instant open AND close" the mux attempt was reaching
-; for.
-;
-; Cold-start caveat (still true, same shape as before, NOT eliminated by
-; this simpler approach): with zero wezterm-gui running anywhere, there's
-; no existing process for `cli spawn` to attach a window to. Couldn't
-; verify this specific path without closing every WezTerm window including
-; the one this was written in, so: poll briefly for a new window, and if
-; none shows up, fall back to a plain `start`. That fallback is NOT the
-; mux-domain fallback that caused the stale-session bug -- `start` has no
-; persistence at all, so there's no equivalent risk here, only a slightly
-; slower cold first window (a fresh wezterm-gui.exe process, same as
-; always).
+; Plain `start` has none of this: no persistence, no implicit domain, a
+; fresh wezterm-gui.exe process every time. Slightly more memory per
+; window, but that was never the actual cost on this machine (see
+; .wezterm.lua's own comment on this), and it's the one form of this
+; hotkey that has never once misbehaved.
 ; ------------------------------------------------------------
 
-#Enter:: {
-    before := WinGetList('ahk_exe wezterm-gui.exe').Length
-    RunWait('"C:\Program Files\WezTerm\wezterm.exe" cli spawn --new-window', , 'Hide')
-    Loop 10 {
-        if (WinGetList('ahk_exe wezterm-gui.exe').Length > before)
-            return
-        Sleep(50)
-    }
-    Run('"C:\Program Files\WezTerm\wezterm-gui.exe" start')
-}
+#Enter:: Run('"C:\Program Files\WezTerm\wezterm-gui.exe" start')
 
 ; ------------------------------------------------------------
 ; Stop a BARE Win press from opening the Start menu, without breaking any
