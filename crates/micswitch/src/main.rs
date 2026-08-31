@@ -7,6 +7,7 @@
 
 use std::ffi::c_void;
 use windows::core::*; // PROPVARIANT, PWSTR, PCWSTR, GUID, HRESULT, IUnknown, Interface
+use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::*;
 use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
 use windows::Win32::System::Com::*;
@@ -73,6 +74,16 @@ fn main() -> Result<()> {
         .position(|a| a == "--set" || a == "-s")
         .and_then(|i| argv.get(i + 1))
         .map(|s| s.to_lowercase());
+    // `--level` imprime el nivel de cada endpoint; `--level <0-100>` lo fija en
+    // el actual. Es el porcentaje que se ve en la pagina de sonido de Windows
+    // (el escalar del endpoint), NO el "refuerzo de microfono" de +10/+20/+30 dB,
+    // que es una ganancia aparte y no se toca aqui: sube tambien el ruido de
+    // fondo, que es justo lo que no se quiere en una toma de voz.
+    let nivel_pos = argv.iter().position(|a| a == "--level" || a == "-v");
+    let nivel_nuevo: Option<f32> = nivel_pos
+        .and_then(|i| argv.get(i + 1))
+        .and_then(|s| s.parse::<f32>().ok())
+        .map(|v| (v / 100.0).clamp(0.0, 1.0));
 
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
@@ -93,12 +104,55 @@ fn main() -> Result<()> {
             names.push(friendly_name(&dev).unwrap_or_else(|| "?".into()));
         }
 
-        if list {
-            let cur_id = enumerator
-                .GetDefaultAudioEndpoint(flow, eConsole)
+        let cur_id_de = |e: &IMMDeviceEnumerator| {
+            e.GetDefaultAudioEndpoint(flow, eConsole)
                 .ok()
                 .and_then(|d| endpoint_id(&d))
-                .unwrap_or_default();
+                .unwrap_or_default()
+        };
+
+        if nivel_pos.is_some() {
+            let cur_id = cur_id_de(&enumerator);
+            // Con valor: se fija en el predeterminado (o en el que diga --set).
+            if let Some(v) = nivel_nuevo {
+                let objetivo = want
+                    .as_ref()
+                    .and_then(|w| (0..names.len()).find(|&i| names[i].to_lowercase().contains(w.as_str())))
+                    .or_else(|| (0..ids.len()).find(|&i| ids[i] == cur_id));
+                let Some(i) = objetivo else {
+                    eprintln!("no encontre el dispositivo");
+                    return Ok(());
+                };
+                let vol: IAudioEndpointVolume = coll.Item(i as u32)?.Activate(CLSCTX_ALL, None)?;
+                vol.SetMasterVolumeLevelScalar(v, std::ptr::null())?;
+                println!("{}: {:.0}%", names[i], v * 100.0);
+                return Ok(());
+            }
+            // Sin valor: solo informar, de todos.
+            for i in 0..names.len() {
+                let marca = if ids[i] == cur_id { "*" } else { " " };
+                match coll
+                    .Item(i as u32)
+                    .and_then(|d| d.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None))
+                    .and_then(|v| v.GetMasterVolumeLevelScalar().map(|s| (v, s)))
+                {
+                    Ok((v, s)) => {
+                        let mudo = v.GetMute().map(|m| m.as_bool()).unwrap_or(false);
+                        println!(
+                            "{marca} {:>3.0}%{} {}",
+                            s * 100.0,
+                            if mudo { " [MUDO]" } else { "       " },
+                            names[i]
+                        );
+                    }
+                    Err(_) => println!("{marca}   ?%        {}", names[i]),
+                }
+            }
+            return Ok(());
+        }
+
+        if list {
+            let cur_id = cur_id_de(&enumerator);
             for (i, n) in names.iter().enumerate() {
                 println!("{} {}", if ids[i] == cur_id { "*" } else { " " }, n);
             }
