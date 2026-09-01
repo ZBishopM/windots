@@ -1564,11 +1564,15 @@ fn battery_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
     rice_common::battery::iniciar_escucha_airpods();
     let mut ultima_salida = String::new();
     let mut ultima_lectura: Option<Instant> = None;
-    // Cada cuanto se vuelve a preguntar. Un minuto cuando el casco contesta;
-    // diez segundos mientras no lo haga, que es cuando importa la prisa: acabas
-    // de apagarlo y el numero sigue en pantalla. Asi desaparece en ~20-30 s en
-    // vez de en tres minutos, sin sondear mas rapido el resto del tiempo.
+    // Cada cuanto se relee TODO. Un minuto cuando el casco contesta; diez
+    // segundos mientras no lo haga, que es cuando importa la prisa: acabas de
+    // apagarlo y el numero sigue en pantalla. Asi desaparece en ~20-30 s en vez
+    // de en tres minutos, sin sondear mas rapido el resto del tiempo.
     let mut intervalo = Duration::from_secs(60);
+    // El estado de carga aparte, y mas seguido: es un solo dialogo y es lo
+    // unico que cambia de golpe. Enchufas el cable y el rayo sale en ~15 s en
+    // vez de esperar al siguiente minuto.
+    let mut ultima_carga: Option<Instant> = None;
     loop {
         let salida = rice_common::audio::current_output_name().unwrap_or_default();
         let toca = salida != ultima_salida
@@ -1599,6 +1603,24 @@ fn battery_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
                 s.bateria = nueva;
                 drop(s);
                 ctx.request_repaint();
+            }
+            ultima_carga = Some(Instant::now());
+        }
+        // Chequeo ligero del rayo entre lecturas completas. Se salta si acaba
+        // de hacerse una lectura entera, que ya trae el estado de carga fresco.
+        else if ultima_carga
+            .map(|t| t.elapsed() >= Duration::from_secs(15))
+            .unwrap_or(true)
+        {
+            ultima_carga = Some(Instant::now());
+            let antes = shared.lock().unwrap().bateria.as_ref().map(|b| b.cargando);
+            if rice_common::battery::refrescar_carga() {
+                let nueva = rice_common::battery::en_uso();
+                let ahora = nueva.as_ref().map(|b| b.cargando);
+                if antes != ahora {
+                    shared.lock().unwrap().bateria = nueva;
+                    ctx.request_repaint();
+                }
             }
         }
         std::thread::sleep(Duration::from_secs(5));

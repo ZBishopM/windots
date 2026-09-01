@@ -258,6 +258,10 @@ fn cache() -> &'static Mutex<Option<CacheAirPods>> {
     AIRPODS.get_or_init(|| Mutex::new(None))
 }
 
+/// Tamaño del "proximity pairing message" bueno: 27 bytes, de los que los 16
+/// ultimos van cifrados. Otras longitudes son otros mensajes de Apple, no este.
+const LARGO_PROXIMITY: usize = 27;
+
 /// Un nibble del anuncio: 0..10 son decenas de por ciento; 0x0F es "no se sabe"
 /// (auricular guardado en el estuche, o fuera de alcance).
 fn nibble_a_pct(v: u8) -> Option<u8> {
@@ -275,7 +279,16 @@ fn nibble_a_pct(v: u8) -> Option<u8> {
 ///   [6]=nibble alto y nibble bajo con los dos auriculares
 ///   [7]=nibble alto: estuche; nibble bajo: bits de carga
 fn parsear_anuncio(b: &[u8]) -> Option<Bateria> {
-    if b.len() < 8 || b[0] != 0x07 {
+    // Tipo 0x07 NO basta. Capturado en el aire un 0x07 ajeno de 19 bytes
+    // (07 11 06 A5 30 ...) que con solo esa comprobacion se colaba: el parser
+    // lo leia como "izquierdo 100%, derecho 50%, estuche 0%" y lo enseñaba
+    // como si fueran tus AirPods. Un numero inventado desde el aparato de otra
+    // persona es peor que no enseñar nada.
+    //
+    // El mensaje bueno mide 27 bytes y declara 0x19 (25) en su byte de
+    // longitud. Se exigen las dos cosas: un tamaño distinto significa otra
+    // variante del mensaje, cuyos desplazamientos no conocemos.
+    if b.len() < LARGO_PROXIMITY || b[0] != 0x07 || b[1] != 0x19 {
         return None;
     }
     let invertido = b[5] & 0x20 != 0;
@@ -439,6 +452,38 @@ fn ritmo(historial: &[(Instant, u8)]) -> Option<f32> {
 ///
 /// Lo unico que la borra es que desaparezca el dongle, porque entonces no hay
 /// dispositivo del que hablar.
+/// Solo el estado de carga, sin tocar el nivel.
+///
+/// Es UN dialogo con el dongle en vez de dos, y es el unico dato que cambia de
+/// golpe: enchufas el cable y ya esta. El porcentaje, en cambio, se mueve en
+/// minutos. Separarlos permite mirar la carga a menudo sin pagar el coste de
+/// releer todo.
+///
+/// No toca el historial ni la marca de tiempo de la lectura: esto no es una
+/// lectura completa, solo la mitad que corre prisa.
+pub fn refrescar_carga() -> bool {
+    let Ok(api) = hidapi::HidApi::new() else { return false };
+    let Some(info) = api.device_list().find(|d| {
+        d.vendor_id() == HYPERX_VID && d.product_id() == HYPERX_PID && d.usage_page() >= 0xFF00
+    }) else {
+        return false;
+    };
+    let Ok(dev) = api.open_path(&info.path().to_owned()) else { return false };
+    let Some(_turno) = TurnoHid::tomar() else { return false };
+    let Some(resp) = hyperx_consulta(&dev, CMD_CARGANDO) else { return false };
+    let cargando = resp[4] != 0;
+
+    let mut c = cache_hyperx().lock().unwrap();
+    let Some((b, _)) = c.ultima.as_mut() else { return false };
+    if b.cargando != cargando {
+        // Enchufar o desenchufar corta la racha: promediar una descarga con
+        // una carga no describe ninguna de las dos.
+        b.cargando = cargando;
+        c.historial.clear();
+    }
+    true
+}
+
 /// Devuelve `true` si consiguio lectura nueva. Quien llama lo usa para
 /// reintentar antes de lo normal: un fallo suele significar que acabas de
 /// apagar el casco, y esperar al siguiente minuto deja el numero en pantalla
@@ -555,12 +600,25 @@ mod pruebas {
         assert_eq!(nibble_a_pct(0), Some(0));
     }
 
+    /// Un anuncio del tamaño bueno, con los bytes que importan puestos.
+    fn anuncio(estado: u8, nibbles: u8, estuche_y_carga: u8) -> [u8; LARGO_PROXIMITY] {
+        let mut b = [0u8; LARGO_PROXIMITY];
+        b[0] = 0x07;
+        b[1] = 0x19;
+        b[2] = 0x01;
+        b[3] = 0x0E; // modelo: AirPods Pro
+        b[4] = 0x20;
+        b[5] = estado;
+        b[6] = nibbles;
+        b[7] = estuche_y_carga;
+        b
+    }
+
     /// El nivel que representa al dispositivo es el auricular mas bajo, y el
     /// estuche no entra en esa cuenta aunque este lleno.
     #[test]
     fn manda_el_auricular_mas_bajo() {
-        // tipo, long, prefijo, modelo x2, estado, nibbles(8,3), estuche(10)+carga
-        let b = [0x07, 0x19, 0x01, 0x0E, 0x20, 0x00, 0x83, 0xA0];
+        let b = anuncio(0x00, 0x83, 0xA0);
         let bat = parsear_anuncio(&b).expect("deberia parsear");
         assert_eq!(bat.nivel, Some(30));
         assert_eq!(bat.partes, vec![
@@ -573,7 +631,7 @@ mod pruebas {
     /// El bit 0x20 del estado intercambia cual auricular es cual.
     #[test]
     fn el_bit_de_primario_invierte() {
-        let b = [0x07, 0x19, 0x01, 0x0E, 0x20, 0x20, 0x83, 0xA0];
+        let b = anuncio(0x20, 0x83, 0xA0);
         let bat = parsear_anuncio(&b).expect("deberia parsear");
         assert_eq!(bat.partes[0], ("izquierdo".to_string(), 30));
         assert_eq!(bat.partes[1], ("derecho".to_string(), 80));
@@ -623,10 +681,25 @@ mod pruebas {
         assert!(parsear_anuncio(&[0x07]).is_none(), "demasiado corto");
     }
 
+    /// Regresion: un 0x07 ajeno, capturado de verdad en el aire, de otra
+    /// variante y otro tamaño. Antes se colaba y se mostraba como si fueran
+    /// tus AirPods al 50%.
+    #[test]
+    fn rechaza_el_0x07_ajeno_capturado() {
+        let ajeno = [
+            0x07, 0x11, 0x06, 0xA5, 0x30, 0x13, 0xA5, 0x0C, 0x17, 0xC9, 0x7D, 0xA5, 0x90, 0xE6,
+            0xD7, 0x4B, 0x92, 0x4A, 0x65,
+        ];
+        assert!(
+            parsear_anuncio(&ajeno).is_none(),
+            "un 0x07 de otra variante no debe leerse como bateria"
+        );
+    }
+
     /// Un auricular guardado en el estuche sale como desconocido, no como 0%.
     #[test]
     fn auricular_guardado_no_es_cero() {
-        let b = [0x07, 0x19, 0x01, 0x0E, 0x20, 0x00, 0xF5, 0x90];
+        let b = anuncio(0x00, 0xF5, 0x90);
         let bat = parsear_anuncio(&b).expect("deberia parsear");
         assert_eq!(bat.nivel, Some(50), "solo cuenta el que si reporta");
         assert_eq!(bat.partes.len(), 2, "izquierdo desconocido no aparece");
