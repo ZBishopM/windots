@@ -40,10 +40,13 @@
       "\\.venv",
       "\\target\\debug",
       "\\target\\release",
-      "\\appdata\\local\\temp",
-      "\\appdata\\local\\packages",
-      "\\appdata\\local\\microsoft",
-      "\\appdata\\locallow",
+      "\\appdata",
+      "\\scoop\\apps",
+      "\\scoop\\cache",
+      "\\scoop\\persist",
+      "\\.cache",
+      "\\.local\\share\\pnpm",
+      "\\onedrive\\.git",
       "\\$recycle.bin",
       "\\system volume information"
     ]
