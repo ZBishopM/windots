@@ -1564,18 +1564,26 @@ fn battery_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
     rice_common::battery::iniciar_escucha_airpods();
     let mut ultima_salida = String::new();
     let mut ultima_lectura: Option<Instant> = None;
+    // Cada cuanto se vuelve a preguntar. Un minuto cuando el casco contesta;
+    // diez segundos mientras no lo haga, que es cuando importa la prisa: acabas
+    // de apagarlo y el numero sigue en pantalla. Asi desaparece en ~20-30 s en
+    // vez de en tres minutos, sin sondear mas rapido el resto del tiempo.
+    let mut intervalo = Duration::from_secs(60);
     loop {
         let salida = rice_common::audio::current_output_name().unwrap_or_default();
         let toca = salida != ultima_salida
-            || ultima_lectura
-                .map(|t| t.elapsed() >= Duration::from_secs(60))
-                .unwrap_or(true);
+            || ultima_lectura.map(|t| t.elapsed() >= intervalo).unwrap_or(true);
         if toca {
             ultima_salida = salida;
             ultima_lectura = Some(Instant::now());
             // Este hilo es el unico que habla con el dongle; todo lo demas
             // (incluida la lista de dispositivos) lee la cache que deja aqui.
-            rice_common::battery::refrescar();
+            let contesto = rice_common::battery::refrescar();
+            intervalo = if contesto {
+                Duration::from_secs(60)
+            } else {
+                Duration::from_secs(10)
+            };
             let nueva = rice_common::battery::en_uso();
             let mut s = shared.lock().unwrap();
             // Repintar solo si cambio algo visible: sin esto la barra se

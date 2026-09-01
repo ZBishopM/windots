@@ -439,7 +439,11 @@ fn ritmo(historial: &[(Instant, u8)]) -> Option<f32> {
 ///
 /// Lo unico que la borra es que desaparezca el dongle, porque entonces no hay
 /// dispositivo del que hablar.
-pub fn refrescar() {
+/// Devuelve `true` si consiguio lectura nueva. Quien llama lo usa para
+/// reintentar antes de lo normal: un fallo suele significar que acabas de
+/// apagar el casco, y esperar al siguiente minuto deja el numero en pantalla
+/// mucho despues de que el casco ya no este.
+pub fn refrescar() -> bool {
     let estado = hyperx_estado();
     let mut c = cache_hyperx().lock().unwrap();
     match estado {
@@ -467,14 +471,19 @@ pub fn refrescar() {
             c.fallos = 0;
         }
         // Sin dongle no hay dispositivo del que hablar: fuera de la barra ya.
-        EstadoHyperx::SinDongle => *c = CacheHyperx::default(),
+        EstadoHyperx::SinDongle => {
+            *c = CacheHyperx::default();
+            return false;
+        }
         EstadoHyperx::NoResponde => {
             c.fallos = c.fallos.saturating_add(1);
             if c.fallos >= FALLOS_PARA_DARLO_POR_IDO {
                 *c = CacheHyperx::default();
             }
+            return false;
         }
     }
+    true
 }
 
 /// Lo ultimo que se leyo del HyperX, con la edad y el ritmo puestos al dia.
