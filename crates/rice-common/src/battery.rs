@@ -161,6 +161,17 @@ fn hyperx_consulta(dev: &hidapi::HidDevice, comando: u8) -> Option<[u8; 64]> {
     Some(resp)
 }
 
+/// En que estado esta el HyperX. La diferencia importa: sin dongle no hay
+/// nada que enseñar, pero un fallo suelto de lectura no debe borrar de la
+/// pantalla un dato que sigue siendo bueno.
+pub enum EstadoHyperx {
+    /// Ni dongle ni coleccion: no hay dispositivo del que hablar.
+    SinDongle,
+    /// El dongle esta, pero no contesto. Casco apagado, o una lectura perdida.
+    NoResponde,
+    Ok(Bateria),
+}
+
 /// Bateria del HyperX, o `None` si el casco esta apagado o el dongle fuera.
 ///
 /// Hace E/S: enumera los HID del sistema y hace dos dialogos con el dongle.
@@ -168,29 +179,43 @@ fn hyperx_consulta(dev: &hidapi::HidDevice, comando: u8) -> Option<[u8; 64]> {
 /// cache. Llamarla al construir la lista de dispositivos metia medio segundo
 /// de espera en cada clic del panel.
 pub fn hyperx() -> Option<Bateria> {
-    let api = hidapi::HidApi::new().ok()?;
+    match hyperx_estado() {
+        EstadoHyperx::Ok(b) => Some(b),
+        _ => None,
+    }
+}
+
+/// Igual que `hyperx()` pero diciendo POR QUE no hay lectura.
+pub fn hyperx_estado() -> EstadoHyperx {
+    let Ok(api) = hidapi::HidApi::new() else {
+        return EstadoHyperx::NoResponde;
+    };
     // La coleccion util es la "vendor-defined" (usage page >= 0xFF00). Las otras
     // del mismo dongle son control de consumidor y no responden.
-    let ruta = api
-        .device_list()
-        .find(|d| {
-            d.vendor_id() == HYPERX_VID && d.product_id() == HYPERX_PID && d.usage_page() >= 0xFF00
-        })?
-        .path()
-        .to_owned();
-    let dev = api.open_path(&ruta).ok()?;
+    let Some(info) = api.device_list().find(|d| {
+        d.vendor_id() == HYPERX_VID && d.product_id() == HYPERX_PID && d.usage_page() >= 0xFF00
+    }) else {
+        return EstadoHyperx::SinDongle;
+    };
+    let Ok(dev) = api.open_path(&info.path().to_owned()) else {
+        return EstadoHyperx::NoResponde;
+    };
 
     // El turno cubre los dos dialogos: partirlo dejaria que la otra barra se
     // colara entre el nivel y el estado de carga.
-    let _turno = TurnoHid::tomar()?;
-    let nivel = hyperx_consulta(&dev, CMD_NIVEL)?[7].min(100);
+    let Some(_turno) = TurnoHid::tomar() else {
+        return EstadoHyperx::NoResponde;
+    };
+    let Some(resp) = hyperx_consulta(&dev, CMD_NIVEL) else {
+        return EstadoHyperx::NoResponde;
+    };
     let cargando = hyperx_consulta(&dev, CMD_CARGANDO)
         .map(|r| r[4] != 0)
         .unwrap_or(false);
 
-    Some(Bateria {
+    EstadoHyperx::Ok(Bateria {
         clase: Clase::HyperX,
-        nivel: Some(nivel),
+        nivel: Some(resp[7].min(100)),
         cargando,
         partes: Vec::new(),
         salud: None,
@@ -345,23 +370,43 @@ pub fn airpods_crudo() -> Option<String> {
 /// La separacion no es adorno: `hyperx()` enumera todos los HID del sistema y
 /// habla con el dongle, y eso colgaba medio segundo el hilo que arma la lista
 /// de dispositivos en cada clic del panel.
-static ULTIMO_HYPERX: OnceLock<Mutex<Option<Bateria>>> = OnceLock::new();
+static ULTIMO_HYPERX: OnceLock<Mutex<Option<(Bateria, Instant)>>> = OnceLock::new();
 
-fn cache_hyperx() -> &'static Mutex<Option<Bateria>> {
+fn cache_hyperx() -> &'static Mutex<Option<(Bateria, Instant)>> {
     ULTIMO_HYPERX.get_or_init(|| Mutex::new(None))
 }
 
 /// Vuelve a preguntar por HID y guarda el resultado. Es lo unico que hace E/S.
+///
+/// Una lectura fallida NO borra la anterior. Antes si, y por eso el numero
+/// saltaba a "--" y volvia: un dialogo HID perdido -- que pasa -- borraba un
+/// dato que seguia siendo bueno. Un 53% de hace dos minutos es informacion
+/// util; un "--" no es ninguna.
+///
+/// Lo unico que la borra es que desaparezca el dongle, porque entonces no hay
+/// dispositivo del que hablar.
 pub fn refrescar() {
-    let leido = hyperx();
-    *cache_hyperx().lock().unwrap() = leido;
+    match hyperx_estado() {
+        EstadoHyperx::Ok(b) => *cache_hyperx().lock().unwrap() = Some((b, Instant::now())),
+        EstadoHyperx::SinDongle => *cache_hyperx().lock().unwrap() = None,
+        EstadoHyperx::NoResponde => {}
+    }
+}
+
+/// Lo ultimo que se leyo del HyperX, con la edad puesta al dia.
+fn hyperx_cacheado() -> Option<Bateria> {
+    let guard = cache_hyperx().lock().unwrap();
+    let (b, cuando) = guard.as_ref()?;
+    let mut b = b.clone();
+    b.edad = cuando.elapsed();
+    Some(b)
 }
 
 /// Los dos, para el panel de dispositivos. Solo lee memoria: no hace E/S, asi
 /// que se puede llamar desde donde haga falta sin frenar nada.
 pub fn todas() -> Vec<Bateria> {
     let mut v = Vec::new();
-    if let Some(b) = cache_hyperx().lock().unwrap().clone() {
+    if let Some(b) = hyperx_cacheado() {
         v.push(b);
     }
     if let Some(b) = airpods() {
@@ -390,7 +435,7 @@ pub fn en_uso() -> Option<Bateria> {
     };
     let leida = match clase {
         Clase::AirPods => airpods(),
-        Clase::HyperX => cache_hyperx().lock().unwrap().clone(),
+        Clase::HyperX => hyperx_cacheado(),
     };
     Some(leida.unwrap_or(Bateria {
         clase,

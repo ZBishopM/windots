@@ -3258,10 +3258,16 @@ impl eframe::App for BarApp {
                                 Some(n) => format!("{n}%"),
                                 None => "--".to_string(),
                             };
+                            // Una lectura vieja se apaga de color en vez de
+                            // desaparecer: sigue siendo el ultimo dato real que
+                            // hubo, y verlo apagado dice mas que un "--".
+                            let viejo = b.edad.as_secs() > 300;
                             let col_txt = if b.cargando {
                                 col(theme::ACCENT_OK)
                             } else if b.nivel.map(|n| n <= 20).unwrap_or(false) {
                                 egui::Color32::from_rgb(255, 120, 120)
+                            } else if viejo {
+                                WARM_SUB
                             } else {
                                 dim
                             };
