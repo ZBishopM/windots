@@ -69,6 +69,28 @@ fn exe_of(pid: u32) -> String {
 #[cfg(windows)]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
+    // Un argumento desconocido ABORTA. La accion por defecto de este programa
+    // es matar la ventana de enfrente, asi que un "--closee" mal tipeado no
+    // falla de forma visible: escala en silencio de cerrar a matar, que es
+    // justo lo contrario de lo que pediste. Mismo criterio que micswitch,
+    // donde el mismo descuido llego a cambiar el microfono predeterminado.
+    let sueltos: Vec<&str> = args[1..]
+        .iter()
+        .map(|a| a.as_str())
+        .filter(|a| !matches!(*a, "--close" | "--help" | "-h"))
+        .collect();
+    if args.iter().any(|a| a == "--help" || a == "-h") || !sueltos.is_empty() {
+        if !sueltos.is_empty() {
+            eprintln!("winkill: argumento no reconocido: {}", sueltos.join(" "));
+            eprintln!("(no se toco ninguna ventana)");
+        }
+        eprintln!("uso: winkill [--close]");
+        eprintln!("  sin argumentos  mata el proceso de la ventana de enfrente");
+        eprintln!("  --close         le pide cerrar por las buenas (WM_CLOSE)");
+        std::process::exit(if sueltos.is_empty() { 0 } else { 2 });
+    }
+
     let polite = args.iter().any(|a| a == "--close");
 
     let hwnd = unsafe { win::GetForegroundWindow() };

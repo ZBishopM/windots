@@ -85,6 +85,54 @@ fn main() -> Result<()> {
         .and_then(|s| s.parse::<f32>().ok())
         .map(|v| (v / 100.0).clamp(0.0, 1.0));
 
+    // Cualquier argumento que no se reconozca ABORTA, en vez de caer al camino
+    // por defecto. No es pedanteria: el camino por defecto de este programa es
+    // CICLAR el dispositivo predeterminado, asi que una bandera mal escrita --
+    // o un `--help` inocente -- cambia el microfono en vez de no hacer nada.
+    // Ya paso dos veces: una con `--help` y otra con un splatting de
+    // PowerShell que degrado @('--list') a String y mando los caracteres
+    // sueltos. Consultar el estado nunca deberia poder modificarlo.
+    const CONOCIDAS: [&str; 10] = [
+        "--output", "-o", "--list", "-l", "--set", "-s", "--level", "-v", "--help", "-h",
+    ];
+    let mut sueltos: Vec<&str> = Vec::new();
+    let mut i = 1;
+    while i < argv.len() {
+        let a = argv[i].as_str();
+        // El valor que sigue a --set/--level le pertenece; no se valida.
+        if matches!(a, "--set" | "-s" | "--level" | "-v") {
+            i += 2;
+            continue;
+        }
+        if !CONOCIDAS.contains(&a) {
+            sueltos.push(a);
+        }
+        i += 1;
+    }
+
+    let uso = "micswitch -- cambia los dispositivos de audio predeterminados
+
+  micswitch                    cicla el MICROFONO entre los de rice.json/mics
+  micswitch --output           cicla la SALIDA entre todas las activas
+  micswitch --list             lista los endpoints (* = predeterminado)
+  micswitch --set <texto>      fija el que contenga <texto> en su nombre
+  micswitch --level            muestra el nivel y el mudo de cada endpoint
+  micswitch --level <0-100>    fija el nivel del predeterminado (o del --set)
+
+  --output combina con --list, --set y --level para operar sobre la salida.";
+
+    if argv.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{uso}");
+        return Ok(());
+    }
+    if !sueltos.is_empty() {
+        eprintln!("micswitch: argumento no reconocido: {}", sueltos.join(" "));
+        eprintln!("(no se toco ningun dispositivo)
+");
+        eprintln!("{uso}");
+        std::process::exit(2);
+    }
+
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
         let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
