@@ -188,7 +188,8 @@ function Test-SegmentoLibre($mp4) {
     return $true
 }
 
-$RING    = 12   # debe coincidir con RING en crates/shadowplay-wgc/src/main.rs
+$RING     = 9   # debe coincidir con RING en crates/shadowplay-wgc/src/main.rs
+$SEG_SECS = 5   # idem, con SEG_SECS
 $OBJETIVO = 30  # segundos de clip
 if ($marcado) {
     # Seleccion POR ANILLO, hacia atras desde el segmento que acaba de cerrarse.
@@ -215,9 +216,11 @@ if ($marcado) {
         if (-not $f -or $f.Length -lt 100KB) { break }   # hueco vaciado o arranque en frio
         $atras = if ($null -eq $ref) { $ref = $f.LastWriteTime; 0 }
                  else { ($ref - $f.LastWriteTime).TotalSeconds }
-        # Una vuelta entera del anillo son 60 s; mas viejo que eso es de la
-        # generacion anterior, no parte de este clip.
-        if ($atras -gt 65) { break }
+        # Mas viejo que una vuelta entera del anillo es de la generacion
+        # anterior, no parte de este clip. Se calcula, no se cablea: estaba
+        # puesto a 65 porque el anillo eran 60 s, y al bajarlo a 45 ese numero
+        # habria dejado colarse segmentos de la vuelta anterior.
+        if ($atras -gt ($RING * $SEG_SECS + 5)) { break }
         # El corte va ANTES de añadir, y esa es toda la aritmetica: el mtime de un
         # segmento cerrado es cuando se cerro, asi que $atras de este es
         # exactamente el metraje que suman todos los ya elegidos. Comprobarlo

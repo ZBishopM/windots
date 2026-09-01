@@ -76,7 +76,15 @@ const PACER_RESYNC_100NS: i64 = 10_000_000; // 1 s
 // shrinks; back-to-back saves eroded a 30s clip down to 19s (measured). Doubling
 // the target absorbs that. Costs ~50 MB more on disk, nothing in CPU.
 // Keep in sync with $RING in .config/shadowplay-wgc-save.ps1.
-const RING: usize = 12;
+// Nueve y no doce. El anillo guardaba 60 s (12 x 5 s) mientras el guardado
+// solo pide 30 -- `$OBJETIVO` en shadowplay-wgc-save.ps1 -- asi que la mitad
+// del anillo de video era RAM que no se llegaba a guardar nunca.
+//
+// La cuenta de nueve: seis segmentos completos hacen los 30 s, el septimo es el
+// que se corta a media vida al pedir el corte, el octavo es el hueco que el
+// grabador deja pre-vaciado, y el noveno es margen. Medido antes de tocarlo: un
+// clip real de 31,6 s uso siete de los doce.
+const RING: usize = 9;
 /// Named event that asks for the current segment to be closed NOW.
 ///
 /// Alt+F10 used to be worth 0-5 seconds of waiting: the save step could only use

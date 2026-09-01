@@ -390,11 +390,20 @@ pub fn iniciar_escucha_airpods() {}
 /// con los auriculares guardados dentro, que es justo como se capturo el
 /// primer paquete bueno. Para la barra lo que vale es que Windows los tenga
 /// conectados como dispositivo de audio.
-static AIRPODS_CONECTADOS: OnceLock<Mutex<bool>> = OnceLock::new();
+static AIRPODS_CONECTADOS: OnceLock<Mutex<(bool, Option<Instant>)>> = OnceLock::new();
 
-fn bandera_conectados() -> &'static Mutex<bool> {
-    AIRPODS_CONECTADOS.get_or_init(|| Mutex::new(false))
+fn bandera_conectados() -> &'static Mutex<(bool, Option<Instant>)> {
+    AIRPODS_CONECTADOS.get_or_init(|| Mutex::new((false, None)))
 }
+
+/// Cada cuanto se vuelve a preguntar al Bluetooth.
+///
+/// Enumerarlo abre un filtro KS por endpoint, asi que no es una consulta
+/// barata. `refrescar()` lo hacia en CADA pasada, y esa pasada baja a una cada
+/// diez segundos cuando el casco no contesta -- justo cuando menos falta hace,
+/// porque el casco apagado no dice nada de si los AirPods estan puestos.
+/// Conectar unos auriculares no es algo que pase varias veces por minuto.
+const CADA_CUANTO_BT: Duration = Duration::from_secs(30);
 
 fn mirar_si_conectados() -> bool {
     crate::bluetooth::devices()
@@ -511,9 +520,19 @@ pub fn refrescar_carga() -> bool {
 /// apagar el casco, y esperar al siguiente minuto deja el numero en pantalla
 /// mucho despues de que el casco ya no este.
 pub fn refrescar() -> bool {
-    // Enumerar Bluetooth es lento para hacerlo en cada pintado, asi que se
-    // aprovecha esta pasada, que ya es la lenta.
-    *bandera_conectados().lock().unwrap() = mirar_si_conectados();
+    {
+        let mut g = bandera_conectados().lock().unwrap();
+        let toca = g.1.map(|t| t.elapsed() >= CADA_CUANTO_BT).unwrap_or(true);
+        if toca {
+            // El candado se suelta para la consulta y se vuelve a tomar: tenerlo
+            // cogido durante una enumeracion de Bluetooth bloquearia a quien
+            // solo quiere pintar.
+            drop(g);
+            let visto = mirar_si_conectados();
+            let mut g = bandera_conectados().lock().unwrap();
+            *g = (visto, Some(Instant::now()));
+        }
+    }
     let estado = hyperx_estado();
     let mut c = cache_hyperx().lock().unwrap();
     match estado {
@@ -580,7 +599,7 @@ pub fn conectadas() -> Vec<Bateria> {
     if let Some(b) = hyperx_cacheado() {
         v.push(b);
     }
-    if *bandera_conectados().lock().unwrap() {
+    if bandera_conectados().lock().unwrap().0 {
         if let Some(b) = airpods() {
             v.push(b);
         }
