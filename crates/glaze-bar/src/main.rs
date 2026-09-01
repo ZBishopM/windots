@@ -401,7 +401,6 @@ mod appbar {
         pub lparam: isize,
     }
     pub const ABM_NEW: u32 = 0x0;
-    pub const ABM_REMOVE: u32 = 0x1;
     pub const ABM_QUERYPOS: u32 = 0x2;
     pub const ABM_SETPOS: u32 = 0x3;
     pub const ABE_TOP: u32 = 1;
@@ -440,17 +439,12 @@ mod appbar {
         SHAppBarMessage(ABM_SETPOS, &mut d);
     }
 
-    pub unsafe fn liberar(hwnd: isize) {
-        let mut d = Data {
-            cb: std::mem::size_of::<Data>() as u32,
-            hwnd,
-            callback: WM_APPBAR,
-            edge: ABE_TOP,
-            rc: super::Rect { left: 0, top: 0, right: 0, bottom: 0 },
-            lparam: 0,
-        };
-        SHAppBarMessage(ABM_REMOVE, &mut d);
-    }
+    // Aqui vivia un `liberar()` con ABM_REMOVE que nadie llamaba nunca.
+    // Se quita en vez de cablearlo: quien reinicia la barra es el supervisor y
+    // lo hace matando el proceso, asi que una ruta de cierre ordenado no
+    // llegaria a correr casi nunca. Windows suelta el registro al destruirse
+    // la ventana -- comprobado a lo largo de muchos ciclos de despliegue, sin
+    // que el area de trabajo se quedara encogida ni una vez.
 }
 
 /// Vigila si toca dejar pasar el raton, en su propio hilo y cada 150 ms.

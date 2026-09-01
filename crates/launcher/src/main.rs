@@ -74,7 +74,6 @@ mod win {
     }
 
     pub const EVENT_MODIFY_STATE: u32 = 0x0002;
-    const SW_HIDE: i32 = 0;
     const SW_SHOW: i32 = 5;
 
     /// The real HWND, handed over by eframe at creation. Everything else was

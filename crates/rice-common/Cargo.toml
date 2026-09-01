@@ -53,3 +53,32 @@ windows = { version = "0.58", optional = true, features = [
   "Foundation_Collections",
   "Foundation",
 ] }
+
+# Las sondas de examples/ usan modulos que estan tras una feature, y un
+# ejemplo sin `required-features` se compila SIEMPRE. El resultado era que
+# `cargo test -p rice-common` -- el comando obvio -- ni siquiera compilaba:
+# fallaba en los ejemplos, no en el codigo. Declararlas hace que Cargo las
+# salte cuando su feature no esta puesta.
+[[example]]
+name = "airpods-listen-only"
+required-features = ["audio"]
+
+[[example]]
+name = "audio-probe"
+required-features = ["audio", "bluetooth"]
+
+[[example]]
+name = "out_name"
+required-features = ["audio"]
+
+[[example]]
+name = "volume_probe"
+required-features = ["audio"]
+
+[[example]]
+name = "media_probe"
+required-features = ["media"]
+
+[[example]]
+name = "spectrum_probe"
+required-features = ["spectrum"]

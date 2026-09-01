@@ -85,7 +85,6 @@ mod win {
         pub fn SHAppBarMessage(msg: u32, data: *mut AppBarData) -> usize;
     }
 
-    pub const SW_HIDE: i32 = 0;
     pub const SW_SHOW: i32 = 5;
     pub const ABM_SETSTATE: u32 = 0x0000_000A;
     pub const ABS_AUTOHIDE: isize = 0x0000_0001;
