@@ -66,7 +66,20 @@ pub struct Bateria {
     /// Antiguedad de la lectura. Cero en el HyperX, que se pregunta en el
     /// momento; en los AirPods puede ser de minutos.
     pub edad: Duration,
+    /// Tension de la celda en milivoltios, cuando el dispositivo la publica.
+    /// El HyperX si: son los bytes 5-6 de la respuesta de bateria, y se mueven
+    /// unos pocos mV entre lecturas como corresponde a un ADC de verdad.
+    pub voltaje_mv: Option<u16>,
+    /// Puntos de porcentaje por hora, con signo: positivo cargando, negativo
+    /// gastando. Se DERIVA de la pendiente del porcentaje en el tiempo, porque
+    /// el dispositivo no da corriente (ver `POTENCIA_POR_QUE`).
+    pub ritmo_pct_h: Option<f32>,
 }
+
+/// Por que no hay milliamperios ni vatios, para que la interfaz lo diga en vez
+/// de callarse.
+pub const POTENCIA_POR_QUE: &str =
+    "el casco publica carga y tension, pero no corriente; sin amperios no hay vatios que calcular";
 
 /// Por que `salud` viene vacia, para que lo diga la interfaz en vez de dejar un
 /// hueco mudo que parece un fallo.
@@ -220,6 +233,10 @@ pub fn hyperx_estado() -> EstadoHyperx {
         partes: Vec::new(),
         salud: None,
         edad: Duration::ZERO,
+        // Big-endian. Medido en reposo al 52%: 3746-3751 mV, que es justo donde
+        // esta una celda de litio a media carga.
+        voltaje_mv: Some(u16::from_be_bytes([resp[5], resp[6]])),
+        ritmo_pct_h: None, // lo pone la cache, que es quien tiene historial
     })
 }
 
@@ -279,6 +296,9 @@ fn parsear_anuncio(b: &[u8]) -> Option<Bateria> {
     }
 
     Some(Bateria {
+        // Los AirPods no publican tension en el anuncio; solo niveles y carga.
+        voltaje_mv: None,
+        ritmo_pct_h: None,
         clase: Clase::AirPods,
         // El que manda es el mas bajo de los dos auriculares. El estuche no
         // cuenta: tener el estuche lleno no evita que se te corte la musica.
@@ -370,10 +390,44 @@ pub fn airpods_crudo() -> Option<String> {
 /// La separacion no es adorno: `hyperx()` enumera todos los HID del sistema y
 /// habla con el dongle, y eso colgaba medio segundo el hilo que arma la lista
 /// de dispositivos en cada clic del panel.
-static ULTIMO_HYPERX: OnceLock<Mutex<Option<(Bateria, Instant)>>> = OnceLock::new();
+/// Cuantas lecturas fallidas seguidas hacen falta para dar el casco por
+/// apagado y quitarlo de la barra.
+///
+/// Una sola no vale: un dialogo HID se pierde de vez en cuando, y borrar el
+/// numero por eso es lo que hacia que parpadeara. Tres seguidas, con el sondeo
+/// cada minuto, son unos tres minutos de silencio -- para entonces el casco
+/// esta apagado de verdad, no distraido.
+const FALLOS_PARA_DARLO_POR_IDO: u8 = 3;
 
-fn cache_hyperx() -> &'static Mutex<Option<(Bateria, Instant)>> {
-    ULTIMO_HYPERX.get_or_init(|| Mutex::new(None))
+#[derive(Default)]
+struct CacheHyperx {
+    ultima: Option<(Bateria, Instant)>,
+    fallos: u8,
+    /// (cuando, porcentaje) de las ultimas lecturas, para sacar el ritmo. El
+    /// dispositivo no da corriente, asi que la velocidad de carga solo puede
+    /// salir de ver como se mueve el porcentaje.
+    historial: Vec<(Instant, u8)>,
+}
+
+static ULTIMO_HYPERX: OnceLock<Mutex<CacheHyperx>> = OnceLock::new();
+
+fn cache_hyperx() -> &'static Mutex<CacheHyperx> {
+    ULTIMO_HYPERX.get_or_init(|| Mutex::new(CacheHyperx::default()))
+}
+
+/// Puntos por hora entre el primer y el ultimo punto del historial.
+///
+/// Hace falta una ventana de al menos 12 minutos y un cambio real de al menos
+/// un punto: con menos, el ruido de redondeo del propio porcentaje daria
+/// ritmos inventados de cientos de puntos por hora.
+fn ritmo(historial: &[(Instant, u8)]) -> Option<f32> {
+    let (t0, p0) = *historial.first()?;
+    let (t1, p1) = *historial.last()?;
+    let horas = t1.duration_since(t0).as_secs_f32() / 3600.0;
+    if horas < 0.2 || p0 == p1 {
+        return None;
+    }
+    Some((p1 as f32 - p0 as f32) / horas)
 }
 
 /// Vuelve a preguntar por HID y guarda el resultado. Es lo unico que hace E/S.
@@ -386,19 +440,50 @@ fn cache_hyperx() -> &'static Mutex<Option<(Bateria, Instant)>> {
 /// Lo unico que la borra es que desaparezca el dongle, porque entonces no hay
 /// dispositivo del que hablar.
 pub fn refrescar() {
-    match hyperx_estado() {
-        EstadoHyperx::Ok(b) => *cache_hyperx().lock().unwrap() = Some((b, Instant::now())),
-        EstadoHyperx::SinDongle => *cache_hyperx().lock().unwrap() = None,
-        EstadoHyperx::NoResponde => {}
+    let estado = hyperx_estado();
+    let mut c = cache_hyperx().lock().unwrap();
+    match estado {
+        EstadoHyperx::Ok(b) => {
+            let ahora = Instant::now();
+            if let Some(pct) = b.nivel {
+                // El historial se reinicia al enchufar o desenchufar: mezclar
+                // una racha de descarga con una de carga daria un ritmo que no
+                // es ninguno de los dos.
+                let cambio_de_sentido = c
+                    .ultima
+                    .as_ref()
+                    .map(|(prev, _)| prev.cargando != b.cargando)
+                    .unwrap_or(false);
+                if cambio_de_sentido {
+                    c.historial.clear();
+                }
+                c.historial.push((ahora, pct));
+                // Hora y media de ventana es de sobra para un ritmo estable, y
+                // evita que el historial crezca sin fin.
+                let corte = ahora - Duration::from_secs(5400);
+                c.historial.retain(|(t, _)| *t >= corte);
+            }
+            c.ultima = Some((b, ahora));
+            c.fallos = 0;
+        }
+        // Sin dongle no hay dispositivo del que hablar: fuera de la barra ya.
+        EstadoHyperx::SinDongle => *c = CacheHyperx::default(),
+        EstadoHyperx::NoResponde => {
+            c.fallos = c.fallos.saturating_add(1);
+            if c.fallos >= FALLOS_PARA_DARLO_POR_IDO {
+                *c = CacheHyperx::default();
+            }
+        }
     }
 }
 
-/// Lo ultimo que se leyo del HyperX, con la edad puesta al dia.
+/// Lo ultimo que se leyo del HyperX, con la edad y el ritmo puestos al dia.
 fn hyperx_cacheado() -> Option<Bateria> {
-    let guard = cache_hyperx().lock().unwrap();
-    let (b, cuando) = guard.as_ref()?;
+    let c = cache_hyperx().lock().unwrap();
+    let (b, cuando) = c.ultima.as_ref()?;
     let mut b = b.clone();
     b.edad = cuando.elapsed();
+    b.ritmo_pct_h = ritmo(&c.historial);
     Some(b)
 }
 
@@ -444,6 +529,8 @@ pub fn en_uso() -> Option<Bateria> {
         partes: Vec::new(),
         salud: None,
         edad: Duration::ZERO,
+        voltaje_mv: None,
+        ritmo_pct_h: None,
     }))
 }
 
@@ -482,6 +569,42 @@ mod pruebas {
         assert_eq!(bat.partes[0], ("izquierdo".to_string(), 30));
         assert_eq!(bat.partes[1], ("derecho".to_string(), 80));
         assert_eq!(bat.nivel, Some(30), "el minimo no cambia al invertir");
+    }
+
+    /// Helper: un historial con puntos a N minutos en el pasado.
+    fn hist(puntos: &[(u64, u8)]) -> Vec<(Instant, u8)> {
+        let ahora = Instant::now();
+        puntos
+            .iter()
+            .map(|(min, pct)| (ahora - Duration::from_secs(min * 60), *pct))
+            .collect()
+    }
+
+    /// Media hora subiendo 10 puntos son 20 puntos por hora.
+    #[test]
+    fn ritmo_cargando() {
+        let r = ritmo(&hist(&[(30, 40), (0, 50)])).expect("deberia dar ritmo");
+        assert!((r - 20.0).abs() < 0.5, "esperaba ~+20, fue {r}");
+    }
+
+    /// Gastando, el signo es negativo.
+    #[test]
+    fn ritmo_descargando() {
+        let r = ritmo(&hist(&[(60, 80), (0, 74)])).expect("deberia dar ritmo");
+        assert!((r + 6.0).abs() < 0.5, "esperaba ~-6, fue {r}");
+    }
+
+    /// Una ventana corta no da ritmo: el redondeo del propio porcentaje
+    /// inventaria cientos de puntos por hora.
+    #[test]
+    fn ventana_corta_no_da_ritmo() {
+        assert_eq!(ritmo(&hist(&[(5, 50), (0, 51)])), None);
+    }
+
+    /// Sin cambio de porcentaje no hay ritmo que reportar.
+    #[test]
+    fn sin_cambio_no_hay_ritmo() {
+        assert_eq!(ritmo(&hist(&[(60, 50), (0, 50)])), None);
     }
 
     /// Un anuncio que no es del tipo 0x07 no se toca.

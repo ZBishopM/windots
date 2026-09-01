@@ -1623,6 +1623,30 @@ fn descripcion_bateria(b: &rice_common::battery::Bateria) -> String {
     for (nombre, v) in &b.partes {
         t.push_str(&format!("\n{nombre}: {v}%"));
     }
+    // Tension real de la celda, no un porcentaje redondeado. El HyperX la da;
+    // los AirPods no.
+    if let Some(mv) = b.voltaje_mv {
+        t.push_str(&format!("\ntension: {:.2} V", mv as f32 / 1000.0));
+    }
+    // Velocidad de carga o descarga. Es DERIVADA de como se mueve el
+    // porcentaje: el casco no publica corriente, asi que no hay vatios que dar.
+    match b.ritmo_pct_h {
+        Some(r) if r.abs() >= 0.5 => {
+            t.push_str(&format!("\nritmo: {r:+.0} puntos/h"));
+            if let Some(n) = b.nivel {
+                let restante = if r > 0.0 { 100.0 - n as f32 } else { n as f32 };
+                let horas = restante / r.abs();
+                let etiqueta = if r > 0.0 { "lleno en" } else { "vacio en" };
+                if horas < 1.0 {
+                    t.push_str(&format!("\n{etiqueta}: ~{:.0} min", horas * 60.0));
+                } else {
+                    t.push_str(&format!("\n{etiqueta}: ~{horas:.1} h"));
+                }
+            }
+        }
+        _ => t.push_str("\nritmo: aun midiendo (hacen falta ~15 min)"),
+    }
+    t.push_str(&format!("\n{}", rice_common::battery::POTENCIA_POR_QUE));
     match b.salud {
         Some(h) => t.push_str(&format!("\nsalud: {h}%")),
         None => t.push_str(&format!(
@@ -3278,7 +3302,24 @@ impl eframe::App for BarApp {
                             draw_icon(ui.painter(), rb.center(), "\u{f025}", 13.0, color);
                             let globo = descripcion_bateria(b);
                             resp_b.on_hover_text(globo.clone());
-                            resp_t.on_hover_text(globo);
+                            resp_t.on_hover_text(globo.clone());
+                            // Rayo solo mientras carga. Va despues del icono
+                            // porque la tira se compone de derecha a izquierda,
+                            // asi que acaba a su izquierda: "rayo auriculares 53%".
+                            if b.cargando {
+                                let (rr, resp_r) = ui.allocate_exact_size(
+                                    egui::vec2(12.0, 18.0),
+                                    egui::Sense::hover(),
+                                );
+                                draw_icon(
+                                    ui.painter(),
+                                    rr.center(),
+                                    "\u{f0e7}", // fa-bolt
+                                    11.0,
+                                    col(theme::ACCENT_OK),
+                                );
+                                resp_r.on_hover_text(globo);
+                            }
                             ui.add_space(12.0);
                         }
                         let dir = if s.tiling == "vertical" { "|" } else { "—" };

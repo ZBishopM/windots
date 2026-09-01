@@ -158,6 +158,20 @@ fn main() -> Result<()> {
             for (nombre, v) in &b.partes {
                 println!("    {nombre:<12} {v}%");
             }
+            // Tension medida de la celda. El HyperX la publica en la misma
+            // respuesta que el porcentaje; los AirPods no dan ninguna.
+            if let Some(mv) = b.voltaje_mv {
+                println!("    {:<12} {:.3} V", "tension", mv as f32 / 1000.0);
+            }
+            // El ritmo se DERIVA de la pendiente del porcentaje en el tiempo,
+            // asi que hace falta historial. Este programa arranca y muere en
+            // una pasada: nunca lo tendra. Quien lo acumula es la barra, que
+            // vive todo el rato -- decir "aun midiendo" aqui seria enganar,
+            // porque nunca terminaria de medir.
+            match b.ritmo_pct_h {
+                Some(r) if r.abs() >= 0.5 => println!("    {:<12} {r:+.0} puntos/h", "ritmo"),
+                _ => println!("    {:<12} en la barra (aqui no hay historial)", "ritmo"),
+            }
             match b.salud {
                 Some(h) => println!("    {:<12} {h}%", "salud"),
                 None => println!("    {:<12} sin dato", "salud"),
@@ -171,6 +185,9 @@ fn main() -> Result<()> {
         }
         if todas.iter().all(|b| b.salud.is_none()) {
             println!("\nsalud: {}", rice_common::battery::SALUD_POR_QUE);
+        }
+        if !todas.is_empty() {
+            println!("potencia: {}", rice_common::battery::POTENCIA_POR_QUE);
         }
         return Ok(());
     }
