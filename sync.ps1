@@ -45,7 +45,9 @@ foreach ($f in 'glazewm-dwindle.ps1', 'glazewm-animcheck.ps1', 'wezterm-hotkey.a
                'rice-trim-background.ps1', 'rice-uninstall.ps1', 'rice-llm.ps1',
                'rice-accent.ps1', 'rice-boot-report.ps1', 'rice-notif-banners.ps1',
                'rice-retire-replaced.ps1', 'rice-tame-startup.ps1', 'rice-trim-run.ps1',
-               'rice-clip-share.ps1', 'rice-onedrive-purge.ps1', 'rice-deshacer.ps1', 'rice-teclado.ps1') {
+               'rice-clip-share.ps1', 'rice-onedrive-purge.ps1', 'rice-deshacer.ps1', 'rice-teclado.ps1',
+               'rice-modo-juego.ps1', 'rice-usb-fix.ps1',
+               'rice-audio-restaurar.ps1', 'rice-audio-restaurar-tarea.ps1') {
     $Map["scripts\$f"] = "$home_\.config\$f"
 }
 foreach ($f in Get-ChildItem "$home_\.config\lib\*.ps1" -EA SilentlyContinue) {
@@ -143,12 +145,29 @@ foreach ($rel in $Trees.Keys) {
 # Nothing replaces it: notifyd draws every app's notifications from the system
 # listener, so there is no per-app patch left to go missing.
 
+# Un .ps1 que vive en .config y no esta en $Map es justo el caso que el
+# comentario de arriba describe como "peor que no versionado": -Check
+# contestaria 'repo matches live' mientras el archivo no esta en ningun lado.
+# Paso de verdad con rice-modo-juego.ps1 y rice-usb-fix.ps1, 210 lineas entre
+# los dos. Detectarlo es barato; acordarse, no.
+$enMapa = $Map.Values | ForEach-Object { Split-Path $_ -Leaf }
+$huerfanos = @(Get-ChildItem "$home_.config*.ps1" -EA SilentlyContinue |
+    Where-Object { $enMapa -notcontains $_.Name } |
+    ForEach-Object { $_.Name })
+if ($huerfanos.Count) {
+    Write-Host "scripts vivos que NO estan en el mapa de sync ($($huerfanos.Count)):" -ForegroundColor Yellow
+    $huerfanos | ForEach-Object { Write-Host "  .config$_" }
+    Write-Host "  -> agregalos a la lista de arriba o no se versionan nunca"
+}
+
 if ($Check) {
     if ($diff.Count) {
         Write-Host "repo is OUT OF SYNC with live ($($diff.Count)):" -ForegroundColor Yellow
         $diff | ForEach-Object { Write-Host "  $_" }
-        exit 1
     }
+    # Los huerfanos ya se listaron arriba; aqui solo deciden el codigo de
+    # salida, para que un CI o un hook los trate como el problema que son.
+    if ($diff.Count -or $huerfanos.Count) { exit 1 }
     Write-Host 'repo matches live' -ForegroundColor Green
     exit 0
 }
