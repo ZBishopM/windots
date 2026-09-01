@@ -148,8 +148,8 @@ fn main() -> Result<()> {
         let todas = rice_common::battery::todas();
         if todas.is_empty() {
             println!("ningun dispositivo con bateria disponible");
-            println!("(el HyperX no contesta si el casco esta apagado; los AirPods,");
-            println!(" hasta que sueltan un anuncio -- abrir el estuche lo provoca)");
+            println!("(el HyperX no contesta con el casco apagado; los AirPods, hasta");
+            println!(" que sueltan un anuncio -- abrir el estuche lo provoca)");
         }
         for b in &todas {
             let nivel = b.nivel.map(|n| format!("{n}%")).unwrap_or_else(|| "--".into());

@@ -132,12 +132,18 @@ impl Drop for TurnoHid {
 }
 
 fn hyperx_consulta(dev: &hidapi::HidDevice, comando: u8) -> Option<[u8; 64]> {
-    // El dongle quiere un input report antes de que se le escriba. Puede fallar
-    // y da igual; sin el intento, la primera consulta tras enchufarlo no
-    // contesta.
+    // Drenar el input report pendiente ANTES de escribir. Y tiene que ser
+    // `get_input_report` (HidD_GetInputReport), no `get_feature_report`
+    // (HidD_GetFeature): son llamadas distintas y esta coleccion solo entiende
+    // la primera.
+    //
+    // Con la equivocada, `get_feature_report` devuelve "Funcion incorrecta" y
+    // el `write` que va detras muere con ERROR_GEN_FAILURE (0x1F) -- SIEMPRE,
+    // aunque el casco este encendido y sonando. Medido: 3 de 3 fallos con
+    // feature, 3 de 3 lecturas correctas con input.
     let mut preparar = [0u8; 64];
     preparar[0] = 0x06;
-    let _ = dev.get_feature_report(&mut preparar);
+    let _ = dev.get_input_report(&mut preparar);
 
     let mut peticion = [0u8; 62];
     peticion[..CABECERA.len()].copy_from_slice(&CABECERA);
