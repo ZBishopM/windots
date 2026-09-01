@@ -156,6 +156,11 @@ fn hyperx_consulta(dev: &hidapi::HidDevice, comando: u8) -> Option<[u8; 64]> {
 }
 
 /// Bateria del HyperX, o `None` si el casco esta apagado o el dongle fuera.
+///
+/// Hace E/S: enumera los HID del sistema y hace dos dialogos con el dongle.
+/// No se llama desde nada que pinte -- para eso esta `todas()`, que lee la
+/// cache. Llamarla al construir la lista de dispositivos metia medio segundo
+/// de espera en cada clic del panel.
 pub fn hyperx() -> Option<Bateria> {
     let api = hidapi::HidApi::new().ok()?;
     // La coleccion util es la "vendor-defined" (usage page >= 0xFF00). Las otras
@@ -328,10 +333,29 @@ pub fn airpods_crudo() -> Option<String> {
 
 // ----------------------------------------------------------------- ambos ---
 
-/// Los dos, para el panel de dispositivos. El que no este disponible no sale.
+/// Ultima lectura del HyperX. La E/S la hace un solo hilo con `refrescar()` y
+/// el resto del programa lee de aqui.
+///
+/// La separacion no es adorno: `hyperx()` enumera todos los HID del sistema y
+/// habla con el dongle, y eso colgaba medio segundo el hilo que arma la lista
+/// de dispositivos en cada clic del panel.
+static ULTIMO_HYPERX: OnceLock<Mutex<Option<Bateria>>> = OnceLock::new();
+
+fn cache_hyperx() -> &'static Mutex<Option<Bateria>> {
+    ULTIMO_HYPERX.get_or_init(|| Mutex::new(None))
+}
+
+/// Vuelve a preguntar por HID y guarda el resultado. Es lo unico que hace E/S.
+pub fn refrescar() {
+    let leido = hyperx();
+    *cache_hyperx().lock().unwrap() = leido;
+}
+
+/// Los dos, para el panel de dispositivos. Solo lee memoria: no hace E/S, asi
+/// que se puede llamar desde donde haga falta sin frenar nada.
 pub fn todas() -> Vec<Bateria> {
     let mut v = Vec::new();
-    if let Some(b) = hyperx() {
+    if let Some(b) = cache_hyperx().lock().unwrap().clone() {
         v.push(b);
     }
     if let Some(b) = airpods() {
@@ -342,16 +366,34 @@ pub fn todas() -> Vec<Bateria> {
 
 /// La del dispositivo que esta sonando ahora, que es la que va en la barra.
 /// Se decide por la salida predeterminada, no por cual tiene mas bateria.
+///
+/// Si la salida ES uno de los dos pero no hay lectura -- el casco apagado, o
+/// unos AirPods que todavia no se han anunciado -- devuelve el dispositivo con
+/// `nivel: None`. A proposito: asi la barra sigue mostrando el icono con un
+/// "--" al lado, en vez de desaparecer y dejarte sin saber si la funcion esta
+/// rota o es que no hay dato.
 #[cfg(feature = "audio")]
 pub fn en_uso() -> Option<Bateria> {
     let salida = crate::audio::current_output_name()?.to_lowercase();
-    if salida.contains("airpods") {
-        airpods()
+    let clase = if salida.contains("airpods") {
+        Clase::AirPods
     } else if salida.contains("hyperx") || salida.contains("cloud") {
-        hyperx()
+        Clase::HyperX
     } else {
-        None
-    }
+        return None;
+    };
+    let leida = match clase {
+        Clase::AirPods => airpods(),
+        Clase::HyperX => cache_hyperx().lock().unwrap().clone(),
+    };
+    Some(leida.unwrap_or(Bateria {
+        clase,
+        nivel: None,
+        cargando: false,
+        partes: Vec::new(),
+        salud: None,
+        edad: Duration::ZERO,
+    }))
 }
 
 #[cfg(test)]

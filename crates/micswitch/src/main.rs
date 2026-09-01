@@ -142,6 +142,8 @@ fn main() -> Result<()> {
         // solo sueltan de vez en cuando. Se espera un poco antes de rendirse.
         rice_common::battery::iniciar_escucha_airpods();
         std::thread::sleep(std::time::Duration::from_secs(6));
+        // Aqui no hay barra que mantenga la cache al dia: se pregunta ahora.
+        rice_common::battery::refrescar();
 
         let todas = rice_common::battery::todas();
         if todas.is_empty() {

@@ -1573,6 +1573,9 @@ fn battery_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
         if toca {
             ultima_salida = salida;
             ultima_lectura = Some(Instant::now());
+            // Este hilo es el unico que habla con el dongle; todo lo demas
+            // (incluida la lista de dispositivos) lee la cache que deja aqui.
+            rice_common::battery::refrescar();
             let nueva = rice_common::battery::en_uso();
             let mut s = shared.lock().unwrap();
             // Repintar solo si cambio algo visible: sin esto la barra se
@@ -3248,9 +3251,9 @@ impl eframe::App for BarApp {
                                     egui::Color32::from_rgb(238, 238, 240)
                                 }
                             };
-                            let (rb, resp_b) = ui
-                                .allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
-                            draw_icon(ui.painter(), rb.center(), "\u{f025}", 13.0, color);
+                            // Esta tira se compone de DERECHA a IZQUIERDA, asi
+                            // que el porcentaje va primero para quedar a la
+                            // derecha del icono, no al reves.
                             let txt = match b.nivel {
                                 Some(n) => format!("{n}%"),
                                 None => "--".to_string(),
@@ -3262,8 +3265,14 @@ impl eframe::App for BarApp {
                             } else {
                                 dim
                             };
-                            ui.colored_label(col_txt, txt);
-                            resp_b.on_hover_text(descripcion_bateria(b));
+                            let resp_t = ui.colored_label(col_txt, txt);
+                            ui.add_space(4.0);
+                            let (rb, resp_b) = ui
+                                .allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+                            draw_icon(ui.painter(), rb.center(), "\u{f025}", 13.0, color);
+                            let globo = descripcion_bateria(b);
+                            resp_b.on_hover_text(globo.clone());
+                            resp_t.on_hover_text(globo);
                             ui.add_space(12.0);
                         }
                         let dir = if s.tiling == "vertical" { "|" } else { "—" };
