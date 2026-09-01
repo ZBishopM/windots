@@ -31,6 +31,9 @@ pub mod audio;
 #[cfg(feature = "bluetooth")]
 pub mod bluetooth;
 
+#[cfg(feature = "battery")]
+pub mod battery;
+
 #[cfg(feature = "media")]
 pub mod media;
 

@@ -724,7 +724,10 @@ struct Shared {
     cpu: f32,
     mem: f32,
     gpu: String, // "44° 11%" (temp + utilization, from nvidia-smi)
-    net: String, // throughput "↓1.2M ↑0.3M"
+    /// Bateria del dispositivo de audio que esta sonando ahora. Sustituye a
+    /// la velocidad de subida/bajada, que se miraba una vez al mes; quedarte
+    /// sin auriculares a media partida se nota siempre.
+    bateria: Option<rice_common::battery::Bateria>,
     island: Option<IslandEvent>,
     island_serial: u64, // bumps on each new event so the UI notices
 }
@@ -958,6 +961,8 @@ struct DevRow {
     /// An operation is in flight; the row is greyed and ignores clicks so a
     /// second press cannot queue another multi-second connect.
     busy: bool,
+    /// Bateria del dispositivo, cuando es uno de los dos que sabemos preguntar.
+    bateria: Option<rice_common::battery::Bateria>,
 }
 
 enum DevMsg {
@@ -1125,8 +1130,26 @@ fn mark_busy(state: &Arc<Mutex<Vec<DevRow>>>, container: u128, busy: bool) {
 }
 
 /// The configured outputs, plus every Bluetooth audio device.
+/// La bateria que corresponde a un endpoint, por nombre. El HyperX aparece
+/// como "Altavoces (HyperX Cloud II Wireless)" y los AirPods con el nombre
+/// larguisimo que les puso el telefono, asi que se busca por trozo.
+fn bateria_para(
+    nombre: &str,
+    baterias: &[rice_common::battery::Bateria],
+) -> Option<rice_common::battery::Bateria> {
+    let n = nombre.to_lowercase();
+    baterias
+        .iter()
+        .find(|b| match b.clase {
+            rice_common::battery::Clase::HyperX => n.contains("hyperx") || n.contains("cloud"),
+            rice_common::battery::Clase::AirPods => n.contains("airpods"),
+        })
+        .cloned()
+}
+
 fn build_device_rows() -> Vec<DevRow> {
     let cfg = rice_common::settings::Settings::live();
+    let baterias = rice_common::battery::todas();
     let current = rice_common::audio::current_output_id().unwrap_or_default();
     let endpoints = rice_common::audio::outputs(true);
     let bt = rice_common::bluetooth::devices();
@@ -1157,25 +1180,37 @@ fn build_device_rows() -> Vec<DevRow> {
         else {
             continue;
         };
+        // Alias corto cuando sabemos quien es: "hyperx cloud" en vez de
+        // "Altavoces (HyperX Cloud II Wireless)".
+        let bateria = bateria_para(&e.name, &baterias);
         rows.push(DevRow {
-            label: short_output_name(&e.name, &want),
+            label: bateria
+                .as_ref()
+                .map(|b| b.alias().to_string())
+                .unwrap_or_else(|| short_output_name(&e.name, &want)),
             endpoint: Some(e.id.clone()),
             bt_container: None,
             connected: e.active,
             is_default: e.id == current,
             busy: false,
+            bateria,
         });
     }
 
     for d in bt {
         let is_default = d.output_id.as_deref() == Some(current.as_str());
+        let bateria = bateria_para(&d.name, &baterias);
         rows.push(DevRow {
-            label: d.name.clone(),
+            label: bateria
+                .as_ref()
+                .map(|b| b.alias().to_string())
+                .unwrap_or_else(|| d.name.clone()),
             endpoint: d.output_id.clone(),
             bt_container: Some(d.container),
             connected: d.connected,
             is_default,
             busy: false,
+            bateria,
         });
     }
     rows
@@ -1434,16 +1469,6 @@ fn ipc_command(cmd: String) {
     });
 }
 
-fn human_rate(bytes_per_sec: f64) -> String {
-    if bytes_per_sec >= 1_000_000.0 {
-        format!("{:.1}M", bytes_per_sec / 1_000_000.0)
-    } else if bytes_per_sec >= 1_000.0 {
-        format!("{:.0}K", bytes_per_sec / 1_000.0)
-    } else {
-        format!("{:.0}B", bytes_per_sec)
-    }
-}
-
 // Send a query, return the first text response (no subscriptions => next text
 // message is the response).
 fn query<S: Read + Write>(sock: &mut tungstenite::WebSocket<S>, msg: &str) -> Option<String> {
@@ -1502,8 +1527,6 @@ fn ipc_thread(shared: Arc<Mutex<Shared>>, my_x: i32, ctx: egui::Context) {
 
 fn sys_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
     let mut sys = sysinfo::System::new();
-    let mut nets = sysinfo::Networks::new_with_refreshed_list();
-    let mut last = Instant::now();
     loop {
         sys.refresh_cpu_usage();
         std::thread::sleep(Duration::from_millis(500));
@@ -1517,31 +1540,97 @@ fn sys_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
             0.0
         };
 
-        // Network throughput: bytes since the last refresh / elapsed time.
-        nets.refresh();
-        let now = Instant::now();
-        let secs = now.duration_since(last).as_secs_f64().max(0.001);
-        last = now;
-        let (mut rx, mut tx) = (0u64, 0u64);
-        for (_iface, data) in &nets {
-            rx += data.received();
-            tx += data.transmitted();
-        }
-        let net = format!(
-            "↓{} ↑{}",
-            human_rate(rx as f64 / secs),
-            human_rate(tx as f64 / secs)
-        );
-
         {
             let mut s = shared.lock().unwrap();
             s.cpu = cpu;
             s.mem = mem;
-            s.net = net;
         }
         ctx.request_repaint();
         std::thread::sleep(Duration::from_millis(1500));
     }
+}
+
+/// Bateria del dispositivo que esta sonando.
+///
+/// Aqui SI hay un sondeo, y a proposito: el HyperX no avisa de nada, hay que
+/// preguntarle por HID. Pero va lento -- la bateria de unos auriculares no
+/// cambia en segundos. Lo que se mira seguido es cual es la salida
+/// predeterminada, que es barato, para que al cambiar de auriculares el numero
+/// salte enseguida en vez de esperar al siguiente minuto.
+///
+/// Los AirPods no se preguntan: su oyente BLE se arranca una vez aqui y va
+/// dejando lo ultimo que oyo.
+fn battery_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
+    rice_common::battery::iniciar_escucha_airpods();
+    let mut ultima_salida = String::new();
+    let mut ultima_lectura: Option<Instant> = None;
+    loop {
+        let salida = rice_common::audio::current_output_name().unwrap_or_default();
+        let toca = salida != ultima_salida
+            || ultima_lectura
+                .map(|t| t.elapsed() >= Duration::from_secs(60))
+                .unwrap_or(true);
+        if toca {
+            ultima_salida = salida;
+            ultima_lectura = Some(Instant::now());
+            let nueva = rice_common::battery::en_uso();
+            let mut s = shared.lock().unwrap();
+            // Repintar solo si cambio algo visible: sin esto la barra se
+            // despierta cada minuto para dibujar el mismo numero.
+            let cambio = match (&s.bateria, &nueva) {
+                (Some(a), Some(b)) => {
+                    a.nivel != b.nivel || a.cargando != b.cargando || a.clase != b.clase
+                }
+                (None, None) => false,
+                _ => true,
+            };
+            if cambio {
+                s.bateria = nueva;
+                drop(s);
+                ctx.request_repaint();
+            }
+        }
+        std::thread::sleep(Duration::from_secs(5));
+    }
+}
+
+/// Cuanto hace de una lectura, en palabras. Los AirPods solo se anuncian de
+/// vez en cuando, asi que decir "hace 20 min" es parte de la respuesta.
+fn hace(d: Duration) -> String {
+    let s = d.as_secs();
+    if s < 90 {
+        format!("{s} s")
+    } else if s < 5400 {
+        format!("{} min", s / 60)
+    } else {
+        format!("{} h", s / 3600)
+    }
+}
+
+/// Globo de la bateria: el desglose, la salud y, si la lectura es vieja, cuanto.
+fn descripcion_bateria(b: &rice_common::battery::Bateria) -> String {
+    let mut t = b.alias().to_string();
+    match b.nivel {
+        Some(n) => t.push_str(&format!(" — {n}%")),
+        None => t.push_str(" — sin lectura"),
+    }
+    if b.cargando {
+        t.push_str(" (cargando)");
+    }
+    for (nombre, v) in &b.partes {
+        t.push_str(&format!("\n{nombre}: {v}%"));
+    }
+    match b.salud {
+        Some(h) => t.push_str(&format!("\nsalud: {h}%")),
+        None => t.push_str(&format!(
+            "\nsalud: sin dato — {}",
+            rice_common::battery::SALUD_POR_QUE
+        )),
+    }
+    if b.edad.as_secs() > 90 {
+        t.push_str(&format!("\nleido hace {}", hace(b.edad)));
+    }
+    t
 }
 
 // GPU temperature + utilization via nvidia-smi (no admin needed).
@@ -2553,6 +2642,31 @@ impl BarApp {
                 fg,
             );
 
+            // Bateria y salud a la derecha del nombre: es lo que hace util la
+            // fila, saber si te vas a quedar sin auriculares ANTES de elegirlos.
+            if let Some(b) = &r.bateria {
+                let nivel = match b.nivel {
+                    Some(n) => format!("{n}%"),
+                    None => "--".to_string(),
+                };
+                let salud = match b.salud {
+                    Some(h) => format!("salud {h}%"),
+                    None => "salud ?".to_string(),
+                };
+                p.text(
+                    egui::pos2(row_rect.right() - 52.0, row_rect.center().y),
+                    egui::Align2::RIGHT_CENTER,
+                    format!("{nivel}   {salud}"),
+                    egui::FontId::proportional(11.0),
+                    if b.nivel.map(|n| n <= 20).unwrap_or(false) {
+                        col(theme::ACCENT_WARN)
+                    } else {
+                        WARM_SUB
+                    },
+                );
+                resp.clone().on_hover_text(descripcion_bateria(b));
+            }
+
             if r.bt_container.is_some() {
                 draw_icon(
                     p,
@@ -3123,8 +3237,33 @@ impl eframe::App for BarApp {
                         ui.add_space(12.0);
                         ui.colored_label(dim, format!("RAM {:>2.0}%", s.mem));
                         ui.add_space(12.0);
-                        if !s.net.is_empty() {
-                            ui.colored_label(egui::Color32::from_rgb(130, 200, 150), &s.net);
+                        // Auriculares rojos para el HyperX, blancos para los
+                        // AirPods: se distinguen de un vistazo sin leer nada.
+                        if let Some(b) = &s.bateria {
+                            let color = match b.clase {
+                                rice_common::battery::Clase::HyperX => {
+                                    egui::Color32::from_rgb(220, 90, 80)
+                                }
+                                rice_common::battery::Clase::AirPods => {
+                                    egui::Color32::from_rgb(238, 238, 240)
+                                }
+                            };
+                            let (rb, resp_b) = ui
+                                .allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+                            draw_icon(ui.painter(), rb.center(), "\u{f025}", 13.0, color);
+                            let txt = match b.nivel {
+                                Some(n) => format!("{n}%"),
+                                None => "--".to_string(),
+                            };
+                            let col_txt = if b.cargando {
+                                col(theme::ACCENT_OK)
+                            } else if b.nivel.map(|n| n <= 20).unwrap_or(false) {
+                                egui::Color32::from_rgb(255, 120, 120)
+                            } else {
+                                dim
+                            };
+                            ui.colored_label(col_txt, txt);
+                            resp_b.on_hover_text(descripcion_bateria(b));
                             ui.add_space(12.0);
                         }
                         let dir = if s.tiling == "vertical" { "|" } else { "—" };
@@ -3646,6 +3785,9 @@ fn main() -> eframe::Result<()> {
             let s3 = shared.clone();
             let ctx3 = cc.egui_ctx.clone();
             std::thread::spawn(move || gpu_thread(s3, ctx3));
+            let s4 = shared.clone();
+            let ctx4 = cc.egui_ctx.clone();
+            std::thread::spawn(move || battery_thread(s4, ctx4));
             let s4 = shared.clone();
             let ctx4 = cc.egui_ctx.clone();
             std::thread::spawn(move || island_watcher(s4, ctx4));
