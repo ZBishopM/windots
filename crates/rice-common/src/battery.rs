@@ -277,7 +277,11 @@ fn nibble_a_pct(v: u8) -> Option<u8> {
 ///   [0]=0x07 tipo   [1]=longitud   [2]=prefijo   [3..5]=modelo
 ///   [5]=estado (el bit 0x20 dice cual auricular es el primario)
 ///   [6]=nibble alto y nibble bajo con los dos auriculares
-///   [7]=nibble alto: estuche; nibble bajo: bits de carga
+///   [7]=nibble ALTO: banderas de carga; nibble BAJO: estuche
+///
+/// El byte 7 estuvo al reves hasta que se capturo un anuncio de verdad: valia
+/// 0xBA, que leido mal daba "estuche 11" -- un nivel que no existe, porque el
+/// maximo es 10. Con el orden bueno son banderas 0xB y estuche 0xA = 100%.
 fn parsear_anuncio(b: &[u8]) -> Option<Bateria> {
     // Tipo 0x07 NO basta. Capturado en el aire un 0x07 ajeno de 19 bytes
     // (07 11 06 A5 30 ...) que con solo esa comprobacion se colaba: el parser
@@ -298,8 +302,8 @@ fn parsear_anuncio(b: &[u8]) -> Option<Bateria> {
     }
     let izq = nibble_a_pct(uno);
     let der = nibble_a_pct(otro);
-    let estuche = nibble_a_pct(b[7] >> 4);
-    let carga = b[7] & 0x0F;
+    let carga = b[7] >> 4;
+    let estuche = nibble_a_pct(b[7] & 0x0F);
 
     let mut partes = Vec::new();
     for (nombre, v) in [("izquierdo", izq), ("derecho", der), ("estuche", estuche)] {
@@ -601,7 +605,7 @@ mod pruebas {
     }
 
     /// Un anuncio del tamaño bueno, con los bytes que importan puestos.
-    fn anuncio(estado: u8, nibbles: u8, estuche_y_carga: u8) -> [u8; LARGO_PROXIMITY] {
+    fn anuncio(estado: u8, nibbles: u8, carga_y_estuche: u8) -> [u8; LARGO_PROXIMITY] {
         let mut b = [0u8; LARGO_PROXIMITY];
         b[0] = 0x07;
         b[1] = 0x19;
@@ -610,7 +614,7 @@ mod pruebas {
         b[4] = 0x20;
         b[5] = estado;
         b[6] = nibbles;
-        b[7] = estuche_y_carga;
+        b[7] = carga_y_estuche;
         b
     }
 
@@ -618,7 +622,7 @@ mod pruebas {
     /// estuche no entra en esa cuenta aunque este lleno.
     #[test]
     fn manda_el_auricular_mas_bajo() {
-        let b = anuncio(0x00, 0x83, 0xA0);
+        let b = anuncio(0x00, 0x83, 0x0A); // sin cargar, estuche al 100%
         let bat = parsear_anuncio(&b).expect("deberia parsear");
         assert_eq!(bat.nivel, Some(30));
         assert_eq!(bat.partes, vec![
@@ -631,7 +635,7 @@ mod pruebas {
     /// El bit 0x20 del estado intercambia cual auricular es cual.
     #[test]
     fn el_bit_de_primario_invierte() {
-        let b = anuncio(0x20, 0x83, 0xA0);
+        let b = anuncio(0x20, 0x83, 0x0A);
         let bat = parsear_anuncio(&b).expect("deberia parsear");
         assert_eq!(bat.partes[0], ("izquierdo".to_string(), 30));
         assert_eq!(bat.partes[1], ("derecho".to_string(), 80));
@@ -681,6 +685,26 @@ mod pruebas {
         assert!(parsear_anuncio(&[0x07]).is_none(), "demasiado corto");
     }
 
+    /// El anuncio REAL de los AirPods del dueño, capturado al abrir el estuche.
+    /// Es la referencia: los desplazamientos se comprueban contra esto y no
+    /// contra documentacion de terceros.
+    #[test]
+    fn anuncio_real_capturado() {
+        let real = [
+            0x07, 0x19, 0x01, 0x27, 0x20, 0x55, 0xAA, 0xBA, 0x11, 0x00, 0x04, 0x7E, 0x5B, 0x46,
+            0x2F, 0xDA, 0x29, 0xC7, 0x3F, 0x90, 0x6F, 0x09, 0xE0, 0xE8, 0x67, 0x81, 0x95,
+        ];
+        let bat = parsear_anuncio(&real).expect("el anuncio real debe parsear");
+        // 0x6=0xAA: los dos auriculares al 100%.
+        assert_eq!(bat.nivel, Some(100));
+        assert_eq!(bat.partes[0], ("izquierdo".to_string(), 100));
+        assert_eq!(bat.partes[1], ("derecho".to_string(), 100));
+        // 0x7=0xBA: banderas 0xB, estuche 0xA = 100%. Leido al reves daba 11,
+        // que no es un nivel valido.
+        assert_eq!(bat.partes[2], ("estuche".to_string(), 100));
+        assert!(bat.cargando, "las banderas 0xB dicen que estaban cargando");
+    }
+
     /// Regresion: un 0x07 ajeno, capturado de verdad en el aire, de otra
     /// variante y otro tamaño. Antes se colaba y se mostraba como si fueran
     /// tus AirPods al 50%.
@@ -699,7 +723,7 @@ mod pruebas {
     /// Un auricular guardado en el estuche sale como desconocido, no como 0%.
     #[test]
     fn auricular_guardado_no_es_cero() {
-        let b = anuncio(0x00, 0xF5, 0x90);
+        let b = anuncio(0x00, 0xF5, 0x09);
         let bat = parsear_anuncio(&b).expect("deberia parsear");
         assert_eq!(bat.nivel, Some(50), "solo cuenta el que si reporta");
         assert_eq!(bat.partes.len(), 2, "izquierdo desconocido no aparece");
