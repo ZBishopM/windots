@@ -92,9 +92,8 @@ fn main() -> Result<()> {
     // Ya paso dos veces: una con `--help` y otra con un splatting de
     // PowerShell que degrado @('--list') a String y mando los caracteres
     // sueltos. Consultar el estado nunca deberia poder modificarlo.
-    const CONOCIDAS: [&str; 11] = [
+    const CONOCIDAS: [&str; 10] = [
         "--output", "-o", "--list", "-l", "--set", "-s", "--level", "-v", "--help", "-h",
-        "--bateria",
     ];
     let mut sueltos: Vec<&str> = Vec::new();
     let mut i = 1;
@@ -119,7 +118,6 @@ fn main() -> Result<()> {
   micswitch --set <texto>      fija el que contenga <texto> en su nombre
   micswitch --level            muestra el nivel y el mudo de cada endpoint
   micswitch --level <0-100>    fija el nivel del predeterminado (o del --set)
-  micswitch --bateria          bateria de los auriculares inalambricos
 
   --output combina con --list, --set y --level para operar sobre la salida.";
 
@@ -133,63 +131,6 @@ fn main() -> Result<()> {
 ");
         eprintln!("{uso}");
         std::process::exit(2);
-    }
-
-    // La bateria no pasa por COM ni por el enumerador de endpoints, asi que se
-    // resuelve antes de todo lo demas.
-    if argv.iter().any(|a| a == "--bateria") {
-        // Los AirPods no se preguntan: hay que escuchar sus anuncios BLE, que
-        // solo sueltan de vez en cuando. Se espera un poco antes de rendirse.
-        rice_common::battery::iniciar_escucha_airpods();
-        std::thread::sleep(std::time::Duration::from_secs(6));
-        // Aqui no hay barra que mantenga la cache al dia: se pregunta ahora.
-        rice_common::battery::refrescar();
-
-        let todas = rice_common::battery::todas();
-        if todas.is_empty() {
-            println!("ningun dispositivo con bateria disponible");
-            println!("(el HyperX no contesta con el casco apagado; los AirPods, hasta");
-            println!(" que sueltan un anuncio -- abrir el estuche lo provoca)");
-        }
-        for b in &todas {
-            let nivel = b.nivel.map(|n| format!("{n}%")).unwrap_or_else(|| "--".into());
-            let carga = if b.cargando { "  (cargando)" } else { "" };
-            println!("{:<14} {nivel}{carga}", b.alias());
-            for (nombre, v) in &b.partes {
-                println!("    {nombre:<12} {v}%");
-            }
-            // Tension medida de la celda. El HyperX la publica en la misma
-            // respuesta que el porcentaje; los AirPods no dan ninguna.
-            if let Some(mv) = b.voltaje_mv {
-                println!("    {:<12} {:.3} V", "tension", mv as f32 / 1000.0);
-            }
-            // El ritmo se DERIVA de la pendiente del porcentaje en el tiempo,
-            // asi que hace falta historial. Este programa arranca y muere en
-            // una pasada: nunca lo tendra. Quien lo acumula es la barra, que
-            // vive todo el rato -- decir "aun midiendo" aqui seria enganar,
-            // porque nunca terminaria de medir.
-            match b.ritmo_pct_h {
-                Some(r) if r.abs() >= 0.5 => println!("    {:<12} {r:+.0} puntos/h", "ritmo"),
-                _ => println!("    {:<12} en la barra (aqui no hay historial)", "ritmo"),
-            }
-            match b.salud {
-                Some(h) => println!("    {:<12} {h}%", "salud"),
-                None => println!("    {:<12} sin dato", "salud"),
-            }
-            if b.edad.as_secs() > 90 {
-                println!("    {:<12} hace {} min", "leido", b.edad.as_secs() / 60);
-            }
-        }
-        if let Some(crudo) = rice_common::battery::airpods_crudo() {
-            println!("\nultimo anuncio de AirPods en crudo: {crudo}");
-        }
-        if todas.iter().all(|b| b.salud.is_none()) {
-            println!("\nsalud: {}", rice_common::battery::SALUD_POR_QUE);
-        }
-        if !todas.is_empty() {
-            println!("potencia: {}", rice_common::battery::POTENCIA_POR_QUE);
-        }
-        return Ok(());
     }
 
     unsafe {

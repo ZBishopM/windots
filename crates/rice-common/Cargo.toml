@@ -23,7 +23,7 @@ spectrum = ["dep:rustfft"]                 # tiny live FFT for the island visual
 # Bateria de los auriculares. Dos caminos que no se parecen en nada: HID contra
 # el dongle del HyperX (de ahi hidapi) y anuncios BLE para los AirPods (de ahi
 # la feature Advertisement). Windows no publica ninguna de las dos.
-battery = ["dep:hidapi", "dep:windows", "audio"]
+battery = ["dep:hidapi", "dep:windows", "audio", "bluetooth"]
 
 [dependencies]
 eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts"], optional = true }

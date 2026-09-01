@@ -384,6 +384,24 @@ pub fn iniciar_escucha_airpods() {
 #[cfg(not(windows))]
 pub fn iniciar_escucha_airpods() {}
 
+/// ¿Estan los AirPods conectados a este PC ahora mismo?
+///
+/// Oir su anuncio BLE NO significa que lo esten: el estuche se anuncia igual
+/// con los auriculares guardados dentro, que es justo como se capturo el
+/// primer paquete bueno. Para la barra lo que vale es que Windows los tenga
+/// conectados como dispositivo de audio.
+static AIRPODS_CONECTADOS: OnceLock<Mutex<bool>> = OnceLock::new();
+
+fn bandera_conectados() -> &'static Mutex<bool> {
+    AIRPODS_CONECTADOS.get_or_init(|| Mutex::new(false))
+}
+
+fn mirar_si_conectados() -> bool {
+    crate::bluetooth::devices()
+        .iter()
+        .any(|d| d.connected && d.name.to_lowercase().contains("airpods"))
+}
+
 /// Ultimo estado conocido de los AirPods, con su antiguedad puesta al dia.
 pub fn airpods() -> Option<Bateria> {
     let guard = cache().lock().unwrap();
@@ -493,6 +511,9 @@ pub fn refrescar_carga() -> bool {
 /// apagar el casco, y esperar al siguiente minuto deja el numero en pantalla
 /// mucho despues de que el casco ya no este.
 pub fn refrescar() -> bool {
+    // Enumerar Bluetooth es lento para hacerlo en cada pintado, asi que se
+    // aprovecha esta pasada, que ya es la lenta.
+    *bandera_conectados().lock().unwrap() = mirar_si_conectados();
     let estado = hyperx_estado();
     let mut c = cache_hyperx().lock().unwrap();
     match estado {
@@ -545,6 +566,28 @@ fn hyperx_cacheado() -> Option<Bateria> {
     Some(b)
 }
 
+/// Los dispositivos que estan CONECTADOS ahora, que es lo que va a la barra.
+///
+/// El criterio es distinto para cada uno, porque "conectado" significa cosas
+/// distintas: el HyperX esta conectado si su dongle contesta -- no hay otra
+/// forma de saberlo, no va por Bluetooth. Los AirPods, si Windows los tiene
+/// conectados como salida de audio; su anuncio BLE no basta, porque el estuche
+/// se anuncia igual con los auriculares dentro.
+///
+/// Solo lee memoria: la E/S la hizo `refrescar()`.
+pub fn conectadas() -> Vec<Bateria> {
+    let mut v = Vec::new();
+    if let Some(b) = hyperx_cacheado() {
+        v.push(b);
+    }
+    if *bandera_conectados().lock().unwrap() {
+        if let Some(b) = airpods() {
+            v.push(b);
+        }
+    }
+    v
+}
+
 /// Los dos, para el panel de dispositivos. Solo lee memoria: no hace E/S, asi
 /// que se puede llamar desde donde haga falta sin frenar nada.
 pub fn todas() -> Vec<Bateria> {
@@ -556,40 +599,6 @@ pub fn todas() -> Vec<Bateria> {
         v.push(b);
     }
     v
-}
-
-/// La del dispositivo que esta sonando ahora, que es la que va en la barra.
-/// Se decide por la salida predeterminada, no por cual tiene mas bateria.
-///
-/// Si la salida ES uno de los dos pero no hay lectura -- el casco apagado, o
-/// unos AirPods que todavia no se han anunciado -- devuelve el dispositivo con
-/// `nivel: None`. A proposito: asi la barra sigue mostrando el icono con un
-/// "--" al lado, en vez de desaparecer y dejarte sin saber si la funcion esta
-/// rota o es que no hay dato.
-#[cfg(feature = "audio")]
-pub fn en_uso() -> Option<Bateria> {
-    let salida = crate::audio::current_output_name()?.to_lowercase();
-    let clase = if salida.contains("airpods") {
-        Clase::AirPods
-    } else if salida.contains("hyperx") || salida.contains("cloud") {
-        Clase::HyperX
-    } else {
-        return None;
-    };
-    let leida = match clase {
-        Clase::AirPods => airpods(),
-        Clase::HyperX => hyperx_cacheado(),
-    };
-    Some(leida.unwrap_or(Bateria {
-        clase,
-        nivel: None,
-        cargando: false,
-        partes: Vec::new(),
-        salud: None,
-        edad: Duration::ZERO,
-        voltaje_mv: None,
-        ritmo_pct_h: None,
-    }))
 }
 
 #[cfg(test)]

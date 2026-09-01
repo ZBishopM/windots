@@ -724,10 +724,10 @@ struct Shared {
     cpu: f32,
     mem: f32,
     gpu: String, // "44° 11%" (temp + utilization, from nvidia-smi)
-    /// Bateria del dispositivo de audio que esta sonando ahora. Sustituye a
-    /// la velocidad de subida/bajada, que se miraba una vez al mes; quedarte
+    /// Bateria de CADA dispositivo conectado, no solo del que suena. Sustituye
+    /// a la velocidad de subida/bajada, que se miraba una vez al mes; quedarte
     /// sin auriculares a media partida se nota siempre.
-    bateria: Option<rice_common::battery::Bateria>,
+    baterias: Vec<rice_common::battery::Bateria>,
     island: Option<IslandEvent>,
     island_serial: u64, // bumps on each new event so the UI notices
 }
@@ -1588,19 +1588,17 @@ fn battery_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
             } else {
                 Duration::from_secs(10)
             };
-            let nueva = rice_common::battery::en_uso();
+            let nuevas = rice_common::battery::conectadas();
             let mut s = shared.lock().unwrap();
             // Repintar solo si cambio algo visible: sin esto la barra se
-            // despierta cada minuto para dibujar el mismo numero.
-            let cambio = match (&s.bateria, &nueva) {
-                (Some(a), Some(b)) => {
-                    a.nivel != b.nivel || a.cargando != b.cargando || a.clase != b.clase
-                }
-                (None, None) => false,
-                _ => true,
+            // despierta cada minuto para dibujar los mismos numeros.
+            let resumen = |v: &Vec<rice_common::battery::Bateria>| -> Vec<_> {
+                v.iter()
+                    .map(|b| (b.clase, b.nivel, b.cargando, b.partes.clone()))
+                    .collect()
             };
-            if cambio {
-                s.bateria = nueva;
+            if resumen(&s.baterias) != resumen(&nuevas) {
+                s.baterias = nuevas;
                 drop(s);
                 ctx.request_repaint();
             }
@@ -1613,12 +1611,18 @@ fn battery_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
             .unwrap_or(true)
         {
             ultima_carga = Some(Instant::now());
-            let antes = shared.lock().unwrap().bateria.as_ref().map(|b| b.cargando);
+            let antes: Vec<bool> = shared
+                .lock()
+                .unwrap()
+                .baterias
+                .iter()
+                .map(|b| b.cargando)
+                .collect();
             if rice_common::battery::refrescar_carga() {
-                let nueva = rice_common::battery::en_uso();
-                let ahora = nueva.as_ref().map(|b| b.cargando);
+                let nuevas = rice_common::battery::conectadas();
+                let ahora: Vec<bool> = nuevas.iter().map(|b| b.cargando).collect();
                 if antes != ahora {
-                    shared.lock().unwrap().bateria = nueva;
+                    shared.lock().unwrap().baterias = nuevas;
                     ctx.request_repaint();
                 }
             }
@@ -3294,9 +3298,10 @@ impl eframe::App for BarApp {
                         ui.add_space(12.0);
                         ui.colored_label(dim, format!("RAM {:>2.0}%", s.mem));
                         ui.add_space(12.0);
-                        // Auriculares rojos para el HyperX, blancos para los
-                        // AirPods: se distinguen de un vistazo sin leer nada.
-                        if let Some(b) = &s.bateria {
+                        // Un bloque por dispositivo conectado: auriculares
+                        // rojos para el HyperX, blancos para los AirPods. Se
+                        // distinguen de un vistazo sin leer nada.
+                        for b in &s.baterias {
                             let color = match b.clase {
                                 rice_common::battery::Clase::HyperX => {
                                     egui::Color32::from_rgb(220, 90, 80)
@@ -3306,12 +3311,25 @@ impl eframe::App for BarApp {
                                 }
                             };
                             // Esta tira se compone de DERECHA a IZQUIERDA, asi
-                            // que el porcentaje va primero para quedar a la
-                            // derecha del icono, no al reves.
-                            let txt = match b.nivel {
-                                Some(n) => format!("{n}%"),
-                                None => "--".to_string(),
+                            // que lo que va mas a la derecha se emite primero.
+                            // Orden final: rayo, auriculares, niveles, estuche.
+                            let parte = |nombre: &str| {
+                                b.partes.iter().find(|(n, _)| n == nombre).map(|(_, v)| *v)
                             };
+                            // Los AirPods son dos baterias, no una: el numero
+                            // unico esconde justo lo que hace falta saber, que
+                            // es si UNO de los dos esta a punto de morirse.
+                            let txt = match (parte("izquierdo"), parte("derecho")) {
+                                (Some(izq), Some(der)) => format!("{izq}·{der}"),
+                                _ => match b.nivel {
+                                    Some(n) => format!("{n}%"),
+                                    None => "--".to_string(),
+                                },
+                            };
+                            if let Some(est) = parte("estuche") {
+                                ui.colored_label(WARM_SUB, format!("est {est}"));
+                                ui.add_space(6.0);
+                            }
                             // Una lectura vieja se apaga de color en vez de
                             // desaparecer: sigue siendo el ultimo dato real que
                             // hubo, y verlo apagado dice mas que un "--".
