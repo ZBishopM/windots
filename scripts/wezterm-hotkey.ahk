@@ -33,6 +33,37 @@ SetTimer(AhkAlive, 5000)
 AhkAlive()
 
 ; ------------------------------------------------------------
+; Interruptor de los atajos, mandado desde la barra.
+;
+; La barra escribe un 1 o un 0 en ~/.config/ahk-suspend.flag y esto lo obedece.
+; Un ARCHIVO y no una pulsacion sintetica: inyectar teclas desde la barra es lo
+; que desincroniza AltSnap y acaba comiendose la barra espaciadora. Esa via esta
+; prohibida en este rice.
+;
+; Se sondea cada 250 ms y no en el latido de 5 s: pulsar el icono y esperar cinco
+; segundos a que el color cambie se siente roto.
+;
+; Suspend(true) NO afecta a este temporizador ni al latido: los temporizadores
+; siguen corriendo suspendidos, que es justo lo que hace falta para poder
+; volver a encenderlo.
+; ------------------------------------------------------------
+AhkSuspendFlag() {
+    f := EnvGet('USERPROFILE') . '\.config\ahk-suspend.flag'
+    quiere := false
+    if FileExist(f) {
+        try quiere := Trim(FileRead(f)) = '1'
+    }
+    if (quiere && !A_IsSuspended) {
+        Suspend(true)
+        AhkAlive()          ; que la barra se entere ya, sin esperar al latido
+    } else if (!quiere && A_IsSuspended) {
+        Suspend(false)
+        AhkAlive()
+    }
+}
+SetTimer(AhkSuspendFlag, 250)
+
+; ------------------------------------------------------------
 ; Hyprland-style global hotkey to launch WezTerm.
 ;   #  = SUPER (Windows key)
 ;   SUPER + Enter  -> open a new WezTerm window, instantly

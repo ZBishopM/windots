@@ -1347,19 +1347,26 @@ fn run_action(kind: &str, shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
                 }
             }
         }
+        // El icono de guardar es TAMBIEN el indicador de estado de Alt+F10, y
+        // ahora es su interruptor: pulsarlo suspende los atajos globales, y
+        // pulsarlo otra vez los devuelve.
+        //
+        // Se manda por ARCHIVO (~/.config/ahk-suspend.flag) y no simulando la
+        // pulsacion: inyectar teclas desde la barra desincroniza AltSnap, que
+        // entonces se come la barra espaciadora. Ese camino esta cerrado en este
+        // rice a proposito.
+        //
+        // No se pinta el estado aqui: se deja que AutoHotkey lo confirme en su
+        // latido. Asi el color dice lo que PASA, no lo que pedimos -- si AHK
+        // esta caido, el icono no se pone verde por mucho que lo pulses.
         "save" => {
-            let _ = std::process::Command::new("pwsh")
-                .args([
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-WindowStyle",
-                    "Hidden",
-                    "-File",
-                    &format!("{home}\\.config\\shadowplay-wgc-save.ps1"),
-                ])
-                .creation_flags(NOWIN)
-                .spawn();
+            // El estado se lee del latido de AHK, no de lo que crea la interfaz:
+            // esto corre en un hilo suelto sin acceso a `self`, y ademas el
+            // latido es la unica fuente que sabe si los atajos estan de verdad
+            // suspendidos.
+            let (estado, _) = leer_atajo();
+            let f = format!("{home}\\.config\\ahk-suspend.flag");
+            let _ = std::fs::write(&f, if estado == Atajo::Suspendido { "0" } else { "1" });
         }
         "term" => {
             let _ = std::process::Command::new("C:\\Program Files\\WezTerm\\wezterm-gui.exe")
@@ -1581,10 +1588,15 @@ fn fetch_gpu() -> Option<String> {
         let util = parts.next()?;
         // Si nvidia-smi devolviera menos campos de los pedidos, se cae al
         // formato de antes en vez de no pintar GPU.
+        // "VRAM" escrito, y no solo los numeros pegados al porcentaje.
+        //
+        // Antes salia "GPU 53° 32%  2.2/12G" y se leia como una contradiccion:
+        // el 32% es USO DEL NUCLEO y el 2.2/12 es MEMORIA (que seria un 18%).
+        // Dos cifras contiguas que parecen la misma magnitud y no lo son.
         let g = match (parts.next(), parts.next()) {
             (Some(usada), Some(total)) => {
                 let (u, t) = (usada.parse::<f32>().ok()?, total.parse::<f32>().ok()?);
-                format!("{temp}° {util}%  {:.1}/{:.0}G", u / 1024.0, t / 1024.0)
+                format!("{temp}° {util}%  VRAM {:.1}/{:.0}G", u / 1024.0, t / 1024.0)
             }
             _ => format!("{temp}° {util}%"),
         };
@@ -1940,8 +1952,8 @@ impl BarApp {
             draw_icon(p, c, glyph, 17.0, acc);
             if es_guardar {
                 let estado = match self.atajo {
-                    Atajo::Vivo => "Alt+F10 activo",
-                    Atajo::Suspendido => "Alt+F10 SUSPENDIDO (Win+Shift+Z)",
+                    Atajo::Vivo => "Alt+F10 activo - pulsa para desactivarlo",
+                    Atajo::Suspendido => "Alt+F10 desactivado - pulsa para activarlo",
                     Atajo::Caido => "Alt+F10 CAIDO: AutoHotkey no responde",
                 };
                 let ultimo = if self.atajo_f10 == 0 {

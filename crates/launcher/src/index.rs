@@ -145,7 +145,22 @@ pub fn build() -> Vec<Entry> {
     }
     // A packaged app often ALSO has a Start Menu shortcut; showing both is just
     // two identical rows with different launch paths.
-    all.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    //
+    // Among two shortcuts with the same name, the one NOT tucked inside a
+    // vendor subfolder wins -- found on Discord, which ships both: the
+    // top-level `Discord.lnk` points at the real, versioned
+    // `app-1.2.3\Discord.exe` (real icon), while `Discord Inc\Discord.lnk`
+    // points at Squirrel's own `Update.exe --processStart Discord.exe` (its
+    // own generic updater icon, not Discord's logo). `dedup_by` keeps
+    // whichever comes first, and without this the winner was just whatever
+    // order the filesystem happened to hand back `read_dir` entries in --
+    // unspecified, and wrong more often than not.
+    all.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.keywords.is_empty().cmp(&b.keywords.is_empty()).reverse())
+    });
     all.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
     // Commands last, outside the dedup: they are not applications, and one must
     // not disappear because some installer shipped a shortcut with the same

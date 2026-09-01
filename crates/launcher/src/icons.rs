@@ -308,3 +308,21 @@ unsafe fn icon_to_rgba(hicon: isize) -> Option<Rgba> {
 fn extract(_path: &str, _attrs: u32) -> Option<Rgba> {
     None
 }
+
+/// Diagnostico temporal para `--debug-icon`: llama a lo mismo que llama la
+/// cola de verdad, pero sincrono y con el resultado impreso, para no tener
+/// que instrumentar el hilo de iconos ni la interfaz.
+pub fn debug_extract(path: &str) {
+    match extract(path, REAL) {
+        None => println!("{path} -> None (SHGetFileInfoW o GetIconInfo/GetDIBits fallo)"),
+        Some(px) => {
+            let opacos = px.chunks_exact(4).filter(|p| p[3] != 0).count();
+            println!(
+                "{path} -> Some, {} bytes, {}/{} pixeles con alfa != 0",
+                px.len(),
+                opacos,
+                SIZE * SIZE
+            );
+        }
+    }
+}

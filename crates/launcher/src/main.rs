@@ -14,6 +14,7 @@
 //!   launcher            run the resident instance
 //!   launcher --show     tell the resident instance to open (what the hotkey does)
 
+mod calc;
 mod commands;
 mod files;
 mod icons;
@@ -389,6 +390,10 @@ struct App {
     /// porque es la más literal de todas: el usuario ha escrito un comando, no
     /// ha pedido que se adivine nada.
     run_row: Option<commands::Run>,
+    /// La calculadora, al estilo Spotlight. Mutuamente excluyente con
+    /// `run_row` -- lo que activa una nunca puede ser tambien un comando, una
+    /// URL o una ruta -- asi que las dos comparten la fila 0 sin pisarse.
+    calc_row: Option<calc::Resultado>,
     /// Set when Enter was accepted. The chosen row stays lit for [`FLASH_MS`],
     /// then the box closes. Without it the only sign anything happened was the
     /// application's own window, seconds later.
@@ -426,6 +431,7 @@ impl App {
             icons,
             runner: commands::Runner::new(),
             run_row: None,
+            calc_row: None,
             file_hits: Vec::new(),
             flash: None,
             sized_rows: 0,
@@ -434,9 +440,9 @@ impl App {
         s
     }
 
-    /// The run row: zero or one.
+    /// The top row: zero or one, be it the run row or the calculator.
     fn run_n(&self) -> usize {
-        usize::from(self.run_row.is_some())
+        usize::from(self.calc_row.is_some() || self.run_row.is_some())
     }
 
     /// Application rows on screen.
@@ -502,7 +508,11 @@ impl App {
     /// dropping a frame on every keystroke, since a full sweep of two million
     /// entries is tens of milliseconds.
     fn on_query_changed(&mut self) {
-        self.run_row = self.runner.offer(&self.query);
+        self.calc_row = calc::offer(&self.query);
+        // La calculadora gana la fila 0 si aplica -- son mutuamente
+        // excluyentes en la practica (una cuenta como "2+2" nunca es tambien
+        // un comando `>`, una URL o una ruta), asi que ni se calcula la otra.
+        self.run_row = if self.calc_row.is_none() { self.runner.offer(&self.query) } else { None };
         self.refilter();
         if let Some(f) = &self.files {
             f.search(&self.query, MAX_ROWS);
@@ -510,7 +520,17 @@ impl App {
         self.file_hits.clear();
     }
 
-    fn launch(&mut self, elevated: bool) {
+    fn launch(&mut self, ctx: &egui::Context, elevated: bool) {
+        // No es un "lanzar": es un "copiar". Vuelve pronto, antes de que el
+        // resto de la funcion intente resolver un (target, args, dir) que
+        // para esta fila no existe.
+        if self.selected == 0 {
+            if let Some(r) = &self.calc_row {
+                ctx.output_mut(|o| o.copied_text = r.texto_para_copiar.clone());
+                self.flash = Some(std::time::Instant::now());
+                return;
+            }
+        }
         let run = self.run_n();
         let apps = self.app_shown();
         let target = if run == 1 && self.selected == 0 {
@@ -790,7 +810,7 @@ impl eframe::App for App {
             }
             if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
                 let admin = ctx.input(|i| i.modifiers.ctrl);
-                self.launch(admin);
+                self.launch(ctx, admin);
             }
         }
 
@@ -802,7 +822,9 @@ impl eframe::App for App {
         let files_n = self.file_shown();
         let mut row_icons: Vec<Option<egui::TextureId>> =
             Vec::with_capacity(run_n + apps_n + files_n);
-        if let Some(r) = self.run_row.clone() {
+        if self.calc_row.is_some() {
+            row_icons.push(None); // un resultado no tiene icono
+        } else if let Some(r) = self.run_row.clone() {
             // El icono del propio ejecutable, cuando el destino es una ruta.
             // Para `ms-settings:` o una URL no hay nada que sacar.
             let id = if r.target.contains('\\') {
@@ -942,7 +964,9 @@ impl eframe::App for App {
                     }
                 };
 
-                if let Some(r) = &self.run_row {
+                if let Some(r) = &self.calc_row {
+                    row(ui, 0, &r.label, "copiar", false, row_icons.first().copied().flatten());
+                } else if let Some(r) = &self.run_row {
                     row(ui, 0, &r.label, &r.hint, false, row_icons.first().copied().flatten());
                 }
                 for (n, &(i, _)) in self.hits.iter().take(apps).enumerate() {
@@ -1069,6 +1093,21 @@ fn main() -> eframe::Result<()> {
     }
     if let Some(i) = args.iter().position(|a| a == "--bench-index") {
         bench_index(args.get(i + 1).map(|s| s.as_str()).unwrap_or("bench.txt"));
+        return Ok(());
+    }
+    if let Some(i) = args.iter().position(|a| a == "--debug-icon") {
+        for p in &args[i + 1..] {
+            icons::debug_extract(p);
+        }
+        return Ok(());
+    }
+    if let Some(i) = args.iter().position(|a| a == "--debug-index") {
+        let needle = args.get(i + 1).map(|s| s.to_lowercase()).unwrap_or_default();
+        for e in index::build() {
+            if e.name.to_lowercase().contains(&needle) {
+                println!("{:?}", e);
+            }
+        }
         return Ok(());
     }
     #[cfg(windows)]
