@@ -3366,6 +3366,23 @@ impl eframe::App for BarApp {
                                     "\ncoste de hoy: {}{:.2}",
                                     c.moneda, c.coste_hoy
                                 ));
+                                // Una proyeccion a 24 h y a 30 dias, para no
+                                // tener que esperar al final del dia por
+                                // curiosidad. Va dicha como lo que es -- una
+                                // hipotesis a la potencia de AHORA -- porque
+                                // nadie deja el equipo igual las 24 horas, y
+                                // presentarla como una prevision seria mentir
+                                // con dos decimales.
+                                let precio = if c.kwh_hoy > 0.0 {
+                                    c.coste_hoy / c.kwh_hoy
+                                } else {
+                                    0.0
+                                };
+                                let dia = c.w * 24.0 / 1000.0 * precio;
+                                globo.push_str(&format!(
+                                    "\n\nsi se quedara a {:.0} W:\n  24 h -> {}{:.2}\n  30 dias -> {}{:.0}",
+                                    c.w, c.moneda, dia, c.moneda, dia * 30.0
+                                ));
                             } else {
                                 globo.push_str("\npon consumo.precio_kwh en rice.json para el coste");
                             }

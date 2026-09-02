@@ -61,5 +61,9 @@
     "notification_hold_secs": 4.0,
     "panel_timeout_secs": 6.0,
     "spectrum_fps": 30
+  },
+
+  "consumo": {
+    "precio_kwh": 0.70
   }
 }

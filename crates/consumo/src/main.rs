@@ -446,6 +446,11 @@ fn escribir_ahora(a: &Ahora) {
 fn medir() {
     let cfg = rice_common::settings::Settings::live().consumo.clone();
     let intervalo = Duration::from_secs(cfg.intervalo_s.max(1));
+    // El intervalo se fija al arrancar; el RESTO de la configuracion se relee
+    // en cada muestra (ver dentro del bucle). Cambiar el precio del kWh o los
+    // vatios de base tenia que surtir efecto al guardar rice.json, como pasa
+    // con todo lo demas de la rice -- no despues de acordarse de reiniciar
+    // esto. Una lectura por minuto de un archivo de dos kilobytes no se nota.
     // Tope del hueco que se acepta al integrar. Si entre dos muestras pasa mas
     // que esto, el equipo estuvo suspendido o el proceso parado: se cuenta solo
     // hasta el tope en vez de multiplicar la potencia actual por las ocho horas
@@ -473,6 +478,7 @@ fn medir() {
         let dt = (ahora_t - ultimo).min(tope);
         ultimo = ahora_t;
 
+        let cfg = rice_common::settings::Settings::live().consumo.clone();
         let gpu = gpu_w().unwrap_or(0.0);
         // La medida manda; la estimacion solo cubre el hueco cuando LHM no esta.
         let medida = cpu_w(&cfg.lhm_url);
