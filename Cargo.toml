@@ -24,6 +24,7 @@ members = [
     "crates/launcher",
     "crates/shadowplay-wgc",
     "crates/notifyd",
+    "crates/consumo",
 ]
 exclude = ["flutter", "projects"]
 

@@ -1,0 +1,15 @@
+[package]
+name = "consumo"
+version = "0.1.0"
+edition = "2021"
+
+# Medidor de consumo electrico. Muestrea la potencia y la integra en el tiempo
+# para saber cuanta energia se gasta al dia, y a cuanto sale.
+#
+# Sin cliente HTTP de verdad: la unica peticion que hace es un GET a localhost
+# contra LibreHardwareMonitor, y para eso un TcpStream de la biblioteca estandar
+# sobra. Meter reqwest arrastraria tokio entero a una rice que no lo usa.
+[dependencies]
+rice-common = { path = "../rice-common", features = ["settings"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

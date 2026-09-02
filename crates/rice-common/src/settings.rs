@@ -199,6 +199,69 @@ fn default_notification_style() -> String { "toast".into() }
 fn default_ipc() -> String { "ws://127.0.0.1:6123".into() }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Consumo {
+    /// Precio de la electricidad por kWh, del recibo. En 0 el medidor enseña
+    /// energia pero no dinero, a proposito: es mejor no dar una cifra que dar
+    /// una inventada.
+    #[serde(default)]
+    pub precio_kwh: f64,
+
+    /// Simbolo con el que se muestra el dinero.
+    #[serde(default = "d_moneda")]
+    pub moneda: String,
+
+    /// Vatios del resto del equipo: placa, RAM, discos, ventiladores, USB, RGB.
+    ///
+    /// Ningun sensor lo publica, asi que es una constante -- y no es un detalle
+    /// menor: en reposo puede ser MAS de la mitad del consumo, porque la GPU
+    /// baja a ~30 W y la CPU a poco. Sin este termino el medidor se quedaria
+    /// corto justo en el estado donde el equipo pasa la mayor parte del dia.
+    /// El valor por defecto es el tipico de un sobremesa; calibralo contra un
+    /// enchufe medidor si quieres que cuadre con el recibo.
+    #[serde(default = "d_base_w")]
+    pub base_w: f64,
+
+    /// Rendimiento de la fuente, 0..1. Lo que se factura entra por el enchufe,
+    /// no por los rieles: una fuente al 90% tira 111 W de la pared para dar 100.
+    #[serde(default = "d_eficiencia_psu")]
+    pub eficiencia_psu: f64,
+
+    /// Vatios de los monitores. No salen en ningun sensor y tienen su propia
+    /// fuente, asi que van aparte y no pasan por la eficiencia de la del PC.
+    /// En 0 el numero es "solo la torre".
+    #[serde(default)]
+    pub monitores_w: f64,
+
+    /// Cada cuantos segundos se muestrea.
+    #[serde(default = "d_intervalo_s")]
+    pub intervalo_s: u64,
+
+    /// JSON de LibreHardwareMonitor, de donde sale la potencia de CPU. Vacio
+    /// para no intentarlo. Ojo: LHM tiene que correr ELEVADO o ni el servidor
+    /// web arranca ni los sensores de potencia existen.
+    #[serde(default = "d_lhm_url")]
+    pub lhm_url: String,
+}
+
+fn d_moneda() -> String { "S/".into() }
+fn d_base_w() -> f64 { 45.0 }
+fn d_eficiencia_psu() -> f64 { 0.90 }
+fn d_intervalo_s() -> u64 { 10 }
+fn d_lhm_url() -> String { "http://localhost:8085/data.json".into() }
+
+fn default_consumo() -> Consumo {
+    Consumo {
+        precio_kwh: 0.0,
+        moneda: d_moneda(),
+        base_w: d_base_w(),
+        eficiencia_psu: d_eficiencia_psu(),
+        monitores_w: 0.0,
+        intervalo_s: d_intervalo_s(),
+        lhm_url: d_lhm_url(),
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Settings {
     /// Height of the status bar in pixels. The slide animation leaves this many
     /// rows untouched so the bar doesn't move with the desktop.
@@ -284,6 +347,10 @@ pub struct Settings {
     /// Win+Space search box.
     #[serde(default = "default_launcher")]
     pub launcher: Launcher,
+
+    /// Estimador de gasto electrico.
+    #[serde(default = "default_consumo")]
+    pub consumo: Consumo,
 }
 
 fn default_hide_on_fs() -> bool { true }
@@ -305,6 +372,7 @@ impl Default for Settings {
             hide_bar_on_fullscreen: default_hide_on_fs(),
             animation: Animation::default(),
             launcher: Launcher::default(),
+            consumo: default_consumo(),
         }
     }
 }

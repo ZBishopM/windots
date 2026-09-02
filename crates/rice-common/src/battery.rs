@@ -521,7 +521,7 @@ pub fn refrescar_carga() -> bool {
 /// mucho despues de que el casco ya no este.
 pub fn refrescar() -> bool {
     {
-        let mut g = bandera_conectados().lock().unwrap();
+        let g = bandera_conectados().lock().unwrap();
         let toca = g.1.map(|t| t.elapsed() >= CADA_CUANTO_BT).unwrap_or(true);
         if toca {
             // El candado se suelta para la consulta y se vuelve a tomar: tenerlo

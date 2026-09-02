@@ -109,6 +109,18 @@ $Components = @(
     # its permissions are missing, so it does not respawn-loop.
     @{ Name = 'notifyd'; Check = 'Process'; Match = 'notifyd'
        Path = { Get-RiceExe 'notifyd.exe' } }
+
+    # Estimador de gasto electrico. Muestrea la potencia y la integra, asi que
+    # lo que mide es el tiempo que pasa VIVO: cada minuto que este caido es un
+    # minuto que no aparece en el total del dia. De ahi que lo vigile el
+    # supervisor en vez de dejarlo en la carpeta de Inicio -- un cuelgue
+    # silencioso no se notaria hasta mirar el recibo.
+    #
+    # Es una app de consola y no de ventana: el supervisor la lanza con
+    # -WindowStyle Hidden, y asi `consumo --hoy` sigue imprimiendo cuando se
+    # llama a mano desde una terminal.
+    @{ Name = 'consumo'; Check = 'Process'; Match = 'consumo'
+       Path = { Get-RiceExe 'consumo.exe' } }
 )
 
 # One bar per monitor, each with its own single-instance mutex keyed by --x.

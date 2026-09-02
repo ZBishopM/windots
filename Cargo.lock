@@ -321,6 +321,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "consumo"
+version = "0.1.0"
+dependencies = [
+ "rice-common",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
