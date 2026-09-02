@@ -196,6 +196,72 @@ fn buscar_potencia_cpu(v: &serde_json::Value, dentro_cpu: bool, mejor: &mut Opti
     }
 }
 
+/// Uso de CPU entre dos llamadas, 0..1.
+///
+/// Hace falta porque sin LibreHardwareMonitor no hay sensor de potencia de CPU,
+/// y apuntar cero seria quedarse corto justo en lo que mas sube al jugar. Con
+/// el uso se estima por una recta entre `cpu_idle_w` y `cpu_max_w`. La curva
+/// real no es una recta -- los saltos de frecuencia y voltaje la curvan hacia
+/// arriba -- asi que la recta tiende a quedarse por debajo en cargas medias, lo
+/// cual encaja con preferir pasarse a quedarse corto solo hasta cierto punto:
+/// por eso ademas esta el margen.
+///
+/// `GetSystemTimes` en vez del crate sysinfo: son tres FILETIME y una resta, y
+/// no merece arrastrar una dependencia entera para eso.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct FileTimeWin {
+    bajo: u32,
+    alto: u32,
+}
+
+impl FileTimeWin {
+    fn valor(self) -> u64 {
+        ((self.alto as u64) << 32) | self.bajo as u64
+    }
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetSystemTimes(
+        ocioso: *mut FileTimeWin,
+        nucleo: *mut FileTimeWin,
+        usuario: *mut FileTimeWin,
+    ) -> i32;
+}
+
+#[derive(Default, Clone, Copy)]
+struct MuestraCpu {
+    ocioso: u64,
+    total: u64,
+}
+
+fn muestra_cpu() -> Option<MuestraCpu> {
+    let (mut o, mut n, mut u) = (
+        FileTimeWin::default(),
+        FileTimeWin::default(),
+        FileTimeWin::default(),
+    );
+    if unsafe { GetSystemTimes(&mut o, &mut n, &mut u) } == 0 {
+        return None;
+    }
+    // El tiempo de nucleo YA incluye el ocioso, asi que el total es nucleo +
+    // usuario y no la suma de los tres.
+    Some(MuestraCpu {
+        ocioso: o.valor(),
+        total: n.valor() + u.valor(),
+    })
+}
+
+fn uso_cpu(antes: MuestraCpu, ahora: MuestraCpu) -> f64 {
+    let dt = ahora.total.saturating_sub(antes.total) as f64;
+    let di = ahora.ocioso.saturating_sub(antes.ocioso) as f64;
+    if dt <= 0.0 {
+        return 0.0;
+    }
+    (1.0 - di / dt).clamp(0.0, 1.0)
+}
+
 // -------------------------------------------------------------- informe ---
 
 fn moneda(cfg: &rice_common::settings::Consumo, wh: f64) -> String {
@@ -251,6 +317,43 @@ fn informe(solo_hoy: bool) {
 
 // ------------------------------------------------------------ muestreo ---
 
+/// Lo que la barra lee para pintarlo. Un archivo pequeño y aparte del historial
+/// mensual: la barra lo relee a menudo y no tiene por que cargar el mes entero
+/// ni saber de su formato.
+#[derive(Serialize, Default)]
+struct Ahora {
+    /// Vatios estimados en la toma de corriente, ahora mismo.
+    w: f64,
+    /// Las piezas del total, para que se pueda auditar de un vistazo en vez de
+    /// tener que creerse el numero. Sin esto, "226 W" es una cifra que uno
+    /// acepta o no; con esto se ve cual de los terminos la esta inflando.
+    gpu_w: f64,
+    cpu_w: f64,
+    base_w: f64,
+    monitores_w: f64,
+    kwh_hoy: f64,
+    coste_hoy: f64,
+    moneda: String,
+    /// Si la potencia de CPU vino medida de LHM o estimada del uso. La barra lo
+    /// dice en el globo: un numero estimado y uno medido no merecen la misma
+    /// confianza y el que mira tiene derecho a saber cual esta viendo.
+    cpu_medida: bool,
+}
+
+fn escribir_ahora(a: &Ahora) {
+    let mut p = PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default());
+    p.push(".config");
+    p.push("consumo");
+    let _ = std::fs::create_dir_all(&p);
+    p.push("ahora.json");
+    if let Ok(t) = serde_json::to_string(a) {
+        let tmp = p.with_extension("json.tmp");
+        if std::fs::write(&tmp, t).is_ok() {
+            let _ = std::fs::rename(&tmp, &p);
+        }
+    }
+}
+
 fn medir() {
     let cfg = rice_common::settings::Settings::live().consumo.clone();
     let intervalo = Duration::from_secs(cfg.intervalo_s.max(1));
@@ -265,20 +368,38 @@ fn medir() {
     let mut almacen = cargar(&dia);
     let mut ultimo = Instant::now();
     let mut sin_guardar = Duration::ZERO;
+    let mut cpu_previa = muestra_cpu().unwrap_or_default();
 
     loop {
         std::thread::sleep(intervalo);
-        let ahora = Instant::now();
-        let dt = (ahora - ultimo).min(tope);
-        ultimo = ahora;
+        let ahora_t = Instant::now();
+        let dt = (ahora_t - ultimo).min(tope);
+        ultimo = ahora_t;
 
         let gpu = gpu_w().unwrap_or(0.0);
-        let cpu = cpu_w(&cfg.lhm_url).unwrap_or(0.0);
+        // La medida manda; la estimacion solo cubre el hueco cuando LHM no esta.
+        let medida = cpu_w(&cfg.lhm_url);
+        let cpu = match medida {
+            Some(w) => w,
+            None => {
+                let m = muestra_cpu().unwrap_or_default();
+                let uso = uso_cpu(cpu_previa, m);
+                cpu_previa = m;
+                cfg.cpu_idle_w + (cfg.cpu_max_w - cfg.cpu_idle_w) * uso
+            }
+        };
+        if medida.is_some() {
+            // Mantener la referencia al dia para que el primer uso tras perder
+            // LHM no salga disparado por comparar contra una muestra vieja.
+            cpu_previa = muestra_cpu().unwrap_or(cpu_previa);
+        }
+
         // La fuente pierde una parte de lo que entrega, y lo que se factura es
-        // lo que entra por el enchufe. Los monitores van fuera de esa division:
-        // tienen su propia fuente.
-        let componentes = gpu + cpu + cfg.base_w;
-        let pared = componentes / cfg.eficiencia_psu.clamp(0.5, 1.0) + cfg.monitores_w;
+        // lo que entra por el enchufe. El margen va sobre la torre; los
+        // monitores se suman despues porque tienen su propia fuente y su propio
+        // consumo ya es el de pared.
+        let torre = (gpu + cpu + cfg.base_w) / cfg.eficiencia_psu.clamp(0.5, 1.0) * cfg.margen.max(1.0);
+        let pared = torre + cfg.monitores_w;
 
         // El dia puede cambiar a mitad de muestreo; entonces se cierra el
         // anterior en disco antes de empezar el nuevo.
@@ -294,12 +415,25 @@ fn medir() {
         e.segundos += dt.as_secs_f64();
         e.w_max = e.w_max.max(pared);
         e.muestras += 1;
+        let wh_hoy = e.wh;
 
-        // Guardar cada minuto y no en cada muestra: un corte deja fuera como
-        // mucho un minuto de cuentas, y no se castiga al SSD con 8.640
-        // escrituras diarias por un archivo de dos kilobytes.
+        escribir_ahora(&Ahora {
+            w: pared,
+            gpu_w: gpu,
+            cpu_w: cpu,
+            base_w: cfg.base_w,
+            monitores_w: cfg.monitores_w,
+            kwh_hoy: wh_hoy / 1000.0,
+            coste_hoy: wh_hoy / 1000.0 * cfg.precio_kwh,
+            moneda: cfg.moneda.clone(),
+            cpu_medida: medida.is_some(),
+        });
+
+        // El historial del mes se guarda cada pocos minutos y no en cada
+        // muestra: un corte deja fuera como mucho ese rato de cuentas, y no se
+        // castiga al SSD por un archivo de dos kilobytes.
         sin_guardar += dt;
-        if sin_guardar >= Duration::from_secs(60) {
+        if sin_guardar >= Duration::from_secs(180) {
             guardar(&dia, &almacen);
             sin_guardar = Duration::ZERO;
         }

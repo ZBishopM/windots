@@ -722,6 +722,9 @@ struct Shared {
     /// a la velocidad de subida/bajada, que se miraba una vez al mes; quedarte
     /// sin auriculares a media partida se nota siempre.
     baterias: Vec<rice_common::battery::Bateria>,
+
+    /// Lo que el medidor de consumo dejo escrito en su ultimo muestreo.
+    consumo: Option<ConsumoAhora>,
     island: Option<IslandEvent>,
     island_serial: u64, // bumps on each new event so the UI notices
 }
@@ -1622,6 +1625,60 @@ fn battery_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
             }
         }
         std::thread::sleep(Duration::from_secs(5));
+    }
+}
+
+/// Lo que el crate `consumo` escribe cada minuto en
+/// ~/.config/consumo/ahora.json.
+///
+/// La barra LEE un archivo en vez de medir por su cuenta, y eso es
+/// deliberado: quien integra en el tiempo tiene que ser un proceso solo. Con
+/// dos barras midiendo cada una por su lado, el gasto del dia se contaria dos
+/// veces.
+#[derive(serde::Deserialize, Clone, Default)]
+struct ConsumoAhora {
+    w: f64,
+    #[serde(default)]
+    gpu_w: f64,
+    #[serde(default)]
+    cpu_w: f64,
+    #[serde(default)]
+    base_w: f64,
+    #[serde(default)]
+    monitores_w: f64,
+    kwh_hoy: f64,
+    coste_hoy: f64,
+    moneda: String,
+    cpu_medida: bool,
+}
+
+/// Relee ese archivo. Cada 30 s: el medidor lo escribe una vez por minuto, asi
+/// que mirarlo mas seguido solo gasta lecturas para ver lo mismo.
+fn consumo_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
+    let ruta = std::path::Path::new(&std::env::var("USERPROFILE").unwrap_or_default())
+        .join(".config")
+        .join("consumo")
+        .join("ahora.json");
+    loop {
+        let leido = std::fs::read_to_string(&ruta)
+            .ok()
+            .and_then(|t| serde_json::from_str::<ConsumoAhora>(&t).ok());
+        {
+            let mut s = shared.lock().unwrap();
+            let cambio = match (&s.consumo, &leido) {
+                (Some(a), Some(b)) => {
+                    (a.w - b.w).abs() > 0.5 || (a.coste_hoy - b.coste_hoy).abs() > 0.005
+                }
+                (None, None) => false,
+                _ => true,
+            };
+            if cambio {
+                s.consumo = leido;
+                drop(s);
+                ctx.request_repaint();
+            }
+        }
+        std::thread::sleep(Duration::from_secs(30));
     }
 }
 
@@ -3292,6 +3349,54 @@ impl eframe::App for BarApp {
                         ui.add_space(12.0);
                         ui.colored_label(dim, format!("RAM {:>2.0}%", s.mem));
                         ui.add_space(12.0);
+                        // Consumo electrico. Va aqui, pegado a las baterias,
+                        // porque las dos cosas responden a la misma pregunta:
+                        // cuanta energia se esta yendo.
+                        if let Some(c) = &s.consumo {
+                            let mut globo = format!(
+                                "{:.0} W ahora\nhoy: {:.2} kWh",
+                                c.w, c.kwh_hoy
+                            );
+                            if c.coste_hoy > 0.0 {
+                                globo.push_str(&format!(
+                                    "\ncoste de hoy: {}{:.2}",
+                                    c.moneda, c.coste_hoy
+                                ));
+                            } else {
+                                globo.push_str("\npon consumo.precio_kwh en rice.json para el coste");
+                            }
+                            globo.push_str(if c.cpu_medida {
+                                "\nCPU medida (LibreHardwareMonitor)"
+                            } else {
+                                "\nCPU ESTIMADA del uso -- abre LibreHardwareMonitor como admin para medirla"
+                            });
+                            // El desglose es lo que hace auditable el numero:
+                            // sin el, "226 W" solo se puede creer o no creer.
+                            globo.push_str(&format!(
+                                "\n\nde donde sale:\n  GPU {:.0} W (medida)\n  CPU {:.0} W\n  resto del equipo {:.0} W\n  monitores {:.0} W\n  + perdidas de la fuente y margen",
+                                c.gpu_w, c.cpu_w, c.base_w, c.monitores_w
+                            ));
+                            globo.push_str("\nes una estimacion AL ALZA, no la lectura del contador");
+
+                            // Coste primero para que quede a la derecha de los
+                            // vatios: la tira se compone de derecha a izquierda.
+                            if c.coste_hoy > 0.0 {
+                                ui.colored_label(WARM_SUB, format!("{}{:.2}", c.moneda, c.coste_hoy))
+                                    .on_hover_text(globo.clone());
+                                ui.add_space(4.0);
+                            }
+                            // Amarillo cuando la CPU va estimada: el numero vale
+                            // menos y se nota sin abrir el globo.
+                            let col_w = if c.cpu_medida {
+                                dim
+                            } else {
+                                egui::Color32::from_rgb(214, 176, 110)
+                            };
+                            ui.colored_label(col_w, format!("{:.0}W", c.w))
+                                .on_hover_text(globo);
+                            ui.add_space(12.0);
+                        }
+
                         // Un bloque por dispositivo conectado: auriculares
                         // rojos para el HyperX, blancos para los AirPods. Se
                         // distinguen de un vistazo sin leer nada.
@@ -3886,6 +3991,9 @@ fn main() -> eframe::Result<()> {
             let s4 = shared.clone();
             let ctx4 = cc.egui_ctx.clone();
             std::thread::spawn(move || battery_thread(s4, ctx4));
+            let s5 = shared.clone();
+            let ctx5 = cc.egui_ctx.clone();
+            std::thread::spawn(move || consumo_thread(s5, ctx5));
             let s4 = shared.clone();
             let ctx4 = cc.egui_ctx.clone();
             std::thread::spawn(move || island_watcher(s4, ctx4));

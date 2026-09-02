@@ -214,39 +214,67 @@ pub struct Consumo {
     ///
     /// Ningun sensor lo publica, asi que es una constante -- y no es un detalle
     /// menor: en reposo puede ser MAS de la mitad del consumo, porque la GPU
-    /// baja a ~30 W y la CPU a poco. Sin este termino el medidor se quedaria
-    /// corto justo en el estado donde el equipo pasa la mayor parte del dia.
-    /// El valor por defecto es el tipico de un sobremesa; calibralo contra un
-    /// enchufe medidor si quieres que cuadre con el recibo.
+    /// baja a ~30 W y la CPU a poco.
+    ///
+    /// El valor tira ALTO a proposito. Un medidor que se queda corto es peor
+    /// que uno que se pasa: si el recibo sale por debajo de lo estimado, la
+    /// sorpresa es buena. Al reves, no.
     #[serde(default = "d_base_w")]
     pub base_w: f64,
 
     /// Rendimiento de la fuente, 0..1. Lo que se factura entra por el enchufe,
-    /// no por los rieles: una fuente al 90% tira 111 W de la pared para dar 100.
+    /// no por los rieles: una fuente al 87% tira 115 W de la pared para dar 100.
+    /// Tambien tira bajo a proposito, por lo mismo.
     #[serde(default = "d_eficiencia_psu")]
     pub eficiencia_psu: f64,
 
     /// Vatios de los monitores. No salen en ningun sensor y tienen su propia
     /// fuente, asi que van aparte y no pasan por la eficiencia de la del PC.
-    /// En 0 el numero es "solo la torre".
-    #[serde(default)]
+    /// Por defecto cuenta dos; ponlo a 0 si quieres solo la torre.
+    #[serde(default = "d_monitores_w")]
     pub monitores_w: f64,
+
+    /// Multiplicador final de seguridad sobre lo que consume la torre.
+    ///
+    /// Existe porque hay consumo que no se mide NI se puede estimar: los picos
+    /// entre muestras, los discos al girar, lo que tiren los USB, el propio
+    /// error de los sensores. Redondear hacia arriba con un margen explicito es
+    /// mas honesto que fingir que la suma de lo medible es el total.
+    #[serde(default = "d_margen")]
+    pub margen: f64,
+
+    /// Vatios de la CPU en reposo, para cuando LibreHardwareMonitor no esta.
+    ///
+    /// Sin LHM no hay sensor de potencia de CPU, y dar cero seria mentir por
+    /// abajo justo en lo que mas sube al jugar. Con estos dos valores se estima
+    /// desde el uso de CPU: reposo + (maximo - reposo) x uso. Es una recta y la
+    /// curva real no lo es, pero se acerca mucho mas que un cero.
+    #[serde(default = "d_cpu_idle_w")]
+    pub cpu_idle_w: f64,
+
+    /// Vatios de la CPU a tope, para la misma estimacion.
+    #[serde(default = "d_cpu_max_w")]
+    pub cpu_max_w: f64,
 
     /// Cada cuantos segundos se muestrea.
     #[serde(default = "d_intervalo_s")]
     pub intervalo_s: u64,
 
-    /// JSON de LibreHardwareMonitor, de donde sale la potencia de CPU. Vacio
-    /// para no intentarlo. Ojo: LHM tiene que correr ELEVADO o ni el servidor
-    /// web arranca ni los sensores de potencia existen.
+    /// JSON de LibreHardwareMonitor, de donde sale la potencia de CPU medida.
+    /// Vacio para no intentarlo. Ojo: LHM tiene que correr ELEVADO o ni el
+    /// servidor web arranca ni los sensores de potencia existen.
     #[serde(default = "d_lhm_url")]
     pub lhm_url: String,
 }
 
 fn d_moneda() -> String { "S/".into() }
-fn d_base_w() -> f64 { 45.0 }
-fn d_eficiencia_psu() -> f64 { 0.90 }
-fn d_intervalo_s() -> u64 { 10 }
+fn d_base_w() -> f64 { 65.0 }
+fn d_eficiencia_psu() -> f64 { 0.87 }
+fn d_monitores_w() -> f64 { 60.0 }
+fn d_margen() -> f64 { 1.10 }
+fn d_cpu_idle_w() -> f64 { 25.0 }
+fn d_cpu_max_w() -> f64 { 120.0 }
+fn d_intervalo_s() -> u64 { 60 }
 fn d_lhm_url() -> String { "http://localhost:8085/data.json".into() }
 
 fn default_consumo() -> Consumo {
@@ -255,7 +283,10 @@ fn default_consumo() -> Consumo {
         moneda: d_moneda(),
         base_w: d_base_w(),
         eficiencia_psu: d_eficiencia_psu(),
-        monitores_w: 0.0,
+        monitores_w: d_monitores_w(),
+        margen: d_margen(),
+        cpu_idle_w: d_cpu_idle_w(),
+        cpu_max_w: d_cpu_max_w(),
         intervalo_s: d_intervalo_s(),
         lhm_url: d_lhm_url(),
     }
