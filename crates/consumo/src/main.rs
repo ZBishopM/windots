@@ -262,6 +262,89 @@ fn uso_cpu(antes: MuestraCpu, ahora: MuestraCpu) -> f64 {
     (1.0 - di / dt).clamp(0.0, 1.0)
 }
 
+// Milisegundos desde que arranco Windows. Es lo que permite distinguir "el
+// medidor estuvo parado cinco minutos con el PC encendido" de "el PC estuvo
+// apagado cinco minutos": en el primer caso ese consumo existio y hay que
+// contarlo, en el segundo no.
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetTickCount64() -> u64;
+}
+
+fn encendido_hace() -> Duration {
+    Duration::from_millis(unsafe { GetTickCount64() })
+}
+
+fn ahora_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Lo justo para poder reanudar tras un reinicio del medidor.
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct Continuidad {
+    /// Reloj de pared de la ultima muestra.
+    unix: u64,
+    /// Y a que potencia se estaba entonces.
+    w: f64,
+}
+
+fn ruta_continuidad() -> PathBuf {
+    let mut p = PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default());
+    p.push(".config");
+    p.push("consumo");
+    let _ = std::fs::create_dir_all(&p);
+    p.push("continuidad.json");
+    p
+}
+
+/// Cuanta energia hubo entre la ultima muestra y ahora, si es que la hubo.
+///
+/// Sin esto, cada reinicio del medidor -- un despliegue, un cuelgue, el
+/// arranque del PC antes de que el supervisor lo levante -- abria un agujero
+/// que no se contaba nunca. El dia marcaba menos horas medidas que horas
+/// encendido, y el kWh salia corto sin que nada lo dijera.
+///
+/// Solo se acredita si el PC estuvo ENCENDIDO todo ese rato, que es lo que
+/// dice `GetTickCount64`: si el hueco es mayor que el tiempo que lleva
+/// arrancado, en medio hubo un apagado y ese consumo no existio.
+fn recuperar_hueco(cfg: &rice_common::settings::Consumo) -> Option<(f64, f64)> {
+    let previa: Continuidad = std::fs::read_to_string(ruta_continuidad())
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())?;
+    if previa.unix == 0 || previa.w <= 0.0 {
+        return None;
+    }
+    let hueco = ahora_unix().saturating_sub(previa.unix) as f64;
+    if hueco <= 1.0 {
+        return None;
+    }
+    // El PC tiene que haber estado encendido TODO el hueco.
+    if hueco > encendido_hace().as_secs_f64() {
+        return None;
+    }
+    // Y un tope, por si el archivo se quedo de otra sesion: media hora de
+    // hueco ya es un fallo largo, y acreditar mas seria inventar.
+    let hueco = hueco.min(1800.0);
+    // A la potencia que habia, que es la mejor suposicion disponible: en un
+    // hueco de minutos la maquina no suele cambiar de estado.
+    let _ = cfg;
+    Some((previa.w * hueco / 3600.0, hueco))
+}
+
+fn guardar_continuidad(w: f64) {
+    let c = Continuidad { unix: ahora_unix(), w };
+    if let Ok(t) = serde_json::to_string(&c) {
+        let p = ruta_continuidad();
+        let tmp = p.with_extension("json.tmp");
+        if std::fs::write(&tmp, t).is_ok() {
+            let _ = std::fs::rename(&tmp, &p);
+        }
+    }
+}
+
 // -------------------------------------------------------------- informe ---
 
 fn moneda(cfg: &rice_common::settings::Consumo, wh: f64) -> String {
@@ -332,6 +415,12 @@ struct Ahora {
     base_w: f64,
     monitores_w: f64,
     kwh_hoy: f64,
+    /// Horas que lleva encendido el PC. Lo que el dueño quiere ver al lado del
+    /// kWh: "llevo N horas y he gastado esto".
+    horas_encendido: f64,
+    /// Y de esas, cuantas ha visto el medidor. Si las dos no cuadran es que se
+    /// perdio un trozo, y mas vale decirlo que dar un total corto en silencio.
+    horas_medidas: f64,
     coste_hoy: f64,
     moneda: String,
     /// Si la potencia de CPU vino medida de LHM o estimada del uso. La barra lo
@@ -369,6 +458,14 @@ fn medir() {
     let mut ultimo = Instant::now();
     let mut sin_guardar = Duration::ZERO;
     let mut cpu_previa = muestra_cpu().unwrap_or_default();
+
+    // Antes de nada, cerrar el agujero que dejo la parada anterior.
+    if let Some((wh, seg)) = recuperar_hueco(&cfg) {
+        let e = almacen.entry(dia.clone()).or_default();
+        e.wh += wh;
+        e.segundos += seg;
+        guardar(&dia, &almacen);
+    }
 
     loop {
         std::thread::sleep(intervalo);
@@ -416,9 +513,14 @@ fn medir() {
         e.w_max = e.w_max.max(pared);
         e.muestras += 1;
         let wh_hoy = e.wh;
+        let e_segundos = e.segundos;
+
+        guardar_continuidad(pared);
 
         escribir_ahora(&Ahora {
             w: pared,
+            horas_encendido: encendido_hace().as_secs_f64() / 3600.0,
+            horas_medidas: e_segundos / 3600.0,
             gpu_w: gpu,
             cpu_w: cpu,
             base_w: cfg.base_w,

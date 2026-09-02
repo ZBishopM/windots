@@ -1646,6 +1646,10 @@ struct ConsumoAhora {
     base_w: f64,
     #[serde(default)]
     monitores_w: f64,
+    #[serde(default)]
+    horas_encendido: f64,
+    #[serde(default)]
+    horas_medidas: f64,
     kwh_hoy: f64,
     coste_hoy: f64,
     moneda: String,
@@ -3376,15 +3380,40 @@ impl eframe::App for BarApp {
                                 "\n\nde donde sale:\n  GPU {:.0} W (medida)\n  CPU {:.0} W\n  resto del equipo {:.0} W\n  monitores {:.0} W\n  + perdidas de la fuente y margen",
                                 c.gpu_w, c.cpu_w, c.base_w, c.monitores_w
                             ));
+                            // Cobertura: si el medidor no vio todas las horas
+                            // encendidas, el kWh se queda corto y hay que
+                            // decirlo en vez de dar un total con pinta de
+                            // completo.
+                            if c.horas_encendido > 0.05 {
+                                let cobertura = (c.horas_medidas / c.horas_encendido * 100.0).min(100.0);
+                                if cobertura < 95.0 {
+                                    globo.push_str(&format!(
+                                        "\n\nOJO: medido {:.1} h de {:.1} h encendido ({:.0}%).\nLo que falta no esta contado en el kWh.",
+                                        c.horas_medidas, c.horas_encendido, cobertura
+                                    ));
+                                }
+                            }
                             globo.push_str("\nes una estimacion AL ALZA, no la lectura del contador");
 
-                            // Coste primero para que quede a la derecha de los
-                            // vatios: la tira se compone de derecha a izquierda.
+                            // Se emite en orden inverso al que se lee, porque la
+                            // tira se compone de derecha a izquierda. Queda:
+                            //   232W  0,24 kWh  S/0,17  5,2 h
+                            //
+                            // Las horas van al lado del kWh a proposito: un
+                            // consumo sin el tiempo que lo produjo no dice nada.
+                            // Y son horas ENCENDIDO, no horas medidas -- que el
+                            // medidor se perdiera un trozo es problema suyo, no
+                            // algo que deba cambiar lo que el dueño lee.
+                            ui.colored_label(WARM_SUB, format!("{:.1}h", c.horas_encendido));
+                            ui.add_space(6.0);
                             if c.coste_hoy > 0.0 {
                                 ui.colored_label(WARM_SUB, format!("{}{:.2}", c.moneda, c.coste_hoy))
                                     .on_hover_text(globo.clone());
-                                ui.add_space(4.0);
+                                ui.add_space(6.0);
                             }
+                            ui.colored_label(WARM_SUB, format!("{:.2}kWh", c.kwh_hoy))
+                                .on_hover_text(globo.clone());
+                            ui.add_space(6.0);
                             // Amarillo cuando la CPU va estimada: el numero vale
                             // menos y se nota sin abrir el globo.
                             let col_w = if c.cpu_medida {
