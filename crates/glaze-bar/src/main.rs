@@ -3401,14 +3401,15 @@ impl eframe::App for BarApp {
                             // encendidas, el kWh se queda corto y hay que
                             // decirlo en vez de dar un total con pinta de
                             // completo.
-                            if c.horas_encendido > 0.05 {
-                                let cobertura = (c.horas_medidas / c.horas_encendido * 100.0).min(100.0);
-                                if cobertura < 95.0 {
-                                    globo.push_str(&format!(
-                                        "\n\nOJO: medido {:.1} h de {:.1} h encendido ({:.0}%).\nLo que falta no esta contado en el kWh.",
-                                        c.horas_medidas, c.horas_encendido, cobertura
-                                    ));
-                                }
+                            // Solo hay hueco cuando esta sesion lleva encendida
+                            // MAS de lo contabilizado. Al reves no es un fallo:
+                            // tras un reinicio el dia acumula mas horas que el
+                            // arranque actual, y eso es lo correcto.
+                            if c.horas_encendido > c.horas_medidas + 0.1 {
+                                globo.push_str(&format!(
+                                    "\n\nOJO: esta sesion lleva {:.1} h encendida y solo hay {:.1} h contabilizadas.\nEl hueco no esta en el kWh.",
+                                    c.horas_encendido, c.horas_medidas
+                                ));
                             }
                             globo.push_str("\nes una estimacion AL ALZA, no la lectura del contador");
 
@@ -3418,10 +3419,17 @@ impl eframe::App for BarApp {
                             //
                             // Las horas van al lado del kWh a proposito: un
                             // consumo sin el tiempo que lo produjo no dice nada.
-                            // Y son horas ENCENDIDO, no horas medidas -- que el
-                            // medidor se perdiera un trozo es problema suyo, no
-                            // algo que deba cambiar lo que el dueño lee.
-                            ui.colored_label(WARM_SUB, format!("{:.1}h", c.horas_encendido));
+                            //
+                            // Y son las horas CONTABILIZADAS hoy, no el uptime.
+                            // Emparejar el kWh del dia con el tiempo desde el
+                            // ultimo arranque daba lecturas absurdas en cuanto
+                            // se reiniciaba la maquina: visto en vivo, "0,16 kWh
+                            // en 0,04 h" -- que son 4,8 kW. El kWh es del dia
+                            // natural, asi que el tiempo que lo acompaña tiene
+                            // que ser del dia natural tambien. En un dia sin
+                            // reinicios las dos cifras coinciden, que es el caso
+                            // normal y el que se pidio ver.
+                            ui.colored_label(WARM_SUB, format!("{:.1}h", c.horas_medidas));
                             ui.add_space(6.0);
                             if c.coste_hoy > 0.0 {
                                 ui.colored_label(WARM_SUB, format!("{}{:.2}", c.moneda, c.coste_hoy))
