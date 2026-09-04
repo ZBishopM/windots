@@ -95,17 +95,16 @@ $n = (Get-Process wezterm-gui -EA SilentlyContinue | Measure-Object).Count
 Focus 2
 Start-Process $wez -ArgumentList 'start', '--', 'nu', '-e', 'claude'
 WaitWezterm $n
-# Segundo Claude, este en D:\2026-projects y arrancando ya con el prompt.
+# Segundo Claude, este en D:\2026-projects, retomando la conversacion de los
+# proyectos en vez de empezar una nueva.
 #
-# El prompt va como ARGUMENTO de claude, no simulando tecleo. Escribir en la
-# ventana desde fuera exigiria inyectar pulsaciones, y eso en este equipo
-# desincroniza AltSnap y deja la barra espaciadora muerta -- ese camino esta
-# cerrado a proposito en toda la rice. `claude [prompt]` abre la sesion
-# interactiva con esa peticion ya enviada, que es justo lo que se quiere.
-#
-# Las comillas simples de dentro son de nushell: `-e` recibe UNA cadena y la
-# ejecuta, asi que "resume projects" tiene que llegar a claude como un solo
-# argumento y no como dos.
+# El comando vive en config.nu (`claude-proyectos`) y no aqui por dos razones.
+# Una: `nu -e` con un argumento que lleva ESPACIOS no ejecuta nada cuando lo
+# lanza Start-Process -- el argumento llega intacto, se ve en la linea de
+# comandos del proceso, y el -e se queda sin correr; sin espacios funciona
+# siempre, que es la forma que `nu -e claude` lleva usando cada arranque.
+# Dos: el termino de busqueda de la conversacion se cambia antes en la config
+# de la shell que dentro de un array de PowerShell.
 $n = (Get-Process wezterm-gui -EA SilentlyContinue | Measure-Object).Count
 Focus 3
 Start-Process $wez -ArgumentList 'start', '--cwd', 'D:\2026-projects', '--', 'nu', '-e', 'claude-proyectos'

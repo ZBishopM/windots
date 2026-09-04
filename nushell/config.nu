@@ -314,8 +314,13 @@ alias gl = git log --oneline -20
 alias .. = cd ..
 alias ... = cd ../..
 
-# Claude ya arrancado con la peticion de repasar los proyectos. Lo usa
-# rice-autostart.ps1 para la ventana de D:/2026-projects.
+# Retoma la conversacion de los proyectos. Lo usa rice-autostart.ps1 para la
+# ventana de D:/2026-projects.
+#
+# `--resume <termino>` abre el selector de conversaciones filtrando por ese
+# texto. NO es lo mismo que pasar un prompt: `claude "resume projects"` abre una
+# sesion NUEVA y le manda esa frase, que es lo que hacia la primera version de
+# esto y no era lo que se queria.
 #
 # Existe como COMANDO y no como argumento suelto en el autostart por una razon
 # medida: `wezterm start -- nu -e "claude 'resume projects'"` lanzado con
@@ -324,4 +329,4 @@ alias ... = cd ../..
 # a mano desde una shell, el mismo comando si funciona. Sin espacios en ese
 # argumento no pasa, que es la forma que el autostart ya usaba con `nu -e claude`
 # y que lleva funcionando cada arranque.
-def claude-proyectos [] { claude "resume projects" }
+def claude-proyectos [] { claude --resume "projects" }
