@@ -95,6 +95,22 @@ $n = (Get-Process wezterm-gui -EA SilentlyContinue | Measure-Object).Count
 Focus 2
 Start-Process $wez -ArgumentList 'start', '--', 'nu', '-e', 'claude'
 WaitWezterm $n
+# Segundo Claude, este en D:\2026-projects y arrancando ya con el prompt.
+#
+# El prompt va como ARGUMENTO de claude, no simulando tecleo. Escribir en la
+# ventana desde fuera exigiria inyectar pulsaciones, y eso en este equipo
+# desincroniza AltSnap y deja la barra espaciadora muerta -- ese camino esta
+# cerrado a proposito en toda la rice. `claude [prompt]` abre la sesion
+# interactiva con esa peticion ya enviada, que es justo lo que se quiere.
+#
+# Las comillas simples de dentro son de nushell: `-e` recibe UNA cadena y la
+# ejecuta, asi que "resume projects" tiene que llegar a claude como un solo
+# argumento y no como dos.
+$n = (Get-Process wezterm-gui -EA SilentlyContinue | Measure-Object).Count
+Focus 3
+Start-Process $wez -ArgumentList 'start', '--cwd', 'D:\2026-projects', '--', 'nu', '-e', 'claude-proyectos'
+WaitWezterm $n
+
 $n = (Get-Process wezterm-gui -EA SilentlyContinue | Measure-Object).Count
 Focus 5
 Start-Process $wez -ArgumentList 'start', '--', 'pwsh', '-NoExit', '-Command', 'btop'

@@ -313,3 +313,15 @@ alias gd = git diff
 alias gl = git log --oneline -20
 alias .. = cd ..
 alias ... = cd ../..
+
+# Claude ya arrancado con la peticion de repasar los proyectos. Lo usa
+# rice-autostart.ps1 para la ventana de D:/2026-projects.
+#
+# Existe como COMANDO y no como argumento suelto en el autostart por una razon
+# medida: `wezterm start -- nu -e "claude 'resume projects'"` lanzado con
+# Start-Process no ejecuta nada. El argumento llega a nu entero -- se ve en la
+# linea de comandos del proceso -- y aun asi el -e se queda sin correr; lanzado
+# a mano desde una shell, el mismo comando si funciona. Sin espacios en ese
+# argumento no pasa, que es la forma que el autostart ya usaba con `nu -e claude`
+# y que lleva funcionando cada arranque.
+def claude-proyectos [] { claude "resume projects" }
