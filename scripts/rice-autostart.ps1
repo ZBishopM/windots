@@ -93,7 +93,7 @@ function WaitWezterm($antes, $sec = 6) {
 
 $n = (Get-Process wezterm-gui -EA SilentlyContinue | Measure-Object).Count
 Focus 2
-Start-Process $wez -ArgumentList 'start', '--', 'nu', '-e', 'claude'
+Start-Process $wez -ArgumentList 'start', '--', 'nu', '-e', 'claude-winrice'
 WaitWezterm $n
 # Segundo Claude, este en D:\2026-projects, retomando la conversacion de los
 # proyectos en vez de empezar una nueva.

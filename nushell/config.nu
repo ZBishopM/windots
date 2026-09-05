@@ -330,3 +330,9 @@ alias ... = cd ../..
 # argumento no pasa, que es la forma que el autostart ya usaba con `nu -e claude`
 # y que lleva funcionando cada arranque.
 def claude-proyectos [] { claude --resume "projects" }
+
+# Retoma la conversacion del rice. Lo usa rice-autostart.ps1 para la ventana del
+# home. Mismo motivo que claude-proyectos para vivir aqui y no en el autostart:
+# `nu -e` con un argumento que lleva espacios no ejecuta nada cuando lo lanza
+# Start-Process.
+def claude-winrice [] { claude --resume "winrice" }
