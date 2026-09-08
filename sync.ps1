@@ -50,6 +50,11 @@ foreach ($f in 'glazewm-dwindle.ps1', 'glazewm-animcheck.ps1', 'wezterm-hotkey.a
                'rice-audio-restaurar.ps1', 'rice-audio-restaurar-tarea.ps1') {
     $Map["scripts\$f"] = "$home_\.config\$f"
 }
+# Las manos del modelo local. No es .ps1, asi que no lo pilla el barrido de
+# huerfanos de mas abajo: si no estuviera aqui, quedaria en el repo pareciendo
+# versionado mientras la copia viva se mueve por su cuenta.
+$Map['scripts\rice-manos.mjs'] = "$home_\.config\rice-manos.mjs"
+
 foreach ($f in Get-ChildItem "$home_\.config\lib\*.ps1" -EA SilentlyContinue) {
     $Map["scripts\lib\$($f.Name)"] = $f.FullName
 }

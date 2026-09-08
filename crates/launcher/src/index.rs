@@ -139,8 +139,20 @@ fn packaged() -> Vec<Entry> {
 /// ONLY as a packaged app then cannot be found here at all. On this machine that
 /// includes Claude and Windows Terminal.
 pub fn build() -> Vec<Entry> {
+    build_opts(false)
+}
+
+/// Igual que [`build`], pero pudiendo forzar las apps empaquetadas.
+///
+/// `forzar_store` existe para `--abrir` / `--buscar`. El motivo de dejarlas
+/// fuera es la COLA de basura que meten en la caja -- paginas de configuracion,
+/// enlaces "Visita <fabricante>" -- y eso es un problema de una lista que se
+/// lee de un vistazo. Por la linea de comandos no hay lista que leer: se pide
+/// un nombre y se devuelve el mejor. Alli el coste desaparece y la perdida no:
+/// sin ellas, la Calculadora, la Terminal y Claude son inalcanzables.
+pub fn build_opts(forzar_store: bool) -> Vec<Entry> {
     let mut all = shortcuts();
-    if rice_common::settings::Settings::live().launcher.index_store_apps {
+    if forzar_store || rice_common::settings::Settings::live().launcher.index_store_apps {
         all.extend(packaged());
     }
     // A packaged app often ALSO has a Start Menu shortcut; showing both is just

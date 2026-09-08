@@ -467,37 +467,9 @@ impl App {
             self.hits = (0..self.entries.len().min(MAX_ROWS)).map(|i| (i, 0)).collect();
             return;
         }
-        let pat = Pattern::parse(&self.query, CaseMatching::Ignore, Normalization::Smart);
-        let mut scored: Vec<(usize, u32)> = Vec::new();
-        for (i, e) in self.entries.iter().enumerate() {
-            // Curated commands edge out applications on an equal match. There
-            // are two dozen of them and every one was written on purpose, while
-            // the Start Menu is full of near-misses that happen to share a word:
-            // typing "desinstalar" matched six vendor "Desinstalar <producto>"
-            // stubs before it reached our own uninstaller. Deliberately smaller
-            // than the name-hit bonus below, so an application matched by NAME
-            // still beats a command matched only by keyword.
-            let curated = if matches!(e.action, Action::Command { .. }) { 40 } else { 0 };
-            let mut buf = Vec::new();
-            let hay = nucleo_matcher::Utf32Str::new(&e.name, &mut buf);
-            if let Some(s) = pat.score(hay, &mut self.matcher) {
-                // A hit on the name always outranks one on the folder, or
-                // typing "mozilla" would rank a stray helper above Firefox.
-                scored.push((i, s + 100 + curated));
-                continue;
-            }
-            if e.keywords.is_empty() {
-                continue;
-            }
-            let mut b2 = Vec::new();
-            let hay = nucleo_matcher::Utf32Str::new(&e.keywords, &mut b2);
-            if let Some(s) = pat.score(hay, &mut self.matcher) {
-                scored.push((i, s + curated));
-            }
-        }
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut scored = rank_entries(&self.entries, &self.query, &mut self.matcher);
         scored.truncate(MAX_ROWS);
-        self.hits = scored;
+        self.hits = scored.into_iter().map(|(i, s, _)| (i, s)).collect();
     }
 
     /// Everything that has to happen when the typed text changes.
@@ -630,6 +602,75 @@ impl App {
 /// A thread per launch rather than a worker queue: `ShellExecuteW` goes through
 /// arbitrary shell extensions, and one that decides to block would put every
 /// later launch behind it. Spawning costs microseconds next to half a second.
+/// Ordena el indice contra una consulta, de mejor a peor.
+///
+/// Vive fuera de `refilter` porque `--abrir` puntua exactamente igual: con dos
+/// copias, tocar el criterio en un sitio dejaria a las manos del modelo abriendo
+/// algo distinto de lo que abre la caja con las mismas letras.
+/// Devuelve `(indice, puntuacion, puntuacion_cruda)`. La cruda es la del
+/// emparejador sin las bonificaciones, y es la unica comparable entre consultas:
+/// la usa `--abrir` para decidir si un resultado es de verdad o es ruido.
+fn rank_entries(entries: &[Entry], query: &str, matcher: &mut Matcher) -> Vec<(usize, u32, u32)> {
+    let pat = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+    let mut scored: Vec<(usize, u32, u32)> = Vec::new();
+    for (i, e) in entries.iter().enumerate() {
+        // Curated commands edge out applications on an equal match. There
+        // are two dozen of them and every one was written on purpose, while
+        // the Start Menu is full of near-misses that happen to share a word:
+        // typing "desinstalar" matched six vendor "Desinstalar <producto>"
+        // stubs before it reached our own uninstaller. Deliberately smaller
+        // than the name-hit bonus below, so an application matched by NAME
+        // still beats a command matched only by keyword.
+        let curated = if matches!(e.action, Action::Command { .. }) { 40 } else { 0 };
+        let mut buf = Vec::new();
+        let hay = nucleo_matcher::Utf32Str::new(&e.name, &mut buf);
+        if let Some(s) = pat.score(hay, matcher) {
+            // A hit on the name always outranks one on the folder, or
+            // typing "mozilla" would rank a stray helper above Firefox.
+            scored.push((i, s + 100 + curated, s));
+            continue;
+        }
+        if e.keywords.is_empty() {
+            continue;
+        }
+        let mut b2 = Vec::new();
+        let hay = nucleo_matcher::Utf32Str::new(&e.keywords, &mut b2);
+        if let Some(s) = pat.score(hay, matcher) {
+            scored.push((i, s + curated, s));
+        }
+    }
+    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored
+}
+
+/// Puntuacion cruda MINIMA por caracter de la consulta para que `--abrir` se
+/// fie de un resultado.
+///
+/// El emparejador siempre devuelve algo si las letras aparecen en orden, y por
+/// la linea de comandos eso abria lo que fuera: el modelo se invento "CapCut",
+/// que aqui no esta instalado, y la mejor coincidencia fue "Official OpenSSL
+/// Documentation" -- que se abrio. En la caja ese comportamiento es correcto,
+/// porque hay una persona mirando la lista; sin lista, no.
+///
+/// Medido en esta maquina, puntuacion cruda dividida por caracteres:
+///   buenas   steam 36,0 · vlc 29,3 · zed 29,3 · league 27,7 · firefox 27,4
+///            resolve 27,4 · calculadora 26,9
+///   basura   CapCut 12,8
+/// El corte va en 20: deja seis puntos de margen por debajo de la peor buena y
+/// siete por encima de la basura.
+const MIN_POR_CARACTER: u32 = 20;
+
+/// Lo que hay que pasarle al shell para lanzar una entrada.
+fn entry_target(e: &Entry) -> (String, String, String) {
+    match &e.action {
+        Action::Shortcut { target, args, dir } => {
+            (target.to_string_lossy().into_owned(), args.clone(), dir.clone())
+        }
+        Action::Aumid(id) => (format!("shell:AppsFolder\\{id}"), String::new(), String::new()),
+        Action::Command { target, args } => (target.clone(), args.clone(), String::new()),
+    }
+}
+
 fn launch_async(target: String, args: String, dir: String, elevated: bool) {
     std::thread::Builder::new()
         .name("shell-exec".into())
@@ -1109,6 +1150,56 @@ fn main() -> eframe::Result<()> {
         }
         return Ok(());
     }
+    // `--buscar <texto>` lista lo que encontraria la caja; `--abrir <texto>`
+    // lanza lo primero. Es la via por la que el modelo local abre cosas: reusa
+    // este indice en vez de llevar su propia lista de aplicaciones, que habria
+    // que mantener en sincronia y envejeceria en cuanto se instalara algo.
+    if let Some(i) = args.iter().position(|a| a == "--abrir" || a == "--buscar") {
+        let listar = args[i] == "--buscar";
+        let q = args[i + 1..].join(" ");
+        if q.trim().is_empty() {
+            eprintln!("uso: launcher {} <texto>", args[i]);
+            std::process::exit(2);
+        }
+        // Con las apps de la Store aunque esten apagadas para la caja: ver
+        // `index::build_opts`.
+        let entries = index::build_opts(true);
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let scored = rank_entries(&entries, &q, &mut matcher);
+        let umbral = MIN_POR_CARACTER * q.trim().chars().count().max(1) as u32;
+        let Some(&(mejor, _, crudo)) = scored.first() else {
+            eprintln!("sin coincidencias: {q}");
+            std::process::exit(1);
+        };
+        if listar {
+            // Listar SI ensena las flojas: quien pregunta es el modelo, que
+            // luego elige un nombre exacto de estas. Lo que no puede es abrir
+            // una sin haberla visto aqui.
+            for &(n, s, _) in scored.iter().take(8) {
+                println!("{s}	{}", entries[n].name);
+            }
+            return Ok(());
+        }
+        if crudo < umbral {
+            eprintln!("sin coincidencias fiables: {q}");
+            std::process::exit(1);
+        }
+        let (target, targs, dir) = entry_target(&entries[mejor]);
+        // Sincrono, no `launch_async`: este proceso muere al volver de main, y
+        // un hilo recien creado no tiene por que haber llegado a ShellExecuteW.
+        #[cfg(windows)]
+        unsafe {
+            use windows::Win32::System::Com::{
+                CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
+            };
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            open_via_shell(&target, &targs, &dir, false);
+            CoUninitialize();
+        }
+        println!("{}", entries[mejor].name);
+        return Ok(());
+    }
+
     #[cfg(windows)]
     if args.iter().any(|a| a == "--show") {
         // Signal the resident instance and exit. If there is none, fall through
