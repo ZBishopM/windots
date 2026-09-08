@@ -61,6 +61,9 @@ $parallel = @(
     @{ Path = 'shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude'; Proceso = 'Claude' }
     @{ Path = "$env:LOCALAPPDATA\Programs\Zed\Zed.exe";       Proceso = 'Zed' }
     @{ Path = 'C:\Program Files\Firefox Developer Edition\firefox.exe'; Proceso = 'firefox' }
+    # Update.exe y no app-<version>\Discord.exe: la ruta con version cambia en
+    # cada actualizacion y el lanzador es quien sabe cual es la buena.
+    @{ Path = "$env:LOCALAPPDATA\Discord\Update.exe"; Args = @('--processStart', 'Discord.exe'); Proceso = 'Discord' }
 )
 foreach ($a in $parallel) {
     if ($a.Proceso) {
@@ -78,11 +81,11 @@ foreach ($a in $parallel) {
 
 # Esperar a que la ventana APAREZCA, no dos segundos por si acaso.
 #
-# Los dos son wezterm-gui, asi que una regla por nombre de proceso no distingue
-# la del `claude` de la del `btop`, y al lanzarlas su titulo aun no esta puesto:
-# por eso siguen en orden. Pero el orden solo exige esperar a que la primera
-# exista, y eso se puede comprobar en vez de suponerlo. Eran dos `Start-Sleep
-# -Seconds 2` fijos esperando a nada.
+# Las dos son wezterm-gui, asi que una regla por nombre de proceso no distingue
+# una de otra, y al lanzarlas su titulo aun no esta puesto: por eso siguen en
+# orden. Pero el orden solo exige esperar a que la primera exista, y eso se
+# puede comprobar en vez de suponerlo. Eran dos `Start-Sleep -Seconds 2` fijos
+# esperando a nada.
 function WaitWezterm($antes, $sec = 6) {
     $fin = (Get-Date).AddSeconds($sec)
     while ((Get-Date) -lt $fin) {
@@ -108,11 +111,6 @@ WaitWezterm $n
 $n = (Get-Process wezterm-gui -EA SilentlyContinue | Measure-Object).Count
 Focus 3
 Start-Process $wez -ArgumentList 'start', '--cwd', 'D:\2026-projects', '--', 'nu', '-e', 'claude-proyectos'
-WaitWezterm $n
-
-$n = (Get-Process wezterm-gui -EA SilentlyContinue | Measure-Object).Count
-Focus 5
-Start-Process $wez -ArgumentList 'start', '--', 'pwsh', '-NoExit', '-Command', 'btop'
 WaitWezterm $n
 
 # -SettleMs 0: es el ultimo enfoque del script y detras no viene nada que pueda

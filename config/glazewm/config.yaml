@@ -176,6 +176,7 @@ window_rules:
   - commands: ['move --workspace 6']
     match:
       - window_process: { equals: 'chrome' }
+      - window_process: { equals: 'Discord' }
 
   - commands: ['ignore']
     match:
