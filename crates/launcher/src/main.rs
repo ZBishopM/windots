@@ -19,6 +19,7 @@ mod commands;
 mod files;
 mod icons;
 mod index;
+mod tuberia;
 
 use eframe::egui;
 use index::{Action, Entry};
@@ -412,6 +413,12 @@ impl App {
             let ctx = ctx.clone();
             files::FileIndex::new(std::sync::Arc::new(move || ctx.request_repaint()))
         });
+        // La puerta al indice para quien pregunte desde fuera. Cuelga del mismo
+        // indice que la caja, no de uno propio: construir un segundo seria
+        // recorrer las unidades otra vez para tener lo mismo dos veces.
+        if let Some(f) = &files {
+            tuberia::servir(f.clone());
+        }
         let icons = {
             let ctx = ctx.clone();
             icons::Icons::new(std::sync::Arc::new(move || ctx.request_repaint()))

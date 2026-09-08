@@ -281,6 +281,16 @@ fn ident(dir: u32, name: &str) -> u64 {
     h ^ ((dir as u64) << 32)
 }
 
+/// Clonable a proposito: el hilo de la tuberia necesita un asa al MISMO indice,
+/// no uno nuevo. Todos los campos son Arc o Sender, asi que clonar comparte el
+/// recorrido, la arena y el canal de busqueda -- que es justo lo que se quiere.
+///
+/// ponytail: la generacion y el buzon de resultados son UNO. Si la caja esta
+/// abierta mientras la tuberia busca, la ultima consulta gana y la otra ve sus
+/// resultados como "sin asentar" hasta la siguiente tecla. En la practica no
+/// coinciden -- quien teclea en la caja no esta hablandole al modelo -- y
+/// separarlo pide un segundo buzon por consultante.
+#[derive(Clone)]
 pub struct FileIndex {
     scanning: Arc<AtomicBool>,
     count: Arc<AtomicUsize>,
