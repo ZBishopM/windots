@@ -22,6 +22,12 @@
   "launcher": {
     "index_store_apps": false,
     "index_files": true,
+    "file_roots": [
+      "C:\\",
+      "D:\\",
+      "F:\\",
+      "H:\\"
+    ],
     "file_skip": [
       ":\\windows",
       ":\\program files",
