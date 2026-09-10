@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"] // no console window
 
+mod pulso;
 mod tray;
 
 use eframe::egui;
@@ -725,6 +726,11 @@ struct Shared {
 
     /// Lo que el medidor de consumo dejo escrito en su ultimo muestreo.
     consumo: Option<ConsumoAhora>,
+
+    /// Las barras de habitos, ya calculadas por el servidor. Vacio mientras
+    /// Pulso no este configurado en rice-secrets.json, que es lo normal hasta
+    /// que el servidor este arriba: la barra simplemente no ensena nada.
+    habitos: Vec<pulso::Habito>,
     island: Option<IslandEvent>,
     island_serial: u64, // bumps on each new event so the UI notices
 }
@@ -1235,7 +1241,7 @@ fn short_output_name(raw: &str, want: &str) -> String {
     if inside.is_empty() { outside.to_string() } else { inside.to_string() }
 }
 
-const ACTIONS: [(&str, &str, [u8; 3]); 9] = [
+const ACTIONS: [(&str, &str, [u8; 3]); 10] = [
     ("mic", "\u{f130}", [224, 163, 92]),      // switch mic
     ("save", "\u{f03d}", [169, 181, 106]),    // save a replay clip
     ("term", "\u{f120}", [206, 150, 112]),    // open a terminal
@@ -1245,7 +1251,13 @@ const ACTIONS: [(&str, &str, [u8; 3]); 9] = [
     ("timer", "\u{f017}", [205, 150, 170]),   // fa-clock-o -> pomodoro
     ("devices", "\u{f025}", [150, 200, 190]), // fa-headphones -> outputs + bluetooth
     ("notifs", "\u{f0f3}", [190, 170, 210]),  // fa-bell -> centro de notificaciones
+    ("habitos", "\u{f0ae}", [170, 200, 160]), // fa-tasks -> barras de habitos
 ];
+
+/// Por debajo de esto, el habito mas urgente sale a la tira. Un tercio de la
+/// barra a 24 h son las ultimas ocho horas: tiempo de sobra para hacerlo sin
+/// que el aviso viva ahi todo el dia.
+const UMBRAL_HABITO: f32 = 0.34;
 
 /// Cuantas notificaciones se ven de entrada; "ver mas" suma otra tanda.
 const NOTIFS_PAGE: usize = 4;
@@ -1658,6 +1670,96 @@ struct ConsumoAhora {
 
 /// Relee ese archivo. Cada 30 s: el medidor lo escribe una vez por minuto, asi
 /// que mirarlo mas seguido solo gasta lecturas para ver lo mismo.
+/// Sondea las barras de habitos. Calcado de `consumo_thread`: compara antes de
+/// tocar el estado y solo entonces pide repintado, porque un repaint por minuto
+/// que no cambia nada es un minuto de GPU tirado.
+///
+/// Cada 60 s y no mas seguido: una barra que baja 1/1440 por minuto no necesita
+/// mas resolucion, y cada sondeo es una peticion a un servidor en Hetzner.
+fn habitos_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
+    // Avisos ya programados: habito -> instante en que toca. Se llena en cada
+    // sondeo (el servidor solo manda avisos FUTUROS) y se vacia al dispararlo.
+    //
+    // Guardarlo aqui y no preguntar "ya paso?" al servidor es lo que hace que
+    // el aviso sea UNO. El servidor, una vez pasada la hora, ya contesta con la
+    // de mañana; sin esta nota local no habria forma de saber que la de hoy
+    // vencio, o se avisaria en cada sondeo.
+    let mut programados: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>> =
+        std::collections::HashMap::new();
+
+    loop {
+        // Sin configurar, ni se intenta: no tiene sentido pegarle a la red cada
+        // minuto para descubrir otra vez que no hay URL.
+        if pulso::config().is_some() {
+            // Lo que ya vencio, se avisa. Antes de sondear, para que un servidor
+            // caido no se lleve por delante el recordatorio.
+            let ahora = chrono::Utc::now();
+            let vencidos: Vec<String> = programados
+                .iter()
+                .filter(|(_, t)| **t <= ahora)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for id in vencidos {
+                programados.remove(&id);
+                let mut s = shared.lock().unwrap();
+                if let Some(h) = s.habitos.iter().find(|h| h.id == id).cloned() {
+                    // Se salta si ya esta hecho o en pausa: entre que se
+                    // programo y ahora pudiste haberlo hecho.
+                    if h.en_pausa || h.barra > 0.9 {
+                        continue;
+                    }
+                    s.island = Some(IslandEvent {
+                        icon: h.icono.clone().unwrap_or_else(|| "\u{f0f3}".into()),
+                        title: h.nombre.clone(),
+                        body: format!("toca ahora — {}", h.falta),
+                        accent: [230, 180, 90],
+                    });
+                    s.island_serial += 1;
+                    drop(s);
+                    ctx.request_repaint();
+                }
+            }
+
+            match pulso::estado() {
+                Ok(v) => {
+                    // Reprogramar desde lo que diga el servidor.
+                    for h in &v {
+                        match h.proximo_aviso.as_deref().and_then(|t| {
+                            chrono::DateTime::parse_from_rfc3339(t).ok()
+                        }) {
+                            Some(t) => {
+                                programados.insert(h.id.clone(), t.with_timezone(&chrono::Utc));
+                            }
+                            // Sin hora, en pausa, o ya hecho hoy: nada que sonar.
+                            None => {
+                                programados.remove(&h.id);
+                            }
+                        }
+                    }
+                    let mut s = shared.lock().unwrap();
+                    // Basta comparar nombre y barra redondeada: es lo unico que
+                    // se pinta, y el porcentaje crudo cambia cada segundo.
+                    let clave = |h: &[pulso::Habito]| -> Vec<(String, i32)> {
+                        h.iter().map(|x| (x.nombre.clone(), (x.barra * 100.0) as i32)).collect()
+                    };
+                    if clave(&s.habitos) != clave(&v) {
+                        s.habitos = v;
+                        drop(s);
+                        ctx.request_repaint();
+                    }
+                }
+                // Sin red se conserva lo ultimo conocido en vez de vaciar la
+                // barra: una barra en blanco mentiria mas que una de hace un rato.
+                Err(e) => tracing_leve(&e),
+            }
+        }
+        std::thread::sleep(Duration::from_secs(60));
+    }
+}
+
+/// Un aviso de Pulso no merece tumbar nada ni ensuciar la consola en bucle.
+fn tracing_leve(_e: &str) {}
+
 fn consumo_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
     let ruta = std::path::Path::new(&std::env::var("USERPROFILE").unwrap_or_default())
         .join(".config")
@@ -1874,6 +1976,7 @@ struct BarApp {
     isl_timer: bool,
     isl_devices: bool,
     isl_notifs: bool,
+    isl_habitos: bool,
     /// Historial leido del disco. Se relee al abrir el panel y cuando cambia el
     /// archivo, no en cada fotograma.
     notifs: Vec<rice_common::event::NotifRecord>,
@@ -1920,6 +2023,8 @@ impl BarApp {
             6
         } else if self.isl_notifs {
             7
+        } else if self.isl_habitos {
+            8
         } else {
             0
         }
@@ -1934,6 +2039,7 @@ impl BarApp {
             5 => 230.0,
             6 => 300.0,
             7 => 340.0,
+            8 => 340.0,
             _ => 3.0 * 52.0 + 24.0,
         }
     }
@@ -1955,6 +2061,10 @@ impl BarApp {
                 let n = self.dev_ctl.rows().len().max(1) as f32;
                 let extra = if scanning || !near.is_empty() { near.len() as f32 * 34.0 + 30.0 } else { 0.0 };
                 (n * 38.0 + 34.0 + 30.0 + extra).min(260.0)
+            }
+            8 => {
+                let n = self.shared.lock().unwrap().habitos.len().max(1) as f32;
+                (n * 34.0 + 46.0).min(300.0)
             }
             7 => {
                 let n = self.notifs.len().min(self.notifs_shown).max(1) as f32;
@@ -1978,6 +2088,7 @@ impl BarApp {
         self.isl_timer = false;
         self.isl_devices = false;
         self.isl_notifs = false;
+        self.isl_habitos = false;
         self.panel_rect = None;
         self.vol.clear();
         self.bright.clear();
@@ -2080,6 +2191,7 @@ impl BarApp {
             5 => self.panel_timer(ui, &p, rect, now),
             6 => self.panel_devices(ui, &p, rect, now),
             7 => self.panel_notifs(ui, &p, rect, now),
+            8 => self.panel_habitos(ui, &p, rect),
             _ => self.panel_actions(ui, &p, rect, now, ctx),
         }
 
@@ -2188,6 +2300,9 @@ impl BarApp {
                     "devices" => {
                         self.dev_ctl.refresh();
                         self.isl_devices = true;
+                    }
+                    "habitos" => {
+                        self.isl_habitos = true;
                     }
                     "notifs" => {
                         self.reload_notifs(true);
@@ -2688,6 +2803,146 @@ impl BarApp {
     /// Playback outputs and Bluetooth devices in one list. Tapping a row makes
     /// it the default output; a Bluetooth device that is offline connects first
     /// and is then selected once it is really up.
+    /// Las barras de habitos, con su porcentaje y un clic para marcar hecho.
+    ///
+    /// Aqui SI se marca de un clic, al reves que en la tira: para llegar hasta
+    /// aqui hay que abrir la isla a proposito, asi que no se registra una ducha
+    /// por rozar el raton al pasar.
+    fn panel_habitos(&mut self, ui: &mut egui::Ui, p: &egui::Painter, rect: egui::Rect) {
+        let habitos = self.shared.lock().unwrap().habitos.clone();
+        p.text(
+            egui::pos2(rect.center().x, rect.top() + 18.0),
+            egui::Align2::CENTER_CENTER,
+            "Habitos",
+            egui::FontId::proportional(12.5),
+            WARM_SUB,
+        );
+        if habitos.is_empty() {
+            // Se distingue "no hay servidor" de "no hay habitos": son dos
+            // problemas distintos y el mensaje generico manda a mirar el sitio
+            // equivocado.
+            let msg = if pulso::config().is_some() {
+                "sin habitos todavia"
+            } else {
+                "pon pulso_url y pulso_token en rice-secrets.json"
+            };
+            p.text(
+                egui::pos2(rect.center().x, rect.top() + 52.0),
+                egui::Align2::CENTER_CENTER,
+                msg,
+                egui::FontId::proportional(11.5),
+                WARM_SUB,
+            );
+            return;
+        }
+
+        let mut y = rect.top() + 36.0;
+        for (i, h) in habitos.iter().enumerate() {
+            let fila = egui::Rect::from_min_size(
+                egui::pos2(rect.left() + 12.0, y),
+                egui::vec2(rect.width() - 24.0, 30.0),
+            );
+            let resp = ui
+                .interact(fila, egui::Id::new(("hab-row", i)), egui::Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if resp.hovered() {
+                p.rect_filled(
+                    fila,
+                    egui::Rounding::same(8.0),
+                    egui::Color32::from_rgba_unmultiplied(
+                        WARM_ACCENT.r(),
+                        WARM_ACCENT.g(),
+                        WARM_ACCENT.b(),
+                        24,
+                    ),
+                );
+            }
+
+            let color = if h.en_pausa {
+                WARM_SUB
+            } else if h.barra <= 0.0 {
+                egui::Color32::from_rgb(255, 120, 120)
+            } else if h.barra < UMBRAL_HABITO {
+                egui::Color32::from_rgb(230, 180, 90)
+            } else {
+                col(theme::ACCENT_OK)
+            };
+
+            // Icono a la izquierda, nombre al lado.
+            let glifo = h.icono.clone().unwrap_or_else(|| "\u{f0f3}".into());
+            draw_icon(
+                p,
+                egui::pos2(fila.left() + 14.0, fila.center().y),
+                &glifo,
+                13.0,
+                color,
+            );
+            p.text(
+                egui::pos2(fila.left() + 30.0, fila.center().y - 5.0),
+                egui::Align2::LEFT_CENTER,
+                &h.nombre,
+                egui::FontId::proportional(12.0),
+                WARM_TEXT,
+            );
+
+            // La barra misma, debajo del nombre. Es el dato: el porcentaje en
+            // texto se lee, la barra se ve de un vistazo.
+            let riel = egui::Rect::from_min_size(
+                egui::pos2(fila.left() + 30.0, fila.center().y + 6.0),
+                egui::vec2(fila.width() - 110.0, 4.0),
+            );
+            p.rect_filled(
+                riel,
+                egui::Rounding::same(2.0),
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 22),
+            );
+            if h.barra > 0.0 {
+                let lleno = egui::Rect::from_min_size(
+                    riel.min,
+                    egui::vec2(riel.width() * h.barra.clamp(0.0, 1.0), riel.height()),
+                );
+                p.rect_filled(lleno, egui::Rounding::same(2.0), color);
+            }
+
+            // A la derecha, cuanto queda -- o "en pausa", que explica por que
+            // una barra vacia no esta gritando.
+            let etiqueta = if h.en_pausa { "en pausa".to_string() } else { h.falta.clone() };
+            p.text(
+                egui::pos2(fila.right() - 10.0, fila.center().y),
+                egui::Align2::RIGHT_CENTER,
+                etiqueta,
+                egui::FontId::proportional(11.5),
+                color,
+            );
+
+            resp.clone().on_hover_text(format!(
+                "{}\n{:.0}% de la barra\n\nclic: marcar hecho ahora",
+                h.nombre,
+                h.barra * 100.0
+            ));
+
+            if resp.clicked() {
+                // Fuera del hilo de la interfaz: es una peticion de red, y
+                // bloquear el pintado por ella dejaria la barra congelada
+                // hasta que el servidor conteste.
+                let id = h.id.clone();
+                let shared = self.shared.clone();
+                let ctx = ui.ctx().clone();
+                std::thread::spawn(move || {
+                    let _ = pulso::marcar(&id);
+                    // Refrescar en el acto en vez de esperar al sondeo: si
+                    // marcas algo y la barra tarda un minuto en moverse,
+                    // parece que no se registro y lo marcas otra vez.
+                    if let Ok(v) = pulso::estado() {
+                        shared.lock().unwrap().habitos = v;
+                        ctx.request_repaint();
+                    }
+                });
+            }
+            y += 34.0;
+        }
+    }
+
     fn panel_devices(&mut self, ui: &mut egui::Ui, p: &egui::Painter, rect: egui::Rect, now: Instant) {
         let rows = self.dev_ctl.rows();
         p.text(
@@ -3523,6 +3778,49 @@ impl eframe::App for BarApp {
                             }
                             ui.add_space(12.0);
                         }
+                        // Habitos: SOLO el mas urgente y SOLO cuando aprieta.
+                        //
+                        // Aqui no caben seis barras, y una tira que siempre
+                        // ensena seis cosas deja de mirarse. La lista entera
+                        // vive en el panel de la isla; esto es el aviso de que
+                        // hay algo que mirar.
+                        if let Some(h) = pulso::mas_urgente(&s.habitos) {
+                            if h.barra < UMBRAL_HABITO {
+                                // Rojo a cero, ambar segun se acerca. El color
+                                // ES el dato: dice cuanto queda sin leer nada.
+                                let c = if h.barra <= 0.0 {
+                                    egui::Color32::from_rgb(255, 120, 120)
+                                } else {
+                                    egui::Color32::from_rgb(230, 180, 90)
+                                };
+                                let globo = format!(
+                                    "{} — {}\n{:.0}% de la barra\n\nclic para abrir la lista",
+                                    h.nombre,
+                                    if h.barra <= 0.0 { "vencido".into() } else { h.falta.clone() },
+                                    h.barra * 100.0
+                                );
+                                // Se compone de derecha a izquierda: primero el
+                                // texto, luego el icono, asi queda "icono 40min".
+                                let resp_t = ui.colored_label(c, h.falta.clone());
+                                ui.add_space(4.0);
+                                let (rh, resp_h) = ui.allocate_exact_size(
+                                    egui::vec2(18.0, 18.0),
+                                    egui::Sense::click(),
+                                );
+                                let glifo = h.icono.clone().unwrap_or_else(|| "\u{f0f3}".into());
+                                draw_icon(ui.painter(), rh.center(), &glifo, 13.0, c);
+                                resp_h.clone().on_hover_text(globo.clone());
+                                resp_t.on_hover_text(globo);
+                                // Clic ABRE la lista, no marca. Marcar de un
+                                // toque en la tira es la forma de registrar una
+                                // ducha que no te diste por rozar el raton.
+                                if resp_h.clicked() {
+                                    self.isl_habitos = true;
+                                    self.isl_expanded = true;
+                                }
+                                ui.add_space(12.0);
+                            }
+                        }
                         let dir = if s.tiling == "vertical" { "|" } else { "—" };
                         ui.colored_label(egui::Color32::from_rgb(140, 160, 210), dir);
                         if !s.mode.is_empty() {
@@ -3906,6 +4204,7 @@ impl eframe::App for BarApp {
             self.isl_timer = false;
             self.isl_devices = false;
             self.isl_notifs = false;
+            self.isl_habitos = false;
             self.vol.clear();
             self.bright.clear();
             self.isl_interact = Instant::now();
@@ -4048,6 +4347,9 @@ fn main() -> eframe::Result<()> {
             let s5 = shared.clone();
             let ctx5 = cc.egui_ctx.clone();
             std::thread::spawn(move || consumo_thread(s5, ctx5));
+            let s6 = shared.clone();
+            let ctx6 = cc.egui_ctx.clone();
+            std::thread::spawn(move || habitos_thread(s6, ctx6));
             let s4 = shared.clone();
             let ctx4 = cc.egui_ctx.clone();
             std::thread::spawn(move || island_watcher(s4, ctx4));
@@ -4106,6 +4408,7 @@ fn main() -> eframe::Result<()> {
                 // proposito que GLAZEBAR_ICONTEST: poder mirar como queda algo
                 // sin tener que inyectar clics en el escritorio de nadie.
                 isl_notifs: std::env::var("GLAZEBAR_PANEL").as_deref() == Ok("notifs"),
+                isl_habitos: std::env::var("GLAZEBAR_PANEL").as_deref() == Ok("habitos"),
                 notifs: Vec::new(),
                 notifs_stamp: None,
                 notifs_checked: Instant::now() - Duration::from_secs(2),
