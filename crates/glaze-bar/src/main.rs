@@ -1705,7 +1705,7 @@ fn habitos_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
                 if let Some(h) = s.habitos.iter().find(|h| h.id == id).cloned() {
                     // Se salta si ya esta hecho o en pausa: entre que se
                     // programo y ahora pudiste haberlo hecho.
-                    if h.en_pausa || h.barra > 0.9 {
+                    if h.en_pausa || h.barra_ahora() > 0.9 {
                         continue;
                     }
                     s.island = Some(IslandEvent {
@@ -2858,11 +2858,12 @@ impl BarApp {
                 );
             }
 
+            let barra = h.barra_ahora();
             let color = if h.en_pausa {
                 WARM_SUB
-            } else if h.barra <= 0.0 {
+            } else if barra <= 0.0 {
                 egui::Color32::from_rgb(255, 120, 120)
-            } else if h.barra < UMBRAL_HABITO {
+            } else if barra < UMBRAL_HABITO {
                 egui::Color32::from_rgb(230, 180, 90)
             } else {
                 col(theme::ACCENT_OK)
@@ -2896,17 +2897,17 @@ impl BarApp {
                 egui::Rounding::same(2.0),
                 egui::Color32::from_rgba_unmultiplied(255, 255, 255, 22),
             );
-            if h.barra > 0.0 {
+            if barra > 0.0 {
                 let lleno = egui::Rect::from_min_size(
                     riel.min,
-                    egui::vec2(riel.width() * h.barra.clamp(0.0, 1.0), riel.height()),
+                    egui::vec2(riel.width() * barra, riel.height()),
                 );
                 p.rect_filled(lleno, egui::Rounding::same(2.0), color);
             }
 
             // A la derecha, cuanto queda -- o "en pausa", que explica por que
             // una barra vacia no esta gritando.
-            let etiqueta = if h.en_pausa { "en pausa".to_string() } else { h.falta.clone() };
+            let etiqueta = if h.en_pausa { "en pausa".to_string() } else { h.falta_ahora() };
             p.text(
                 egui::pos2(fila.right() - 10.0, fila.center().y),
                 egui::Align2::RIGHT_CENTER,
@@ -2918,7 +2919,7 @@ impl BarApp {
             resp.clone().on_hover_text(format!(
                 "{}\n{:.0}% de la barra\n\nclic: marcar hecho ahora",
                 h.nombre,
-                h.barra * 100.0
+                barra * 100.0
             ));
 
             if resp.clicked() {
@@ -3785,10 +3786,14 @@ impl eframe::App for BarApp {
                         // vive en el panel de la isla; esto es el aviso de que
                         // hay algo que mirar.
                         if let Some(h) = pulso::mas_urgente(&s.habitos) {
-                            if h.barra < UMBRAL_HABITO {
+                            // Interpolado, no la foto del ultimo sondeo: si no,
+                            // la barra seria una escalera de un escalon por
+                            // minuto y el "45 min" iria hasta un minuto tarde.
+                            let barra = h.barra_ahora();
+                            if barra < UMBRAL_HABITO {
                                 // Rojo a cero, ambar segun se acerca. El color
                                 // ES el dato: dice cuanto queda sin leer nada.
-                                let c = if h.barra <= 0.0 {
+                                let c = if barra <= 0.0 {
                                     egui::Color32::from_rgb(255, 120, 120)
                                 } else {
                                     egui::Color32::from_rgb(230, 180, 90)
@@ -3796,12 +3801,12 @@ impl eframe::App for BarApp {
                                 let globo = format!(
                                     "{} — {}\n{:.0}% de la barra\n\nclic para abrir la lista",
                                     h.nombre,
-                                    if h.barra <= 0.0 { "vencido".into() } else { h.falta.clone() },
-                                    h.barra * 100.0
+                                    if barra <= 0.0 { "vencido".into() } else { h.falta_ahora() },
+                                    barra * 100.0
                                 );
                                 // Se compone de derecha a izquierda: primero el
                                 // texto, luego el icono, asi queda "icono 40min".
-                                let resp_t = ui.colored_label(c, h.falta.clone());
+                                let resp_t = ui.colored_label(c, h.falta_ahora());
                                 ui.add_space(4.0);
                                 let (rh, resp_h) = ui.allocate_exact_size(
                                     egui::vec2(18.0, 18.0),

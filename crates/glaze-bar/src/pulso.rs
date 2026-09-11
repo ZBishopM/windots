@@ -1,8 +1,13 @@
 //! Cliente de Pulso: las barras de hábitos cotidianos.
 //!
-//! Habla con `pulso-api` en agapornis. La barra NO calcula nada -- el servidor
-//! manda el porcentaje ya hecho, para que el PC, el iPhone y el MacBook no
-//! puedan discrepar aunque uno tenga una versión vieja.
+//! Habla con `pulso-api` en agapornis. El servidor resuelve lo dificil -- las
+//! pausas, los marcados anulados, cual cuenta como ultimo -- y manda `vence`,
+//! un instante absoluto. La barra solo divide, y por eso puede hacerlo en cada
+//! repintado: nada de ticks, nada de contadores que decrementar.
+//!
+//! Esa division esta repetida a los dos lados a proposito. Lo que no se repite
+//! es el criterio; si cambiara, cambia en el servidor y los tres clientes lo
+//! heredan dentro de `vence`.
 //!
 //! La URL y el token viven en `~/.config/rice-secrets.json`, no en `rice.json`:
 //! el repo del rice es PÚBLICO, y ahí no va ni el token ni el nombre del
@@ -26,10 +31,17 @@ pub struct Habito {
     pub nombre: String,
     #[serde(default)]
     pub icono: Option<String>,
-    /// 0.0 = vencido (rojo), 1.0 = recién hecho.
+    /// La foto que mandó el servidor al responder. NO se pinta directamente:
+    /// ver `barra_ahora`.
     pub barra: f32,
-    /// "4 h", "45 min", "vencido". Ya en texto: lo formatea el servidor.
+    /// "4 h", "45 min", "vencido", tal y como estaba al responder.
     pub falta: String,
+    /// Cuándo vence, en absoluto. Es EL dato: con esto la barra se calcula en
+    /// cualquier instante sin volver a preguntar.
+    pub vence: String,
+    /// La escala de la barra, en segundos.
+    #[serde(default)]
+    pub cada_segundos: i64,
     #[serde(default)]
     pub en_pausa: bool,
     #[serde(default)]
@@ -151,10 +163,54 @@ pub fn estado() -> Result<Vec<Habito>, String> {
     Ok(cuerpo.habitos)
 }
 
+impl Habito {
+    /// La barra AHORA, no cuando contestó el servidor.
+    ///
+    /// Se interpola desde `vence`, que es un instante absoluto. Es la misma
+    /// fórmula que tiene `pulso-core` del lado del servidor, dos líneas
+    /// repetidas a propósito: lo difícil -- las pausas, los marcados anulados,
+    /// qué cuenta como último -- sigue en un solo sitio y sale ya resuelto
+    /// dentro de `vence`. Esto solo divide.
+    ///
+    /// Se recalcula entero cada vez en vez de restarle a un contador. Un
+    /// contador acumula deriva y, sobre todo, miente después de suspender o
+    /// apagar el equipo -- que es todas las noches.
+    pub fn barra_ahora(&self) -> f32 {
+        if self.cada_segundos <= 0 {
+            return self.barra;
+        }
+        match chrono::DateTime::parse_from_rfc3339(&self.vence) {
+            Ok(v) => {
+                let quedan = (v.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_seconds();
+                (quedan as f32 / self.cada_segundos as f32).clamp(0.0, 1.0)
+            }
+            // Sin fecha legible, la foto del servidor es mejor que nada.
+            Err(_) => self.barra,
+        }
+    }
+
+    /// Cuánto queda, en palabras, recalculado igual que la barra.
+    pub fn falta_ahora(&self) -> String {
+        let Ok(v) = chrono::DateTime::parse_from_rfc3339(&self.vence) else {
+            return self.falta.clone();
+        };
+        let s = (v.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_seconds();
+        if s <= 0 {
+            "vencido".into()
+        } else if s < 5400 {
+            format!("{} min", s / 60)
+        } else if s < 172_800 {
+            format!("{} h", s / 3600)
+        } else {
+            format!("{} d", s / 86_400)
+        }
+    }
+}
+
 /// El más urgente de la lista: el de la barra más baja, saltándose los pausados.
 /// Es el único que cabe en la tira; el resto vive en el panel de la isla.
 pub fn mas_urgente(v: &[Habito]) -> Option<&Habito> {
-    v.iter()
-        .filter(|h| !h.en_pausa)
-        .min_by(|a, b| a.barra.partial_cmp(&b.barra).unwrap_or(std::cmp::Ordering::Equal))
+    v.iter().filter(|h| !h.en_pausa).min_by(|a, b| {
+        a.barra_ahora().partial_cmp(&b.barra_ahora()).unwrap_or(std::cmp::Ordering::Equal)
+    })
 }
