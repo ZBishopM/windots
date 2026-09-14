@@ -199,4 +199,107 @@ foreach ($n in 'MSIAfterburner', 'OneDrive Startup Task') {
     }
 }
 
+# --- 8. Actualizador de Office --------------------------------------------
+# 77 MB permanentes para buscar actualizaciones de Office. A Manual, no
+# Deshabilitado: Office lo arranca solo cuando lo abris, asi que sigue
+# actualizandose -- solo deja de estar sentado ahi el resto del dia.
+#
+# Deshabilitado del todo puede romper la reparacion de Office y, en algunas
+# instalaciones, el propio arranque. Manual es el escalon correcto.
+Write-Host '== actualizador de Office =='
+if ($Undo) {
+    Set-Service ClickToRunSvc -StartupType Automatic -EA SilentlyContinue
+    Start-Service ClickToRunSvc -EA SilentlyContinue
+    Write-Host '   ClickToRunSvc: Automatico, arrancado'
+} else {
+    Set-Service ClickToRunSvc -StartupType Manual -EA SilentlyContinue
+    Stop-Service ClickToRunSvc -Force -EA SilentlyContinue
+    Write-Host '   ClickToRunSvc: Manual, parado'
+}
+
+# --- 9. Servicio de diagnosticos (DPS) ------------------------------------
+# 56 MB. Es lo que alimenta a los "solucionadores de problemas" de Windows --
+# esos asistentes que casi nunca arreglan nada.
+#
+# CONTRAPARTIDA: los solucionadores dejan de funcionar, y con ellos el
+# diagnostico automatico de red del icono de la bandeja. Diagnosticar a mano
+# sigue igual.
+Write-Host '== diagnosticos (DPS) =='
+if ($Undo) {
+    Set-Service DPS -StartupType Automatic -EA SilentlyContinue
+    Start-Service DPS -EA SilentlyContinue
+    Write-Host '   DPS: Automatico, arrancado'
+} else {
+    Stop-Service DPS -Force -EA SilentlyContinue
+    Set-Service DPS -StartupType Disabled -EA SilentlyContinue
+    Write-Host '   DPS: Deshabilitado, parado'
+}
+
+# --- 10. Flixmate -----------------------------------------------------------
+# 56 MB de servicio en Auto para un DESCARGADOR DE VIDEO. Por dentro es yt-dlp,
+# ffmpeg y deno empaquetados; firmado por Zinlab Technologies, instalado el
+# 24/02/2026 en C:\Users\Public\AppData\Roaming -- que no es donde se instala el
+# software normal, y por eso escapa al inventario por usuario.
+#
+# A Manual y no desinstalado: la app sigue funcionando cuando la abris, que es
+# cuando la necesitas. Si resulta que no la usas nunca, su desinstalador esta en
+# esa misma carpeta y libera ademas ~540 MB de disco.
+Write-Host '== Flixmate (descargador de video) =='
+if ($Undo) {
+    Set-Service FlixmateService -StartupType Automatic -EA SilentlyContinue
+    Start-Service FlixmateService -EA SilentlyContinue
+    Write-Host '   FlixmateService: Automatico, arrancado'
+} else {
+    Stop-Service FlixmateService -Force -EA SilentlyContinue
+    Set-Service FlixmateService -StartupType Manual -EA SilentlyContinue
+    Write-Host '   FlixmateService: Manual, parado'
+}
+
+# --- 11. Panel de Widgets ---------------------------------------------------
+# Estaba OCULTO de la barra de tareas (TaskbarDa = 0) y aun asi corria con SEIS
+# procesos de WebView2, 56 MB. Esconderlo no lo apaga: sigue siendo una app web
+# arrancada y viva. Lo unico que lo para es quitar el paquete.
+#
+# CONTRAPARTIDA: se va el panel de clima y noticias de Win+W. Reversible desde
+# la Microsoft Store ("Widgets"), o con el -Undo de abajo si los archivos siguen
+# en WindowsApps.
+Write-Host '== panel de Widgets =='
+if ($Undo) {
+    $m = Get-AppxPackage -AllUsers -Name '*WebExperience*' -EA SilentlyContinue |
+         Select-Object -First 1 -ExpandProperty InstallLocation
+    if ($m -and (Test-Path "$m\AppXManifest.xml")) {
+        Add-AppxPackage -DisableDevelopmentMode -Register "$m\AppXManifest.xml" -EA SilentlyContinue
+        Write-Host '   Widgets: reinstalado desde WindowsApps'
+    } else {
+        Write-Host '   Widgets: los archivos ya no estan -- reinstalalo desde la Store'
+    }
+} else {
+    Get-AppxPackage -Name '*WebExperience*' -EA SilentlyContinue | Remove-AppxPackage -EA SilentlyContinue
+    Get-Process Widgets -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+    Write-Host '   Widgets: paquete WebExperience quitado'
+}
+
+# --- 12. Busqueda web del menu Inicio ---------------------------------------
+# SearchHost.exe son 363 MB en seis procesos de WebView2, y la mayor parte es
+# Bing y los "destacados" RENDERIZANDOSE dentro del menu Inicio.
+#
+# No se puede quitar SearchHost -- es la interfaz del Inicio y borrarla lo rompe.
+# Lo que si se apaga es el contenido WEB, dejando la busqueda local intacta. Y
+# aqui la local ya casi no se usa: para eso esta el launcher en Win+Space.
+Write-Host '== busqueda web del menu Inicio =='
+$claves = @(
+    @{ k = 'HKCU:\Software\Policies\Microsoft\Windows\Explorer';        n = 'DisableSearchBoxSuggestions'; off = 1; on = 0 }
+    @{ k = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\SearchSettings'; n = 'IsDynamicSearchBoxEnabled'; off = 0; on = 1 }
+    @{ k = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Search';     n = 'BingSearchEnabled';          off = 0; on = 1 }
+)
+foreach ($c in $claves) {
+    if (-not (Test-Path $c.k)) { New-Item -Path $c.k -Force | Out-Null }
+    $v = if ($Undo) { $c.on } else { $c.off }
+    Set-ItemProperty -Path $c.k -Name $c.n -Value $v -Type DWord -Force
+    Write-Host ("   {0} = {1}" -f $c.n, $v)
+}
+# SearchHost relee al arrancar; matarlo lo hace volver limpio en el siguiente uso.
+Get-Process SearchHost -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+Write-Host '   SearchHost reiniciado'
+
 Write-Host "`nhecho. Reinicia sesion para ver el efecto completo en el arranque."
