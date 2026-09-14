@@ -336,3 +336,49 @@ def claude-proyectos [] { claude --resume "projects" }
 # `nu -e` con un argumento que lleva espacios no ejecuta nada cuando lo lanza
 # Start-Process.
 def claude-winrice [] { claude --resume "winrice" }
+
+
+# --- indice de archivos del launcher ---------------------------------------
+#
+# El launcher (Win+Space) ya tiene un indice de TODAS las unidades rapidas:
+# 1,25 millones de entradas, consultas en 21 ms. Lo que no tenia era forma de
+# sacarlo de la caja: ahi caben 9 filas y las aplicaciones se llevan 4, asi que
+# como mucho se ven CINCO archivos.
+#
+# `launcher --archivos` le pregunta por una tuberia a la instancia RESIDENTE,
+# que ya lo tiene construido -- no reconstruye nada. Recorrer las unidades
+# cuesta 12 s; esto contesta en milisegundos.
+
+# Todas las rutas que coincidan, como lista.
+#   buscar boda | where $it =~ '(?i)\.mp4$'
+def buscar [texto: string, --max: int = 200] {
+  $env.RICE_ARCHIVOS_MAX = ($max | into string)
+  ^$"($env.USERPROFILE)/dev/target/release/launcher.exe" --archivos $texto | lines
+}
+
+# Igual pero como TABLA, con nombre, carpeta, tamano y fecha. Es lo comodo para
+# mirar: ordenar por tamano, por fecha, filtrar por unidad.
+#   ver boda | sort-by modificado --reverse
+def ver [texto: string, --max: int = 200] {
+  buscar $texto --max $max
+    | where {|r| $r | path exists}
+    | each {|r|
+        let i = (ls -D $r | get 0)
+        {nombre: ($r | path basename), tam: $i.size, modificado: $i.modified, ruta: $r}
+      }
+}
+
+# Solo videos, que es lo que mas cuesta encontrar a mano.
+#   videos boda
+#   videos . --max 2000 | where ruta =~ '^D:'
+def videos [texto: string, --max: int = 400] {
+  ver $texto --max $max | where nombre =~ '(?i)\.(mp4|mkv|avi|mov|webm|m4v|flv|wmv)$'
+}
+
+# Abre un resultado con el programa que le corresponda. Acepta una ruta suelta
+# o una fila de `ver`/`videos`, para poder encadenar:
+#   videos boda | first | abrir
+def abrir [ruta?: string] {
+  let r = if ($ruta | is-empty) { ($in | get --optional ruta | default $in) } else { $ruta }
+  start $r
+}

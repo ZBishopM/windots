@@ -1157,6 +1157,42 @@ fn main() -> eframe::Result<()> {
         }
         return Ok(());
     }
+    // `--archivos <texto>` saca el indice de ARCHIVOS por la salida estandar,
+    // una ruta por linea, para que nushell haga el filtrado y la apertura.
+    //
+    // Por que hace falta: en la caja caben `MAX_ROWS` = 9 filas y las
+    // aplicaciones se quedan `APP_ROWS` = 4, asi que como mucho se ven CINCO
+    // archivos. Para elegir entre cinco vale; para encontrar un video entre
+    // 1,25 millones de entradas, no.
+    //
+    // NO reconstruye el indice: le pregunta por la tuberia a la instancia
+    // residente, que ya lo tiene. Recorrer las unidades cuesta 12 s; esto
+    // responde en milisegundos.
+    if let Some(i) = args.iter().position(|a| a == "--archivos") {
+        let q = args[i + 1..].join(" ");
+        if q.trim().is_empty() {
+            eprintln!("uso: launcher --archivos <texto>");
+            eprintln!("  el numero de resultados sale de RICE_ARCHIVOS_MAX (por defecto 200)");
+            std::process::exit(2);
+        }
+        let cuantos: usize = std::env::var("RICE_ARCHIVOS_MAX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200);
+        match tuberia::preguntar(&q, cuantos) {
+            Ok(rutas) => {
+                for r in rutas {
+                    println!("{r}");
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // `--buscar <texto>` lista lo que encontraria la caja; `--abrir <texto>`
     // lanza lo primero. Es la via por la que el modelo local abre cosas: reusa
     // este indice en vez de llevar su propia lista de aplicaciones, que habria
