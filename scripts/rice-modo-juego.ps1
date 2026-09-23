@@ -41,6 +41,13 @@ if ($Estado) {
         Write-Host ("  {0,-14} {1}" -f $p, $(if ($n) { "corriendo ($n)" } else { 'parado' }))
     }
     Write-Host ("  {0,-14} {1}" -f 'supervisor', $(if (Get-Supervisor) { 'corriendo' } else { 'parado' }))
+    # Ojo no aparece por nombre de proceso util -- son un python y un
+    # llama-server entre otros iguales -- asi que se pregunta por sus puertos.
+    foreach ($o in @{n='ojo-vlm'; u='http://127.0.0.1:8099/health'}, @{n='ojo-oido'; u='http://127.0.0.1:17494/salud'}) {
+        $vivo = $false
+        try { $null = Invoke-RestMethod $o.u -TimeoutSec 2; $vivo = $true } catch { }
+        Write-Host ("  {0,-14} {1}" -f $o.n, $(if ($vivo) { 'corriendo' } else { 'parado' }))
+    }
     Write-Host "`n  Overlays (se apagan en su propia app, no desde aqui):"
     $s = Get-ItemProperty 'HKCU:\SOFTWARE\Valve\Steam' -EA SilentlyContinue
     if ($s.SteamPath) {
@@ -84,6 +91,31 @@ foreach ($p in 'AltSnap', 'AutoHotkey64') {
     Get-Process $p -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
     Write-Host ("   {0,-14} parado ({1})" -f $p, $n)
 }
+
+# Ojo: aqui no es por anti-cheat, es por VRAM.
+#
+# Su modelo de vision ocupa 11,4 de los 12,28 GB de la tarjeta desde que se
+# enciende el equipo, asi que dejarlo puesto mientras se juega es quedarse sin
+# memoria de video. Cuando eso pasa, CUDA se desborda a memoria compartida por
+# PCIe y el juego se arrastra igual que se arrastro el modelo en su dia.
+#
+# Va DESPUES de parar el supervisor, como todo lo de arriba: si no, lo revive
+# en su siguiente vuelta de 30 s.
+#
+# Solo el del puerto 8099. El 35B del Win+Space, si estuviera puesto, se para
+# con `rice-llm.ps1 -Stop`, que es su herramienta.
+$vlm = @(Get-CimInstance Win32_Process -Filter "Name='llama-server.exe'" -EA SilentlyContinue |
+         Where-Object { $_.CommandLine -match '--port\s+8099\b' })
+foreach ($v in $vlm) { Stop-Process -Id $v.ProcessId -Force -EA SilentlyContinue }
+Write-Host ("   {0,-14} parado ({1})  -- libera ~11,4 GB de VRAM" -f 'ojo-vlm', $vlm.Count)
+
+# El oido son 769 MB de RAM y cero VRAM, asi que no estorba a un juego. Se para
+# igualmente porque con el atajo muerto no sirve de nada, y porque tiene el
+# microfono abierto mientras graba.
+$oido = @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" -EA SilentlyContinue |
+          Where-Object { $_.CommandLine -match 'escuchar\.py' })
+foreach ($o in $oido) { Stop-Process -Id $o.ProcessId -Force -EA SilentlyContinue }
+Write-Host ("   {0,-14} parado ({1})" -f 'ojo-oido', $oido.Count)
 
 Write-Host @'
 

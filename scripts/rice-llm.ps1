@@ -59,9 +59,28 @@ param(
     [int]$Port = 8080
 )
 
-$root   = 'I:\ai'
-$server = "$root\llama.cpp\llama-server.exe"
-$bench  = "$root\llama.cpp\llama-bench.exe"
+# F: y no I:. El HDD lee a 193 MB/s y el NVMe a 2.572 (medido): el modelo de
+# 16,85 GB tardaba ~110 s en cargar y ahora tarda ~15. La copia de I:\ai era un
+# duplicado exacto y solo servia para tener el modelo en el disco lento.
+$root   = 'F:\ai'
+
+# EL FORK DE PrismML, no nuestro llama.cpp, y es a proposito.
+#
+# El preset [bonsai] usa pesos ternarios PQ2_0 con una transformada
+# Walsh-Hadamard que NO esta en upstream. Nuestro b11056 los rechaza, y su
+# propia ficha avisa de que si los confunde con Q2_0 "produce basura" sin decir
+# nada -- fallo silencioso, como el de GGML_CUDA_FA_ALL_QUANTS.
+#
+# El fork es b10709, o sea 347 compilaciones POR DETRAS de nuestro b11056. Se
+# comprobo antes de cambiar que tiene lo que este script necesita:
+# --models-preset, --models-max, --no-models-autoload, --cache-ram y
+# --load-mode. Y sirve los GGUF normales igual, asi que los presets del 35B
+# siguen funcionando.
+#
+# PARA VOLVER ATRAS: cambiar estas dos rutas a "$root\llama.cpp\..." y usar
+# cualquier preset que no sea [bonsai].
+$server = "$root\llama.cpp-prism\llama-server.exe"
+$bench  = "$root\llama.cpp-prism\llama-bench.exe"
 $model  = "$root\models\Qwen3.6-35B-A3B-UD-Q3_K_XL.gguf"
 $mmproj = "$root\models\mmproj-F16.gguf"
 $tuned   = "$root\n-cpu-moe.txt"
@@ -71,7 +90,36 @@ function VramFree {
     $o = & "$env:SystemRoot\System32\nvidia-smi.exe" --query-gpu=memory.free --format=csv,noheader,nounits
     [int]($o -replace '\D', '')
 }
-function Alive { [bool](Get-Process llama-server -EA SilentlyContinue) }
+# POR PUERTO, no por nombre de proceso.
+#
+# Desde que `ojo` arranca su propio llama-server en el 8099, "hay un proceso
+# llama-server" dejo de significar "el mio esta arrancado". Con el nombre a
+# secas, este script decia "ya estaba arrancado" y abria el chat en el 8080,
+# donde no escucha nadie.
+function Alive {
+    try { $null = Invoke-RestMethod "http://127.0.0.1:$Port/v1/models" -TimeoutSec 2; $true }
+    catch { $false }
+}
+
+# Los procesos que son MIOS: los que escuchan en mi puerto. Hace falta para no
+# matar el de `ojo` al parar este -- `Get-Process llama-server | Stop-Process`
+# se los llevaba a los dos.
+function MisProcesos {
+    Get-CimInstance Win32_Process -Filter "Name='llama-server.exe'" -EA SilentlyContinue |
+        Where-Object { $_.CommandLine -match "--port\s+$Port\b" }
+}
+
+# El modelo de `ojo` y el de aqui NO caben a la vez: 11,4 + 9,3 GB sobre 12,28.
+# Quedarse sin VRAM hace que CUDA se desborde por PCIe y los dos se arrastren
+# (ya paso: 2 tok/s con 127 MiB libres). `ojo.ps1` ya se niega a arrancar si
+# este esta puesto; esto es la mitad simetrica.
+function PararOjo {
+    $p = @(Get-CimInstance Win32_Process -Filter "Name='llama-server.exe'" -EA SilentlyContinue |
+           Where-Object { $_.CommandLine -match '--port\s+8099\b' })
+    if (-not $p) { return }
+    foreach ($x in $p) { Stop-Process -Id $x.ProcessId -Force -EA SilentlyContinue }
+    Write-Host "   parado el modelo de ojo ($($p.Count)): no caben los dos en la tarjeta"
+}
 
 # Avisa por la isla de la barra. Estos comandos se lanzan desde Win+Space, sin
 # terminal: una ventana de consola que aparece y desaparece no dice nada, y es
@@ -82,8 +130,9 @@ function Notify([string]$title, [string]$body, [string]$accent = '#e0a35c') {
 }
 
 if ($Stop) {
-    if (-not (Alive)) { Notify 'Modelo local' 'no estaba corriendo'; return }
-    Get-Process llama-server -EA SilentlyContinue | Stop-Process -Force
+    $mios = @(MisProcesos)
+    if (-not $mios) { Notify 'Modelo local' 'no estaba corriendo'; return }
+    foreach ($p in $mios) { Stop-Process -Id $p.ProcessId -Force -EA SilentlyContinue }
     Notify 'Modelo local' 'parado, RAM liberada'
     Write-Host 'parado.'
     return
@@ -143,6 +192,7 @@ if (Alive) {
     return
 }
 Notify 'Modelo local' 'router arrancando...'
+PararOjo
 
 # MODO ROUTER, no un modelo suelto.
 #

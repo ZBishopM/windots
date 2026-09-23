@@ -46,7 +46,7 @@ foreach ($f in 'glazewm-dwindle.ps1', 'glazewm-animcheck.ps1', 'wezterm-hotkey.a
                'rice-accent.ps1', 'rice-boot-report.ps1', 'rice-notif-banners.ps1',
                'rice-retire-replaced.ps1', 'rice-tame-startup.ps1', 'rice-trim-run.ps1',
                'rice-clip-share.ps1', 'rice-onedrive-purge.ps1', 'rice-deshacer.ps1', 'rice-teclado.ps1',
-               'rice-modo-juego.ps1', 'rice-usb-fix.ps1',
+               'rice-modo-juego.ps1', 'rice-usb-fix.ps1', 'rice-lanzar-limpio.ps1',
                'rice-audio-restaurar.ps1', 'rice-audio-restaurar-tarea.ps1') {
     $Map["scripts\$f"] = "$home_\.config\$f"
 }
@@ -103,7 +103,12 @@ foreach ($ff in "$env:ProgramFiles\Firefox Developer Edition", "$env:ProgramFile
 # linea entera vive dentro de un Test-Path: el mapa se queda sin la entrada y
 # -Check sigue contestando que el repo cuadra con lo vivo, con el INI sin
 # versionar.
-if (Test-Path 'I:\ai\presets.ini') { $Map['ai\presets.ini'] = 'I:\ai\presets.ini' }
+#
+# (2026-09-23) Los modelos se mudaron a F:\ai: con la ruta de I: la entrada
+# desaparecia del mapa sin avisar, como explica el parrafo de arriba.
+foreach ($ini in 'F:\ai\presets.ini', 'I:\ai\presets.ini') {
+    if (Test-Path $ini) { $Map['ai\presets.ini'] = $ini; break }
+}
 
 # Rust sources: whole trees, minus build output.
 $Trees = @{ 'crates' = "$home_\dev\crates" }
@@ -156,12 +161,16 @@ foreach ($rel in $Trees.Keys) {
 # Paso de verdad con rice-modo-juego.ps1 y rice-usb-fix.ps1, 210 lineas entre
 # los dos. Detectarlo es barato; acordarse, no.
 $enMapa = $Map.Values | ForEach-Object { Split-Path $_ -Leaf }
-$huerfanos = @(Get-ChildItem "$home_.config*.ps1" -EA SilentlyContinue |
+#
+# (2026-09-23) La ruta era "$home_.config*.ps1", sin barras: buscaba en
+# C:\Users\obisp.config* y no encontraba NUNCA nada. Por eso se colo
+# rice-lanzar-limpio.ps1 sin versionar.
+$huerfanos = @(Get-ChildItem "$home_\.config\*.ps1" -EA SilentlyContinue |
     Where-Object { $enMapa -notcontains $_.Name } |
     ForEach-Object { $_.Name })
 if ($huerfanos.Count) {
     Write-Host "scripts vivos que NO estan en el mapa de sync ($($huerfanos.Count)):" -ForegroundColor Yellow
-    $huerfanos | ForEach-Object { Write-Host "  .config$_" }
+    $huerfanos | ForEach-Object { Write-Host "  .config\$_" }
     Write-Host "  -> agregalos a la lista de arriba o no se versionan nunca"
 }
 
