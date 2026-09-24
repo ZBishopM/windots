@@ -234,11 +234,12 @@ $Components = @(
                 Where-Object { $_.CommandLine -match 'escuchar\.py' } |
                 ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue } } }
 
-    # La voz: Supertonic en la GPU, residente (cargarla cuesta ~1,5 s). Mutex
-    # y Kill propio por lo mismo que el oido: es otro python.exe.
+    # La voz: Pocket TTS "lola" en CPU (gano la escucha a ciegas 3, 2026-09-24;
+    # 0 de VRAM), residente. Reserva: la F2 en GPU con el venv de voz\ y
+    # '--motor f2'. Mutex y Kill propio por lo mismo que el oido: es otro python.exe.
     @{ Name = 'ojo-voz'; Check = 'Mutex'; Match = 'Global\ojo-voz'
-       Path = { 'D:\2026-projects\ojo\voz\.venv\Scripts\python.exe' }
-       Args = { @('D:\2026-projects\ojo\voz\servidor_voz.py') }
+       Path = { 'F:\ai\tts\pocket\.venv\Scripts\python.exe' }
+       Args = { @('D:\2026-projects\ojo\voz\servidor_voz.py', '--motor', 'pocket') }
        Grace = 30
        Health = { try { [bool](Invoke-RestMethod 'http://127.0.0.1:8098/salud' -TimeoutSec 2).ok } catch { $false } }
        Kill = { Get-CimInstance Win32_Process -Filter "Name='python.exe'" -EA SilentlyContinue |
