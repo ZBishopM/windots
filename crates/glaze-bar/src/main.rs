@@ -55,6 +55,45 @@ extern "system" {
     // quien tiene el foco. Ver `fullscreen_on_monitor`.
     fn GetTopWindow(parent: isize) -> isize;
     fn GetWindow(hwnd: isize, cmd: u32) -> isize;
+    // Idioma del teclado de la ventana activa, para la pildora de idioma.
+    fn GetKeyboardLayout(thread: u32) -> isize;
+    fn GetKeyboardLayoutList(n: i32, list: *mut isize) -> i32;
+    fn PostMessageW(hwnd: isize, msg: u32, w: usize, l: isize) -> i32;
+}
+
+/// Idioma (LANGID) del teclado de la ventana en primer plano. La barra es
+/// NOACTIVATE, asi que la ventana activa es siempre la del usuario.
+#[cfg(windows)]
+fn idioma_activo() -> u16 {
+    unsafe {
+        let tid = GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut());
+        (GetKeyboardLayout(tid) & 0xFFFF) as u16
+    }
+}
+
+/// Devuelve la ventana activa al primer teclado en espanol de la lista.
+/// Win+Espacio cambia a chino o japones sin querer, y Windows 11 no deja
+/// quitar ese atajo.
+#[cfg(windows)]
+fn volver_a_espanol() {
+    unsafe {
+        let mut l = [0isize; 16];
+        let n = GetKeyboardLayoutList(l.len() as i32, l.as_mut_ptr()).max(0) as usize;
+        if let Some(&hkl) = l[..n].iter().find(|&&h| h & 0x3FF == 0x0A) {
+            PostMessageW(GetForegroundWindow(), 0x0050, 0, hkl); // WM_INPUTLANGCHANGEREQUEST
+        }
+    }
+}
+
+fn idioma_txt(langid: u16) -> &'static str {
+    match langid & 0x3FF {
+        0x0A => "ES",
+        0x09 => "EN",
+        // Sin CJK: las fuentes de la barra (JetBrains Mono) no los tienen.
+        0x04 => "ZH",
+        0x11 => "JA",
+        _ => "??",
+    }
 }
 #[cfg(windows)]
 extern "system" {
@@ -718,6 +757,7 @@ struct Shared {
     mode: String,
     cpu: f32,
     mem: f32,
+    idioma: u16, // LANGID del teclado de la ventana activa
     gpu: String, // "44° 11%" (temp + utilization, from nvidia-smi)
     /// Bateria de CADA dispositivo conectado, no solo del que suena. Sustituye
     /// a la velocidad de subida/bajada, que se miraba una vez al mes; quedarte
@@ -1553,6 +1593,9 @@ fn sys_thread(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
             let mut s = shared.lock().unwrap();
             s.cpu = cpu;
             s.mem = mem;
+            // ponytail: va en este mismo sondeo de 2 s; Windows no avisa a otros
+            // procesos cuando cambia el idioma de una ventana ajena.
+            s.idioma = idioma_activo();
         }
         ctx.request_repaint();
         std::thread::sleep(Duration::from_millis(1500));
@@ -3593,6 +3636,24 @@ impl eframe::App for BarApp {
                             Atajo::Suspendido => "Alt+F10 suspendido — Win+Shift+Z lo devuelve",
                             Atajo::Caido => "Alt+F10 CAIDO — AutoHotkey no responde",
                         });
+                        ui.add_space(12.0);
+
+                        // Idioma del teclado. Fuera de ES/EN se pone en rojo; un
+                        // clic devuelve la ventana activa a espanol.
+                        let lang = s.idioma;
+                        let raro = !matches!(lang & 0x3FF, 0x0A | 0x09);
+                        let resp_l = ui.add(
+                            egui::Label::new(egui::RichText::new(idioma_txt(lang)).color(if raro {
+                                egui::Color32::from_rgb(255, 120, 120)
+                            } else {
+                                egui::Color32::from_rgb(180, 180, 195)
+                            }))
+                            .sense(egui::Sense::click()),
+                        );
+                        if resp_l.clicked() {
+                            volver_a_espanol();
+                        }
+                        resp_l.on_hover_text("Teclado de la ventana activa — clic: volver a español");
                         ui.add_space(12.0);
 
                         let dim = egui::Color32::from_rgb(180, 180, 195);
