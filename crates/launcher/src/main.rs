@@ -78,6 +78,10 @@ mod win {
         pub fn GetKeyboardLayout(thread: u32) -> isize;
         pub fn ActivateKeyboardLayout(hkl: isize, flags: u32) -> isize;
     }
+    #[link(name = "dwmapi")]
+    extern "system" {
+        pub fn DwmGetWindowAttribute(h: isize, attr: u32, val: *mut core::ffi::c_void, len: u32) -> i32;
+    }
 
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
@@ -308,6 +312,14 @@ mod win {
         const WS_EX_NOACTIVATE: isize = 0x0800_0000;
 
         if IsWindowVisible(w) == 0 || GetWindow(w, GW_OWNER) != 0 {
+            return false;
+        }
+        // GlazeWM hides the other workspaces by DWM cloaking, and a cloaked
+        // window still reads as visible. Handing the foreground to one made
+        // GlazeWM jump to its workspace every time the box closed.
+        const DWMWA_CLOAKED: u32 = 14;
+        let mut cloaked = 0u32;
+        if DwmGetWindowAttribute(w, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, 4) == 0 && cloaked != 0 {
             return false;
         }
         let style = GetWindowLongPtrW(w, GWL_STYLE);
