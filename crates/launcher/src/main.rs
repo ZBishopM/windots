@@ -72,6 +72,35 @@ mod win {
         pub fn IsWindow(h: isize) -> i32;
         pub fn GetWindow(h: isize, cmd: u32) -> isize;
         pub fn GetWindowLongPtrW(h: isize, i: i32) -> isize;
+        pub fn GetCursorPos(p: *mut Point) -> i32;
+        pub fn MonitorFromPoint(p: Point, flags: u32) -> isize;
+        pub fn GetMonitorInfoW(mon: isize, mi: *mut MonInfo) -> i32;
+        pub fn GetKeyboardLayout(thread: u32) -> isize;
+        pub fn ActivateKeyboardLayout(hkl: isize, flags: u32) -> isize;
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct Point {
+        pub x: i32,
+        pub y: i32,
+    }
+
+    #[repr(C)]
+    pub struct MonInfo {
+        pub size: u32,
+        pub monitor: [i32; 4],
+        pub work: [i32; 4],
+        pub flags: u32,
+    }
+
+    /// Where the cursor was when the box opened, packed x<<32 | y. Launching
+    /// uses it to pick the workspace on THAT monitor.
+    pub static OPEN_AT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+    pub fn open_point() -> (i32, i32) {
+        let v = OPEN_AT.load(Ordering::Relaxed);
+        ((v >> 32) as i32, v as i32)
     }
 
     pub const EVENT_MODIFY_STATE: u32 = 0x0002;
@@ -129,6 +158,12 @@ mod win {
             let mut other_pid = 0u32;
             let other = GetWindowThreadProcessId(fg, &mut other_pid);
             let me = GetCurrentThreadId();
+            // Type in the language of the window we came from. The input
+            // language is per thread, and this one lives for days: once
+            // something left it on the Chinese IME, every open typed pinyin.
+            if other != 0 {
+                ActivateKeyboardLayout(GetKeyboardLayout(other), 0);
+            }
             if other != 0 && other != me {
                 AttachThreadInput(other, me, 1);
                 SetForegroundWindow(h);
@@ -139,17 +174,26 @@ mod win {
         }
     }
 
-    /// Show centred on the primary monitor and take focus.
+    /// Show centred on the monitor under the mouse and take focus.
     pub fn show(width: f32, height: f32) {
         let h = hwnd();
         if h == 0 {
             return;
         }
         unsafe {
-            let sw = GetSystemMetrics(0) as f32;
-            let x = ((sw - width) / 2.0) as i32;
+            let mut p = Point::default();
+            GetCursorPos(&mut p);
+            OPEN_AT.store(((p.x as i64) << 32) | (p.y as u32 as i64), Ordering::Relaxed);
+            let mut mi = MonInfo { size: std::mem::size_of::<MonInfo>() as u32, monitor: [0; 4], work: [0; 4], flags: 0 };
+            const MONITOR_DEFAULTTONEAREST: u32 = 2;
+            let [l, t, r, _] = if GetMonitorInfoW(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), &mut mi) != 0 {
+                mi.work
+            } else {
+                [0, 0, GetSystemMetrics(0), 0]
+            };
+            let x = l + ((r - l) as f32 - width) as i32 / 2;
             const SWP_NOZORDER: u32 = 0x0004;
-            SetWindowPos(h, 0, x, 220, width as i32, height as i32, SWP_NOZORDER);
+            SetWindowPos(h, 0, x, t + 220, width as i32, height as i32, SWP_NOZORDER);
             ShowWindow(h, SW_SHOW);
         }
         take_foreground();
@@ -678,6 +722,25 @@ fn entry_target(e: &Entry) -> (String, String, String) {
     }
 }
 
+/// GlazeWM puts a new window on the FOCUSED workspace, and the box itself is
+/// ignored by it, so that could be a workspace on the other monitor. Focusing
+/// the workspace already shown under the point where the box was opened
+/// changes nothing on screen; it only decides where the window lands.
+#[cfg(windows)]
+fn focus_workspace_under((x, y): (i32, i32)) {
+    let mut c = rice_common::ipc::Client::new();
+    let Some(mons) = c.monitors() else { return };
+    let ws = mons
+        .iter()
+        .find(|m| x >= m.x && x < m.x + m.width && y >= m.y && y < m.y + m.height)
+        .and_then(|m| m.children.iter().find(|w| w.is_displayed));
+    if let Some(w) = ws {
+        if !w.has_focus {
+            c.focus_workspace(&w.name);
+        }
+    }
+}
+
 fn launch_async(target: String, args: String, dir: String, elevated: bool) {
     std::thread::Builder::new()
         .name("shell-exec".into())
@@ -696,6 +759,7 @@ fn launch_async(target: String, args: String, dir: String, elevated: bool) {
                     CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
                 };
                 let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+                focus_workspace_under(win::open_point());
                 open_via_shell(&target, &args, &dir, elevated);
                 CoUninitialize();
             }

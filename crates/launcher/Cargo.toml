@@ -7,7 +7,7 @@ edition = "2021"
 # Palette, which costs 267 MB resident and 59s of cold start at every login --
 # measured, it was the single largest item in this machine's post-boot phase.
 [dependencies]
-rice-common = { path = "../rice-common", features = ["ui", "settings"] }
+rice-common = { path = "../rice-common", features = ["ui", "settings", "ipc"] }
 eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts"] }
 # Helix's matcher: same scoring as fzf, ~6x faster than skim's fuzzy-matcher,
 # and unlike either it handles non-ASCII and Unicode graphemes correctly.

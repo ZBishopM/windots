@@ -124,6 +124,11 @@ SetTimer(AhkSuspendFlag, 250)
     ; No chord is synthesised. `--show` signals the resident instance and exits.
     ; Nothing here injects keystrokes, because synthetic Win presses on this
     ; machine desynchronise AltSnap and it starts swallowing the spacebar.
+    ;
+    ; Medido 2026-09-27: este atajo SI bloquea el cambio de idioma; las ventanas
+    ; quedaban en ES. Lo que salia en chino era el propio launcher (su hilo se
+    ; habia quedado en el IME chino); ahora hereda el idioma de la ventana de
+    ; la que vienes.
     Run('"' . EnvGet('USERPROFILE') . '\dev\target\release\launcher.exe" --show', , 'Hide')
 }
 
