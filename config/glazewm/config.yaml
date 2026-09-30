@@ -235,6 +235,10 @@ window_rules:
   - commands: ['ignore']
     match:
       - window_process: { equals: 'League of Legends' }
+      # osu!lazer en Fullscreen se minimiza solo al perder el foco; si ademas el
+      # WM la tila, Alt+Tab la restaura, el WM reimpone tamano/foco y vuelve a
+      # minimizarse. Ignorada, el juego es dueno de su ventana.
+      - window_process: { equals: 'osu!' }
 
 binding_modes:
   # When enabled, the focused window can be resized via arrow keys or HJKL.
