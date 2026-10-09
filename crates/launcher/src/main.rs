@@ -988,6 +988,7 @@ impl eframe::App for App {
             row_icons.push(self.icons.get(ctx, &key, &path, attrs));
         }
 
+        let mut reveal: Option<(usize, String)> = None;
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::none()
@@ -1026,8 +1027,15 @@ impl eframe::App for App {
                                name: &str,
                                trail: &str,
                                dim: bool,
-                               icon: Option<egui::TextureId>| {
+                               icon: Option<egui::TextureId>|
+                 -> bool {
                     let rect = ui.allocate_space(egui::vec2(ui.available_width(), ROW_H - 4.0)).1;
+                    // Devuelve si se le hizo clic derecho: el llamador decide que
+                    // significa (en un archivo, abrir su carpeta). Solo se mira
+                    // el derecho; el izquierdo sigue sin hacer nada, como antes.
+                    let right = ui
+                        .interact(rect, ui.id().with(("fila", n)), egui::Sense::click())
+                        .secondary_clicked();
                     let on = n == self.selected;
                     if on {
                         // Same colour, four times the presence: the accepted row
@@ -1085,6 +1093,7 @@ impl eframe::App for App {
                             col(theme::SUBTEXT),
                         );
                     }
+                    right
                 };
 
                 if let Some(r) = &self.calc_row {
@@ -1108,16 +1117,20 @@ impl eframe::App for App {
                     // folder alone keeps the row from repeating itself.
                     let folder = h.path.strip_suffix(&h.name).unwrap_or(&h.path);
                     let folder = folder.trim_end_matches('\\');
-                    row(
-                        ui,
-                        run + apps + k,
-                        &h.name,
-                        folder,
-                        true,
-                        row_icons.get(run + apps + k).copied().flatten(),
-                    );
+                    let n = run + apps + k;
+                    if row(ui, n, &h.name, folder, true, row_icons.get(n).copied().flatten()) {
+                        reveal = Some((n, h.path.clone()));
+                    }
                 }
             });
+
+        // Clic derecho en un archivo: su carpeta, con el archivo seleccionado.
+        // Para una carpeta es lo mismo: abre la que la contiene, con ella marcada.
+        if let Some((n, path)) = reveal {
+            self.selected = n;
+            launch_async("explorer.exe".into(), format!("/select,\"{path}\""), String::new(), false);
+            self.flash = Some(std::time::Instant::now());
+        }
 
         // Only repaint while open, and only while focus is still settling or
         // something is animating -- an idle open window does not need frames.
